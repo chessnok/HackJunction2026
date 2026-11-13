@@ -13,6 +13,18 @@ Template:
 - Refs: ADRs, log entries, upstream issues
 ```
 
+## T-010. Backend `uv sync --extra xpu` dies downloading torch on venue Wi-Fi
+
+- Date: 2026-11-13 · Status: Workaround
+- Symptom: `error: Failed to download torch==2.11.0+xpu ... I/O operation failed during extraction
+  ... network timeout. Try increasing UV_HTTP_TIMEOUT (current value: 30s)`.
+- Cause: slow, flaky venue Wi-Fi (about 0.6 MB/s measured from download.pytorch.org, plus a Wi-Fi
+  switch mid-download). The XPU build needs `torch` (792.5 MiB) and `triton-xpu` (732 MiB).
+- Fix / workaround: `UV_HTTP_TIMEOUT=600 UV_HTTP_RETRIES=10`; install the backend with
+  `--extra cpu` first (CPU torch is about 180 MB; everything else is already in `~/.cache/uv`) to get
+  Studio running, then fetch the XPU build separately. Do not `pkill -f "uv sync ..."` from a shell
+  whose own command line contains that pattern: it kills itself (exit 144).
+
 ## T-009. `git` not installed
 
 - Date: 2026-11-13 · Status: Fixed
@@ -22,7 +34,7 @@ Template:
 
 ## T-008. PyTorch does not see the Arc iGPU, OpenVINO only lists CPU
 
-- Date: 2026-11-13 · Status: Open
+- Date: 2026-11-13 · Status: Fixed (13:13 laptop clock)
 - Symptom: `torch.xpu.is_available() == False` with `UserWarning: XPU device count is zero!`
   (torch 2.15.0+xpu); `openvino.Core().available_devices == ['CPU']`.
 - Cause: GPU compute runtime not installed: `libze1`, `libze-intel-gpu1`, `intel-opencl-icd` absent
@@ -30,8 +42,15 @@ Template:
   The NPU user-space driver exists only inside the `intel-npu-driver` snap
   (`/snap/intel-npu-driver/current/usr/lib/x86_64-linux-gnu/libze_intel_npu.so`), which non-snap
   programs do not see by default.
-- Fix: `sudo apt-get install -y libze1 libze-intel-gpu1 intel-opencl-icd`, then re-check.
-  NPU: still to do (try `LD_LIBRARY_PATH` pointing at the snap's lib dir).
+- Fix:
+  1. `sudo apt-get install -y libze1 libze-intel-gpu1 intel-opencl-icd`, which gives
+     `torch.xpu.is_available() == True` ("Intel(R) Graphics [0xb080]") and OpenVINO `['CPU', 'GPU']`.
+  2. NPU: point the Level Zero loader at both drivers:
+     `ZE_ENABLE_ALT_DRIVERS=/usr/lib/x86_64-linux-gnu/libze_intel_gpu.so.1,/snap/intel-npu-driver/current/usr/lib/x86_64-linux-gnu/libze_intel_npu.so.1`
+     gives OpenVINO `['CPU', 'GPU', 'NPU']`, and torch XPU still works (matmul verified).
+     **Gotcha:** the variable *replaces* the default driver list. With only the NPU driver in it,
+     torch fails with `RuntimeError: No XPU devices are available.`
+  `scripts/studio_backend.sh` sets this automatically.
 - Refs: README Setup step 1.
 
 ## T-007. PyPI install picks `physicalai-train 0.1.0` instead of 0.3.0

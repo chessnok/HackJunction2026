@@ -45,20 +45,15 @@ Agents and humans: read [AGENTS.md](AGENTS.md) first.
      third_party/physical-ai-studio
    ```
 
-4. Run Studio in two terminals:
+4. Run Studio in two terminals, then open http://localhost:3000:
 
    ```bash
-   # Terminal 1: backend, http://localhost:7860
-   cd third_party/physical-ai-studio/application/backend
-   cp -n .env.example .env
-   uv run --extra xpu physicalai-studio serve
+   scripts/studio_backend.sh   # Terminal 1: backend, http://localhost:7860 (iGPU + NPU visible)
+   scripts/studio_ui.sh        # Terminal 2: UI, http://localhost:3000
    ```
 
-   ```bash
-   # Terminal 2: UI, http://localhost:3000
-   cd third_party/physical-ai-studio/application/ui
-   npm install && npm run start
-   ```
+   The scripts run the guide's commands (`uv run --extra xpu physicalai-studio serve`,
+   `npm run start`) and add `ZE_ENABLE_ALT_DRIVERS` so OpenVINO also sees the NPU (T-008).
 
 5. Project tools:
 

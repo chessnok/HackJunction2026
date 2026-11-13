@@ -19,12 +19,12 @@ Update this list when a step is done or blocked; link log / troubleshooting entr
 
 ### Step 1: Station
 
-- [ ] Studio backend runs natively (`uv run --extra xpu physicalai-studio serve`, :7860)
-- [ ] Studio UI runs (`npm run start`, :3000)
+- [x] Studio backend runs natively (`scripts/studio_backend.sh`, :7860), 2026-11-13
+- [x] Studio UI runs (`scripts/studio_ui.sh`, :3000), 2026-11-13
 - [ ] Leader and follower powered and answering on the bus. Arm A OK; arm B silent, see T-005
 - [ ] Cameras mounted firmly: overhead, wrist, second external. Roles decided (docs/hardware.md)
 - [ ] Hugging Face read-only token set in Studio (Settings → General → Hugging Face)
-- [ ] PyTorch sees the Arc iGPU (`torch.xpu.is_available()`), OpenVINO sees GPU and NPU. See T-008
+- [x] PyTorch sees the Arc iGPU (`torch.xpu.is_available()`), OpenVINO sees GPU and NPU (T-008)
 
 ### Step 2: Modal (VLA training on NVIDIA GPUs, $100 credit per participant)
 
