@@ -46,8 +46,22 @@ SO-101 joint IDs: 1 shoulder_pan, 2 shoulder_lift, 3 elbow_flex, 4 wrist_flex, 5
 
 Other EEPROM values read (all IDs unless noted): P=32, D=32, I=0, max torque 1000,
 protection current 300 (ID 2: 500), overload torque 80, mode 0 (position), lock 1,
-max voltage limit 12.0 V (ID 2: 8.0 V), min voltage 4.0 V, LED alarm mask 44
-(overheat | overcurrent | overload), unload mask 47.
+max voltage limit 12.0 V (ID 2: 8.0 V), min voltage 4.0 V,
+LED alarm condition (addr 20) = 47 = voltage | sensor | overheat | overcurrent | overload,
+unloading condition (addr 19) = 44 = overheat | overcurrent | overload.
+(Before 2026-11-13 13:40 our docs had addresses 19 and 20 swapped; lerobot `tables.py` is the reference.)
+
+## Servo red LED: what it means
+
+Per the Feetech STS3215 register map: the servo's red LED flashes while any error bit selected by
+`LED_Alarm_Condition` (addr 20) is active. On our servos (value 47) that is: input voltage outside
+`[min_volt, max_volt]`, magnetic-encoder (sensor) error, overheat, overcurrent, overload. Overheat,
+overcurrent and overload also drop torque (`Unloading_Condition` = 44). Remove the cause and
+power-cycle the arm to clear it. Studio's SO-101 wizard expects the follower on a supply of at least
+7.0 V (12 V PSU) and the leader below 7.0 V (5 V PSU).
+
+Waveshare Bus Servo Adapter (A): for USB control the jumper cap must be on **B** (A = UART mode).
+With the jumper on A, the PC cannot reach the servo bus at all.
 
 Motion tests (2026-11-13, torque limit 500, speed 400–600 steps/s): gripper 1707 → 1900 → 1711 OK;
 gripper full open 1710 → 2922 (stops about 20 steps short of the 2941 target at 50 % torque,
@@ -65,8 +79,13 @@ mechanical end), relaxes to 2875 when torque is released.
 | --- | --- | --- | --- |
 | Intel RealSense D415 | serial 344223023464, `8086:0ad3` | color was `/dev/video10`, IR `/dev/video8` (2026-11-13) | Above / in front of the table, sees the workspace. Role: overhead, TBD |
 | USB2.0_CAM1 | `05a3:9230` | `/dev/video4` | Wrist camera on the follower gripper (sees both jaws) |
-| Second external camera | n/a | n/a | Required by the guide, not connected yet |
+| Second Intel RealSense D415 | serial TBD, `8086:0ad3` | appeared ~13:15 on 2026-11-13 (one D415 on USB bus 2, one on bus 3) | Probably the guide's "second external camera". Placement TBD |
 | HP 5MP built-in (RGB + IR) | `30c9:00fb` | `/dev/video0`, `/dev/video2` | Do not use (films people) |
+
+## Other USB devices that look like robots (do not pick them)
+
+- A Samsung Galaxy phone (`04e8:6860`, serial `R5CX70DZJKN`) plugged in for the hotspot shows up as
+  `/dev/ttyACM2` and is listed **first** by Studio's robot discovery. It is not a servo board.
 
 ## Permissions
 

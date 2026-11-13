@@ -81,11 +81,17 @@ Template:
   now skips bauds it cannot open. The real problem is unchanged: no servo answers at 1M.
   Note: around 12:12 the boards re-enumerated and swapped `ttyACM0` / `ttyACM1`; by-id paths stayed
   correct.
+  In Studio, adding arm B as SO101 Follower fails: `POST /api/robots/catalog/SO101_Follower/identify`
+  returns 400. Identify connects as follower and wiggles the gripper, so it needs answering servos.
+  Re-probe at 13:32: still silent.
 - Cause: unknown. Candidates: servo power supply off or wrong voltage (overvoltage alarm makes every
   servo blink red, see lerobot issue #1010), bus cable from board to first servo not seated, board
   jumper not in the USB position (Waveshare boards).
 - Fix: TBD. Check the PSU label against the servo voltage rating, reseat the 3-pin bus cable,
-  check the jumper, then re-run the probe.
+  check that the Waveshare jumper is on **B** (USB mode, per Waveshare docs), then re-run the probe.
+  Note: servos in a voltage or overload alarm usually still answer PING (with error bits set), so
+  *zero* answers points more to the bus link (jumper on A, cable, no servo power) than to an alarm.
+  LED meaning: see docs/hardware.md, "Servo red LED".
 - Refs: <https://github.com/huggingface/lerobot/issues/1010>
 
 ## T-004. Robotics AI Suite installer is not for Ubuntu 26.04

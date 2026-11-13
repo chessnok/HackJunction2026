@@ -27,8 +27,8 @@ REG: dict[str, tuple[int, int]] = {
     "max_volt": (14, 1),
     "min_volt": (15, 1),
     "max_torque": (16, 2),
-    "led_alarm": (19, 1),
-    "unload_cond": (20, 1),
+    "unload_cond": (19, 1),  # error bits that make the servo drop torque (lerobot: Unloading_Condition)
+    "led_alarm": (20, 1),  # error bits that make the red LED flash (lerobot: LED_Alarm_Condition)
     "p_gain": (21, 1),
     "d_gain": (22, 1),
     "i_gain": (23, 1),
