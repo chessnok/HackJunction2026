@@ -16,6 +16,7 @@ Agents and humans: read [AGENTS.md](AGENTS.md) first.
 | --- | --- |
 | `AGENTS.md` | Rules for agents and humans: record keeping, robot safety, environment, git |
 | `docs/challenge.md` | Official guide link and our progress checklist |
+| `docs/plan/` | Project plan: pipeline, datasets and training (Modal budget), setup |
 | `docs/hardware.md` | Hardware inventory and facts (ports, servos, cameras, power) |
 | `docs/decisions/` | Architecture decision records (ADRs) |
 | `docs/troubleshooting.md` | Errors we hit, causes, fixes |
