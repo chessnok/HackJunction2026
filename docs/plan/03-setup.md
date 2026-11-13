@@ -14,7 +14,7 @@ Claude Code). Never `pip install` into Studio's environment.
 | Env | Contents | Used for |
 | --- | --- | --- |
 | **Studio backend** (`third_party/physical-ai-studio/application/backend`, `uv sync --extra xpu`) | physicalai-studio 0.3.0, physicalai 0.4.1.dev5, physicalai-train 0.3.0, so101 plugin, torch 2.11.0+xpu, openvino 2026.4.1 | Studio UI/backend: robots, recording, training, Run model |
-| **anomalib-env** | `anomalib[openvino,xpu]` | training and exporting the anomaly model only |
+| **anomalib-env** | `anomalib[openvino,xpu]==2.7.0` | training and exporting the anomaly model only |
 | **Runtime for our loop** | see section 5 | `scripts/sort.py`: cameras, ACT via `InferenceModel`, anomaly model via plain `openvino` |
 
 Anomalib and Studio pin different PyTorch builds, which is why they are separate (guide, Step 4).
@@ -24,13 +24,16 @@ Anomalib and Studio pin different PyTorch builds, which is why they are separate
 - [ ] **Arm B (follower) answers on the bus**, see T-005 in `docs/troubleshooting.md` (power
       supply voltage, cable, board). Then confirm leader/follower roles visually and update
       `docs/hardware.md` + `configs/hardware.yaml`.
-- [ ] **Side camera** (second external camera) obtained and connected; record its ID in
-      `docs/hardware.md`.
-- [ ] Cameras mounted **firmly** (overhead D415, side low at 45° to the corner, wrist). Mark
-      positions with tape.
-- [ ] Inspection **corner guide** taped down (ask the organisers if fixtures are allowed).
-- [ ] GOOD / DEFECT plates taped down.
-- [ ] Plain background behind the corner for the side camera; lighting as stable as possible.
+- [ ] **Second D415**: record its serial in `docs/hardware.md` and `configs/hardware.yaml`
+      (`rs-enumerate-devices` or Studio's camera list). The slides list a Pro QHD 2K webcam
+      instead. Ask the organisers whether one is also meant for our station.
+- [ ] Cameras mounted **firmly** on the provided desk mounts: D415 #1 overhead, D415 #2
+      low in front of the inspection spot, wrist camera on the follower. Mark positions with tape.
+- [ ] **Low L-shape** (about 5 mm for Duplo, 3 mm for Lego), corner pointing away from D415 #2,
+      brick at 45° to it, taped at a constant position (ask the
+      organisers if fixtures are allowed).
+- [ ] PERFECT / DEFECT bowls (provided) positioned; mark their places with tape.
+- [ ] Plain background behind the inspection spot for D415 #2; lighting as stable as possible.
 - [ ] USB: if frames drop with 3 cameras, spread them over different laptop ports or lower the
       wrist camera resolution.
 
@@ -44,7 +47,7 @@ Remaining (Studio docs `03-getting-started.md`, `04-environment-setup.md`):
 - [ ] **Robots:** add the SO-101 follower and SO-101 leader (use the `/dev/serial/by-id/...`
       ports from `configs/hardware.yaml`). Arm A is already calibrated: use "Skip verification"
       only if the on-screen arm matches the real one; otherwise run the wizard's calibration.
-- [ ] **Cameras:** add D415 (colour), side, wrist at 640×480 @ 30 FPS. Check each preview. Never
+- [ ] **Cameras:** add both D415s (colour) and the wrist camera at 640×480 @ 30 FPS. Check each preview. Never
       add the built-in HP camera.
 - [ ] **Environment:** follower + leader + the 3 cameras. Use the same environment for recording
       and running.
@@ -79,7 +82,7 @@ From the repo root (`*-env/` is already git-ignored):
 ```bash
 uv venv anomalib-env --python 3.12
 source anomalib-env/bin/activate
-UV_HTTP_TIMEOUT=600 uv pip install "anomalib[openvino,xpu]"     # big download on venue Wi-Fi (T-010)
+UV_HTTP_TIMEOUT=600 uv pip install "anomalib[openvino,xpu]==2.7.0"   # version required by slide 8; big download (T-010)
 ```
 
 Verify:
@@ -88,7 +91,7 @@ Verify:
 python -c "import torch; print(torch.xpu.is_available())"                 # True
 ZE_ENABLE_ALT_DRIVERS=/usr/lib/x86_64-linux-gnu/libze_intel_gpu.so.1,/snap/intel-npu-driver/current/usr/lib/x86_64-linux-gnu/libze_intel_npu.so.1 \
   python -c "import openvino as ov; print(ov.Core().available_devices)"   # ['CPU', 'GPU', 'NPU']
-anomalib --help
+python -c "import anomalib; print(anomalib.__version__)"            # 2.7.0
 ```
 
 `ZE_ENABLE_ALT_DRIVERS` must list **both** drivers or torch XPU breaks (T-008). Training on XPU:
@@ -96,7 +99,7 @@ anomalib --help
 
 ## 5. Runtime environment for our loop
 
-The loop needs: `physicalai` (SO-101 driver + `InferenceModel` for the Studio ACT export),
+The loop needs: `physicalai` (SO-101 driver + `InferenceModel` for the Studio ACT and SmolVLA exports),
 `openvino` (runs the exported Anomalib model directly; the export contains pre/post-processing,
 **to verify**), `opencv`, `pyyaml`.
 
@@ -138,8 +141,8 @@ benchmark_app -m exports/anomalib/model.xml -d NPU -hint latency -t 15
 ## 7. Ready-to-start checklist
 
 - [ ] Both arms answer; teleop works in Studio
-- [ ] 3 cameras show stable 30 FPS previews in one Studio environment
-- [ ] Corner guide and plates fixed; labelled-brick face test done (all 6 faces covered)
+- [ ] 3 cameras (2 × D415, wrist) show stable 30 FPS previews in one Studio environment
+- [ ] L-shape and bowls fixed; labelled-brick test done (F+R before, B+L after the 180° spin, top both times)
 - [ ] HF token set; Modal target healthy
 - [ ] anomalib-env sees XPU; OpenVINO sees NPU
 - [ ] Runtime env decided (Option A or B), stop path implemented

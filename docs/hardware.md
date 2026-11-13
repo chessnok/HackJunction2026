@@ -87,6 +87,13 @@ mechanical end), relaxes to 2875 when torque is released.
 - A Samsung Galaxy phone (`04e8:6860`, serial `R5CX70DZJKN`) plugged in for the hotspot shows up as
   `/dev/ttyACM2` and is listed **first** by Studio's robot discovery. It is not a servo board.
 
+Provided station kit per the organisers' slides (`Intel_Physical AI Hackathon.pdf`, slide 8):
+HP OmniBook Ultra (C2NM8AV) or Dell XPS 16 (DA16260), both Core Ultra X9 388H; SO-ARM101 leader +
+follower + wrist camera; one RealSense D415 and one Pro QHD 2K/60 fps webcam; camera desk mounts,
+USB hub, Legos and bowls, printed robot safety guidelines. Pre-installed: Ubuntu 26.04, NPU driver,
+iGPU driver. Required software: Physical AI Studio, Anomalib v2.7.0. Training: Modal.
+**Difference:** our station has two D415 and no 2K webcam so far (table above).
+
 ## Permissions
 
 - Serial: user `intel` added to `dialout` (effective after re-login); temporary ACLs were set with

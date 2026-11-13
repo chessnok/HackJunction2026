@@ -66,3 +66,19 @@ Update this list when a step is done or blocked; link log / troubleshooting entr
 | Dataset and pipeline quality | 20 | Clean teleoperation data, effective fine-tuning in Studio |
 | System efficiency | 20 | Latency per inference step, thermal headroom, power on Core Ultra |
 | Creativity | 10 | Original ideas beyond the baseline |
+
+### Judging criteria in the organisers' slides (differ from the guide's rubric above)
+
+From `Intel_Physical AI Hackathon.pdf`, slide 7. Ask the organisers which one counts.
+
+| Criterion | Points | What judges look at |
+| --- | --- | --- |
+| End-to-end Physical AI solution | 25 | One integrated closed loop from perception and defect detection to SO-101 action |
+| Defect detection with Anomalib | 20 | Detection quality, normal vs defective handling, how defect outputs are consumed downstream |
+| VLA and Physical AI Studio integration | 20 | Perception results and task instructions translated into robot actions |
+| OpenVINO and Core Ultra Series 3 optimization | 20 | Latency, throughput, deployment efficiency, use of NPU / GPU / CPU |
+| Robotic execution and reliability | 10 | Localization, manipulation accuracy, repeatability, recovery from incorrect or uncertain detections |
+| Innovation and technical demonstration | 5 | Originality, completeness, clarity of demo, architecture and optimization decisions |
+
+Slide 9 "End goal": ACT moves the brick in front of the camera → Anomalib → SmolVLA puts it into
+the "defective" or the "perfect" bowl.
