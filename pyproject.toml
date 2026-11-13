@@ -4,7 +4,20 @@ version = "0.1.0"
 description = "Junction 2026 Intel Physical AI Challenge: SO-101 inspection and sorting"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
-dependencies = ["pyserial>=3.5"]
+dependencies = [
+    "numpy>=2.5.4",
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+# Anomalib dataset capture (hackjunction2026.defect.capture_inspection). Same libraries Studio's
+# backend env has; this extra lets the tool run from the repo env too: uv sync --extra capture
+capture = [
+    "numpy>=2",
+    "opencv-python>=4.10",
+    "pyyaml>=6",
+    "pyrealsense2>=2.56; sys_platform == 'linux'",
+]
 
 [build-system]
 requires = ["hatchling"]

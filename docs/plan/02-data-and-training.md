@@ -7,7 +7,7 @@ We collect five kinds of data:
 
 | Dataset | Used by | Tool | Where it lives (never in git) |
 | --- | --- | --- | --- |
-| A. Inspection images (good + defect) | Anomalib generalized model | our script `scripts/capture_inspection.py` | `captures/anomalib/` |
+| A. Inspection images (good + defect) | Anomalib generalized model | `hackjunction2026.defect.capture_inspection` (`scripts/capture_inspection.sh`) | `captures/anomalib/raw/` |
 | B. Teleoperation episodes: pick | ACT pick policy (step 1) | Physical AI Studio recording UI | Studio storage; export LeRobot v3 copy to `datasets/` |
 | E. Teleoperation episodes: place, with language | SmolVLA place policy (step 6) | Physical AI Studio recording UI | same |
 | C. Waypoints (teach poses) | scripted 180° spin; fallback place | `scripts/record_waypoints.py` | `configs/waypoints.yaml` (small, OK in git) |
@@ -38,13 +38,17 @@ first (AGENTS.md safety rules). Re-record if the inspection guide, bowls or came
 
 ### How to capture (semi-automatic)
 
-The arm collects the data itself using the same scripted motions as the real loop, so training
-images match runtime images exactly:
+Tool: `src/hackjunction2026/defect/capture_inspection.py` (written 2026-11-14, tested with
+`--fake` cameras only; usage in the README). It shows both D415s live and saves only on SPACE:
 
-1. A person puts a brick into the inspection guide (random allowed orientation, upside down half the time).
-2. `capture_inspection.py` runs: arm at `home` → capture overhead / inspection D415 crops → 180°
-   spin → capture overhead / inspection D415 crops → saves 4 images tagged with brick id and view.
-3. Repeat.
+1. A person puts a brick into the L-shape (any allowed orientation; upside down sometimes).
+2. SPACE → `top_pre` + `side_FR`. Turn the brick 180° around the vertical axis (by hand now; later
+   a `--robot` mode can run the scripted spin) → SPACE → `top_post` + `side_BL`.
+3. Next placement / brick (`b`), good/defect (`g`/`d`), undo (`u`).
+
+An OpenCV check refuses a save when no brick is in a crop box, something touches the box border
+(hand) or the image is blurred. Saved PNGs are the crop box enlarged by `save_margin`; the
+manifest records where the box is, so the prepare step can re-crop without recapturing.
 
 ```text
 captures/anomalib/

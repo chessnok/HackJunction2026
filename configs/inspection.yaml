@@ -1,0 +1,45 @@
+# Inspection cameras and capture settings for the Anomalib dataset.
+# Used by: python -m hackjunction2026.defect.capture_inspection (see README "Anomalib dataset").
+# Facts about the cameras live in docs/hardware.md; keep serials in sync with configs/hardware.yaml.
+
+cameras:
+  top:                         # overhead, sees the top face (docs/plan/01-pipeline.md)
+    serial: "344223023464"     # D415 #1; role (top vs side) UNCONFIRMED, check the live preview
+  side:                        # low, in front of the L-shape, sees F+R then B+L
+    serial: ""                 # D415 #2: TBD, get it with --list-cameras
+  width: 1280                  # D415 colour: 1280x720 @ 30 works on USB 3; use 640x480 on USB 2
+  height: 720
+  fps: 30
+
+# Fixed exposure and white balance: auto modes make colours drift between shots, which the
+# anomaly model then sees as "abnormal".
+#   freeze_auto: let auto settle for warmup_s, then lock the values it found (recorded per session)
+#   manual:      use the values below
+#   auto:        leave auto on (not recommended)
+exposure:
+  mode: freeze_auto
+  warmup_s: 3.0
+  manual: {exposure: 166, gain: 64, white_balance: 4600}
+
+# Crop boxes are set with --set-crops and stored in this file (generated, small, OK in git):
+crops_file: configs/inspection_crops.yaml
+
+# Raw images are saved as the crop box enlarged by this fraction of its size on every side, so
+# prepare.py can still adjust the crop later without recapturing, and the rest of the room
+# (people, AGENTS.md) is never stored.
+save_margin: 0.5
+
+# File view names per position. PRE = brick as pushed into the L-shape, POST = after the 180° spin.
+views:
+  pre:  {top: top_pre,  side: side_FR}
+  post: {top: top_post, side: side_BL}
+
+output_dir: captures/anomalib/raw   # git-ignored
+
+# OpenCV quality check before a save (toggle with "c" in the window, e.g. for white bricks).
+check:
+  enabled: true
+  min_saturation: 70           # brick pixels: HSV saturation >= this (Lego/Duplo are colourful)
+  min_brick_fraction: 0.05     # at least this share of the crop box must be brick-coloured
+  border_px: 3                 # the brick blob must not touch the crop box border (hand, arm, off-centre)
+  min_sharpness: 30.0          # variance of the Laplacian of the crop (blur check)

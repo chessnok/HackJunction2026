@@ -107,10 +107,11 @@ The loop needs: `physicalai` (SO-101 driver + `InferenceModel` for the Studio AC
 read-only:
 
 ```bash
-uv run --project third_party/physical-ai-studio/application/backend python scripts/sort.py
+PYTHONPATH=src uv run --no-sync --project third_party/physical-ai-studio/application/backend python scripts/sort.py
 ```
 
-It already has the exact `physicalai` / so101-plugin / OpenVINO versions that produced the export.
+`--no-sync` is required: a plain `uv run` re-syncs that environment and could replace its XPU torch
+build. It already has the exact `physicalai` / so101-plugin / OpenVINO versions that produced the export.
 Check that `cv2` and `yaml` import. Do **not** add packages to it (ADR 0003).
 
 **Option B:** add `physicalai[so101-plugin]`, `openvino`, `opencv-python`, `pyyaml` to this repo's

@@ -258,7 +258,7 @@ All in this repo, `src/hackjunction2026/` + `scripts/` (planned, not written yet
 | `policy.py` | run the Studio ACT and SmolVLA exports via `physicalai.inference.InferenceModel` |
 | `reason.py` | structured detection result → rules → instruction string |
 | `loop.py` + `scripts/sort.py` | the state machine above, stop key, logging, metrics, demo screen |
-| `scripts/capture_inspection.py` | automatic Anomalib dataset capture (see part 2) |
+| `defect/capture_inspection.py` + `scripts/capture_inspection.sh` | Anomalib dataset capture (written, untested on cameras; see part 2) |
 
 A prototype of some of this exists outside the repo in `~/lego-sorter/` (single camera, LeRobot
 API). It is outdated: reuse ideas, not code.

@@ -22,7 +22,8 @@ Agents and humans: read [AGENTS.md](AGENTS.md) first.
 | `docs/troubleshooting.md` | Errors we hit, causes, fixes |
 | `docs/log/` | Daily engineering log |
 | `configs/hardware.yaml` | Stable device addresses used by code |
-| `src/hackjunction2026/` | Our Python package (Feetech bus helper, later: pipeline code) |
+| `configs/inspection.yaml` | Inspection cameras (D415 serials), exposure, crop and capture settings |
+| `src/hackjunction2026/` | Our Python package: Feetech bus helper; `defect/` = Anomalib dataset capture (later: training, detector) |
 | `scripts/` | Command-line tools (`so101_probe.py`, `so101_move.py`) |
 | `third_party/` | Upstream checkouts, **not committed** |
 
@@ -61,6 +62,28 @@ Agents and humans: read [AGENTS.md](AGENTS.md) first.
    ```bash
    uv run scripts/so101_probe.py            # read-only: which servos answer on which bus
    ```
+
+## Anomalib dataset capture (untested on the real cameras)
+
+Photos of bricks in the L-shape for the defect model (plan: `docs/plan/02-data-and-training.md`,
+section A). Runs with Studio's backend environment without modifying it (`uv run --no-sync`).
+Stop recording / Run model / camera previews in Studio first: one program per camera.
+
+```bash
+scripts/capture_inspection.sh --list-cameras      # D415 serials + USB type → configs/inspection.yaml
+scripts/capture_inspection.sh --set-crops         # draw the crop box per camera → configs/inspection_crops.yaml
+scripts/capture_inspection.sh --brick 2x2red      # capture session: SPACE = save, see the keys in the window
+scripts/capture_inspection.sh --fake --once --brick test   # self-test without cameras
+```
+
+Without Studio (e.g. a teammate's machine): `uv sync --extra capture`, then
+`uv run --extra capture python -m hackjunction2026.defect.capture_inspection ...`.
+`--webcam 0 --output-dir /tmp/x --no-check` tries the window with an ordinary webcam
+(**test only, never on the station laptop**: AGENTS.md forbids its built-in camera).
+
+One cycle: brick in the L-shape → SPACE (`top_pre` + `side_FR`) → turn the brick 180° → SPACE
+(`top_post` + `side_BL`). Output: `captures/anomalib/raw/<session>/{good,defect}/*.png` +
+`manifest.jsonl` (git-ignored). Reuse `--session <name>` to continue a session.
 
 ## Status
 
