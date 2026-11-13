@@ -1,0 +1,37 @@
+# Python
+.venv/
+*-env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Upstream checkouts (see README: Setup)
+third_party/
+
+# Data and artifacts: never commit
+data/
+datasets/
+captures/
+outputs/
+exports/
+checkpoints/
+experiments/
+lightning_logs/
+wandb/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.onnx
+
+# Secrets
+.env
+*.env
+!.env.example
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

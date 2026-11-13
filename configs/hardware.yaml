@@ -1,0 +1,22 @@
+# Stable device addresses for code. Facts and history: docs/hardware.md.
+# Roles are UNCONFIRMED until someone checks visually (see docs/hardware.md).
+
+arms:
+  arm_a:
+    role: leader  # unconfirmed
+    port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B91030613-if00
+  arm_b:
+    role: follower  # unconfirmed; not answering yet (T-005)
+    port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B3D041025-if00
+
+servo_bus:
+  baud: 1000000
+  joint_ids: {shoulder_pan: 1, shoulder_lift: 2, elbow_flex: 3, wrist_flex: 4, wrist_roll: 5, gripper: 6}
+
+cameras:
+  realsense:
+    model: D415
+    serial: "344223023464"
+  wrist:
+    name: USB2.0_CAM1  # resolve /dev/videoN via /sys/class/video4linux/*/name
+    usb_id: "05a3:9230"
