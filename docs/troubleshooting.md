@@ -56,8 +56,12 @@ Template:
 - Symptom: `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B3D041025-if00` opens, but
   `scripts/so101_probe.py` gets no reply on IDs 0–20 at 1M / 500k / 250k / 115.2k / 57.6k / 38.4k
   baud. A blinking red LED was reported on the hardware.
-  Later (~12:45 laptop clock, after a Wi-Fi switch and people handling the arms) opening the port
-  itself failed: `cannot open: (22, 'Invalid argument')`. The device node still exists.
+  Later (~12:45 laptop clock) the probe printed `cannot open: (22, 'Invalid argument')`. That was a
+  red herring: the board opens fine at 1M / 500k / 115.2k / 57.6k / 38.4k but the CH343 under
+  `cdc_acm` rejects the non-standard 250000 baud with EINVAL, and the probe stopped there. The probe
+  now skips bauds it cannot open. The real problem is unchanged: no servo answers at 1M.
+  Note: around 12:12 the boards re-enumerated and swapped `ttyACM0` / `ttyACM1`; by-id paths stayed
+  correct.
 - Cause: unknown. Candidates: servo power supply off or wrong voltage (overvoltage alarm makes every
   servo blink red, see lerobot issue #1010), bus cable from board to first servo not seated, board
   jumper not in the USB position (Waveshare boards).
@@ -79,6 +83,9 @@ Template:
   `sudo setfacl -m u:$USER:rw /dev/ttyACM0 /dev/ttyACM1`; the terminal wrapped the line and ran
   `/dev/ttyACM1` as its own command.
 - Fix: paste commands as one line, or run them one at a time.
+- Happened again with a long `apt-get install` line (`libclang-dev: command not found`,
+  `intel-opencl-icd: command not found`): only the first part was installed. Keep sudo commands
+  short; split long package lists into several commands.
 
 ## T-002. Serial port `Permission denied`
 

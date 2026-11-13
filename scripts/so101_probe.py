@@ -23,8 +23,9 @@ def probe(port: str) -> None:
         try:
             bus = Bus(port, baud)
         except Exception as exc:  # noqa: BLE001
-            print(f"  cannot open: {exc}")
-            return
+            # e.g. the CH343 board under cdc_acm rejects 250000 baud with EINVAL (T-005)
+            print(f"  baud {baud}: cannot open ({exc}), skipped")
+            continue
         with bus:
             ids = bus.scan()
             if not ids:
