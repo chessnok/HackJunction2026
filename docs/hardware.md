@@ -67,11 +67,22 @@ Motion tests (2026-11-13, torque limit 500, speed 400–600 steps/s): gripper 17
 gripper full open 1710 → 2922 (stops about 20 steps short of the 2941 target at 50 % torque,
 mechanical end), relaxes to 2875 when torque is released.
 
-### Arm B: probably the **follower** (unconfirmed), currently NOT answering
+### Arm B: **follower** (12 V supply)
 
-- Port: `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B3D041025-if00` (was `/dev/ttyACM1`)
-- The board enumerates, but no servo answers PING on IDs 0–20 at any baud rate
-  (1M, 500k, 250k, 115.2k, 57.6k, 38.4k). A blinking red LED was reported. See T-005.
+- Port: `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B3D041025-if00` (`ttyACMx` number changes)
+- History: no servo answered until about 14:20 on 2026-11-13 (T-005). New servos were renumbered
+  with our tools (14:30 ID 2, 14:35 ID 5, 14:40 ID 6; see the log).
+- State 2026-11-13 ~15:40: IDs 1–6 answer 10/10, firmware 3.10, 12.2–12.3 V, Status 0, calibrated
+  by the team in Studio. Torque was left **on** after Studio disconnected.
+
+| ID | Joint | Min | Max | Homing offset |
+| --- | --- | --- | --- | --- |
+| 1 | shoulder_pan | 764 | 3467 | -1644 |
+| 2 | shoulder_lift | 826 | 3220 | 1817 |
+| 3 | elbow_flex | 853 | 3054 | -1042 |
+| 4 | wrist_flex | 828 | 3292 | -1940 |
+| 5 | wrist_roll | 162 | 3992 | 1115 |
+| 6 | gripper | 2047 | 2941 | 1559 |
 
 ## Cameras
 

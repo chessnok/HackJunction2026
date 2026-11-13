@@ -71,7 +71,9 @@ Template:
 
 ## T-005. Arm B board enumerates but no servo answers; red LED blinking
 
-- Date: 2026-11-13 · Status: Open
+- Date: 2026-11-13 · Status: Fixed (~15:35). The team replaced or renumbered servos and fixed the
+  power (the bus once looked dead only because the 12 V supply was unplugged). After that all six IDs
+  answered at 12.2 V. The original root cause was not pinned down.
 - Symptom: `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B3D041025-if00` opens, but
   `scripts/so101_probe.py` gets no reply on IDs 0–20 at 1M / 500k / 250k / 115.2k / 57.6k / 38.4k
   baud. A blinking red LED was reported on the hardware.
