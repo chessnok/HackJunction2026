@@ -36,7 +36,7 @@ def probe(port: str) -> None:
                 volt = f"{r['volt_x10'] / 10:.1f}V" if r["volt_x10"] is not None else "?"
                 print(
                     f"   id={sid} {SO101_JOINTS.get(sid, '?'):13s} {MODELS.get(r['model'], r['model'])}"
-                    f" fw={r['fw_major']}.{r['fw_minor']} pos={r['pos']:<5}"
+                    f" fw={r['fw_major']}.{r['fw_minor']} pos={r['pos']!s:<5}"
                     f" limits=[{r['min_pos']},{r['max_pos']}] homing={sign_mag(r['homing_offset'], 11)}"
                     f" torque={'ON' if r['torque_enable'] else 'off'} {volt} {r['temp_c']}C"
                     f" status={decode_status(r['status']) or 'OK'}"

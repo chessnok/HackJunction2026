@@ -99,19 +99,23 @@ class Bus:
     def transact(self, sid: int, instr: int, params: tuple[int, ...] = (), expect: int = 0):
         """Send one instruction; return (error_byte, payload) or None if there is no valid reply."""
         s = self.ser
-        s.reset_input_buffer()
-        s.write(packet(sid, instr, params))
-        s.flush()
         want = 6 + expect
         buf = b""
-        deadline = time.monotonic() + self.reply_timeout_s
-        while time.monotonic() < deadline:
-            chunk = s.read(s.in_waiting or 1)
-            if chunk:
-                buf += chunk
-                i = buf.find(b"\xff\xff")
-                if i >= 0 and len(buf) - i >= want:
-                    break
+        try:
+            s.reset_input_buffer()
+            s.write(packet(sid, instr, params))
+            s.flush()
+            deadline = time.monotonic() + self.reply_timeout_s
+            while time.monotonic() < deadline:
+                chunk = s.read(s.in_waiting or 1)
+                if chunk:
+                    buf += chunk
+                    i = buf.find(b"\xff\xff")
+                    if i >= 0 and len(buf) - i >= want:
+                        break
+        except serial.SerialException:
+            # e.g. another process (Studio) is using the port at the same time
+            return None
         i = buf.find(b"\xff\xff")
         if i < 0 or len(buf) - i < 6:
             return None
@@ -142,5 +146,27 @@ class Bus:
         addr, size = REG[name]
         if addr < EEPROM_END:
             raise PermissionError(f"{name} (addr {addr}) is EEPROM; refusing, see AGENTS.md safety rule 5")
+        return self._write_raw(sid, addr, size, value)
+
+    def write_eeprom(self, sid: int, name: str, value: int, *, human_approved: bool) -> bool:
+        """Write an EEPROM register (unlock, write, relock). Only with explicit human approval.
+
+        AGENTS.md safety rule 5: every EEPROM write must be requested by a human and logged.
+        """
+        if not human_approved:
+            raise PermissionError("EEPROM writes need explicit human approval (AGENTS.md rule 5)")
+        addr, size = REG[name]
+        if addr >= EEPROM_END:
+            raise ValueError(f"{name} is a RAM register; use write()")
+        lock_addr, _ = REG["lock"]
+        if not self._write_raw(sid, lock_addr, 1, 0):  # unlock EEPROM
+            return False
+        ok = self._write_raw(sid, addr, size, value)
+        relock_id = value if name == "id" else sid  # after an ID change the servo answers to the new ID
+        time.sleep(0.05)
+        self._write_raw(relock_id, lock_addr, 1, 1)
+        return ok
+
+    def _write_raw(self, sid: int, addr: int, size: int, value: int) -> bool:
         data = [value & 0xFF] + ([(value >> 8) & 0xFF] if size == 2 else [])
         return self.transact(sid, WRITE, (addr, *data)) is not None
