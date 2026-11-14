@@ -13,6 +13,21 @@ Template:
 - Refs: ADRs, log entries, upstream issues
 ```
 
+## T-013. Every camera preview fails: "no publisher responded within timeout"
+
+- Date: 2026-11-13 · Status: Workaround
+- Symptom: after Studio was force-killed, every camera preview in Studio failed with
+  `physicalai.capture.errors.CaptureTimeoutError: no publisher responded within timeout`
+  (`api/camera.py:135` → `physicalai/capture/transport/_shared_camera.py:326`). Opening the same
+  D415 directly with pyrealsense2 at the same mode worked (about 20 fps).
+- Cause: cameras are shared between processes via iceoryx2 (shared memory, `/tmp/iceoryx2`,
+  `/dev/shm/iox2_*`). `SharedCamera.connect()` only starts a publisher when `_probe_service()` finds
+  none. SIGKILLed publishers (T-012) left their services behind, so the probe saw a phantom publisher
+  and Studio waited for frames forever. `Node.try_cleanup_dead_nodes()` reported 0 dead nodes because
+  the running backend held the stale services open.
+- Fix / workaround: stop Studio completely, then (with no process mapping iceoryx2) delete
+  `/tmp/iceoryx2` and `/dev/shm/iox2_*`, then start Studio. `scripts/studio_stop.sh` now does this.
+
 ## T-012. Studio backend ignores SIGTERM; orphaned camera workers keep cameras busy
 
 - Date: 2026-11-13 · Status: Workaround
