@@ -13,6 +13,24 @@ Template:
 - Refs: ADRs, log entries, upstream issues
 ```
 
+## T-021. OVMS loads gemma-4 but disables `/v3/chat/completions` ("Chat template is not compatible with minja")
+
+- Date: 2026-11-14 · Status: Workaround
+- Symptom: `scripts/vlm_server.sh start gemma-4-26b-a4b-it-int4-ov` (OVMS 2026.4.1) reports ready, but the
+  log says `Basic render probe: exception: Expected closing parenthesis in call args at row 260, column 29`
+  and `Chat template is not compatible with minja — basic rendering failed. Disabling /chat/completions
+  endpoint for this model.`
+- Cause: the model's `chat_template.jinja` (HF `OpenVINO/gemma-4-26b-a4b-it-int4-ov`, same file in
+  `gemma-4-31B-it-int4-ov`) passes three adjacent string literals to `raise_exception(...)` (implicit
+  concatenation, lines 258–262, tool-call error path). Jinja2 accepts that; OVMS's minja parser does not.
+- Fix (local edit of the downloaded model, original kept): join the three literals into one string:
+  `cp chat_template.jinja chat_template.jinja.orig`, then replace the call with
+  `{{- raise_exception("chat_template: tool_calls[].function.arguments must be a JSON object (mapping), not a string. Deserialize arguments before passing to the template.") -}}`.
+  After a restart only the warning `Minja cannot render this template's tool calls correctly` is left
+  (we use no tools). `scripts/vlm_fetch_model.sh` would re-download the original file (size differs):
+  re-apply after a re-fetch.
+- Refs: ADR 0005.
+
 ## T-020. Anomalib export prints `RuntimeError: ... No Adapter To Version $17 for Pad` but works
 
 - Date: 2026-11-14 · Status: Workaround (harmless)
