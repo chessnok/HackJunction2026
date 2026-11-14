@@ -1,7 +1,8 @@
 # Patches for Physical AI Studio (`junction2026` @ 17714488)
 
-Our local changes, kept as branches in `third_party/physical-ai-studio` and exported here so the
-team can re-create them. Apply on a fresh clone of the `junction2026` branch:
+Our changes to Studio. The same commits are pushed as branches to the private repo
+`chessnok/physical-ai-studio-hj` (`hj/realsense-rgbd`, `hj/state-snapshots` + notes in
+`HACKJUNCTION.md`); prefer cloning that. These patch files are a backup. Apply on a fresh clone of the `junction2026` branch:
 
 ```bash
 cd third_party/physical-ai-studio
@@ -12,7 +13,7 @@ git checkout -b hj/state-snapshots && git am ../../patches/physical-ai-studio/sn
 | Series | What | Status |
 | --- | --- | --- |
 | `0001–0006` | RealSense color + aligned depth recording, Studio-run camera publishers, training excludes depth, UI (ADR 0004) | reviewed: "deploy after fixes" |
-| `0007–0013` | Fixes from the review: half-resolution depth + discard on drops, seqlock store, orphan sweep by registry, same-device check, dataset warning, single-image policy, edge cases | re-review in progress |
-| `snapshots/0001–0003` | Space-hotkey state snapshots (frames, depth, joints, intrinsics) | re-review in progress |
+| `0007–0013` | Fixes from the review: half-resolution depth + discard on drops, seqlock store, orphan sweep by registry, same-device check, dataset warning, single-image policy, edge cases | re-review stopped before finishing: not independently re-verified |
+| `snapshots/0001–0003` | Space-hotkey state snapshots (frames, depth, joints, intrinsics) | re-review stopped before finishing: not independently re-verified |
 
 Not deployed yet: Studio still runs `junction2026` until the re-review passes.

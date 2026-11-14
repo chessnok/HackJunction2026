@@ -1,6 +1,8 @@
 # 0004. Patch Studio to record RealSense color + depth
 
-- Status: Proposed (implemented on branch `hj/realsense-rgbd`, under independent review)
+- Status: Proposed (branches `hj/realsense-rgbd` / `hj/state-snapshots` in the private repo
+  `chessnok/physical-ai-studio-hj`; first review: deploy after fixes; fixes done; re-review of the
+  fixes stopped before finishing)
 - Date: 2026-11-13
 - Deciders: team
 

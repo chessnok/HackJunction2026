@@ -40,12 +40,16 @@ Agents and humans: read [AGENTS.md](AGENTS.md) first.
 
 2. Tools: [uv](https://docs.astral.sh/uv/) and Node.js >= 24.2 with npm >= 11.14 (we use Node 26 via nvm).
 
-3. Physical AI Studio, `junction2026` branch:
+3. Physical AI Studio. Our private copy has upstream `junction2026` plus our patches
+   (RealSense RGB-D recording, camera fixes, Space-hotkey snapshots; see its `HACKJUNCTION.md`):
 
    ```bash
-   git clone -b junction2026 https://github.com/open-edge-platform/physical-ai-studio.git \
+   git clone -b hj/state-snapshots git@github.com:chessnok/physical-ai-studio-hj.git \
      third_party/physical-ai-studio
    ```
+
+   Plain upstream instead: `git clone -b junction2026 https://github.com/open-edge-platform/physical-ai-studio.git third_party/physical-ai-studio`.
+   The robot laptop still runs plain `junction2026` until the patches are accepted (ADR 0004).
 
 4. Run Studio in two terminals, then open http://localhost:3000:
 
