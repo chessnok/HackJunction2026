@@ -6,6 +6,16 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT/third_party/physical-ai-studio/application/backend"
 [ -f .env ] || cp .env.example .env
 
+# Orphaned workers from a previous (killed) backend keep cameras busy (T-012).
+if pgrep -f "physicalai-studio serve" >/dev/null; then
+  echo "Studio backend is already running; stop it first: scripts/studio_stop.sh" >&2
+  exit 1
+fi
+if orphans=$(pgrep -f "$PWD/.venv/bin/python"); then
+  echo "killing orphaned Studio workers: $(echo $orphans)"
+  kill -9 $orphans 2>/dev/null || true
+fi
+
 # The NPU user-space driver ships only in the intel-npu-driver snap. ZE_ENABLE_ALT_DRIVERS
 # replaces the default driver list, so the GPU driver must be listed too or torch.xpu breaks.
 GPU_DRV=/usr/lib/x86_64-linux-gnu/libze_intel_gpu.so.1

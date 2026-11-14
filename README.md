@@ -54,6 +54,8 @@ Agents and humans: read [AGENTS.md](AGENTS.md) first.
    scripts/studio_ui.sh        # Terminal 2: UI, http://localhost:3000
    ```
 
+   Stop both with `scripts/studio_stop.sh` (it also kills orphaned workers, T-012).
+
    The scripts run the guide's commands (`uv run --extra xpu physicalai-studio serve`,
    `npm run start`) and add `ZE_ENABLE_ALT_DRIVERS` so OpenVINO also sees the NPU (T-008).
 
