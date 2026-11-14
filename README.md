@@ -375,6 +375,21 @@ Needs the poses `observe`, `photo`, `bowl_good` and `bowl_defect` in `configs/po
 Settings: `configs/sort_cycle.yaml`. Log and frames go to `captures/sort_cycle/<time>/`.
 Stop with Ctrl+C or `q` at a `--step` prompt; the arm holds, and the script then asks whether to drop gripper torque.
 
+### Calibrating the wrist homography by moving one brick (`scripts/calib_wrist_homography.py`, untested on the robot)
+
+Put ONE brick at the photo spot and nothing else on the sheet. The robot then:
+1. grasps the brick at the photo spot;
+2. at each of about 6 reachable points, puts it down, looks from `observe` and picks it up again;
+3. fits `configs/table_homography.yaml` (RANSAC + leave-one-out mm);
+4. returns the brick to the photo spot.
+
+Servo 6 is logged closed empty and closed on the brick (`summary.json`) to set the holding thresholds.
+
+```bash
+PYTHONPATH=src $PY scripts/calib_wrist_homography.py               # dry run: the point list, moves nothing
+PYTHONPATH=src $PY scripts/calib_wrist_homography.py --go --step   # real, asks before every move
+```
+
 ## Status
 
 See [docs/challenge.md](docs/challenge.md) and the latest file in [docs/log/](docs/log/).
