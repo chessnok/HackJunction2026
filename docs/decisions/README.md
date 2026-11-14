@@ -18,3 +18,4 @@ Numbers are never reused. To change a decision, write a new ADR and mark the old
 | [0010](0010-brick-localization-colour-cv-local-vlm-only.md) | Localize bricks with colour CV on the two D415s; VLMs only local and only as an option | Proposed |
 | [0011](0011-model-weights-in-git-lfs.md) | Keep released model weights and annotations in git LFS under `artifacts/` | Accepted |
 | [0012](0012-merge-grasp-dataset-new-plus-old-tails.md) | Train grasping on NEW plus the data-driven grasp tail of every OLD episode | Proposed |
+| [0013](0013-sorting-cycle-state-machine.md) | Sorting cycle as one state machine: servo-6 grasp check, scripted re-grasp, raise after every release | Accepted (untested on robot) |

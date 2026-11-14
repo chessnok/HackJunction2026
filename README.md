@@ -357,6 +357,24 @@ box = json.loads(json.load(r)["choices"][0]["message"]["content"])  # {"found": 
 # pixels: x = bbox_2d[0] / 1000 * width, y = bbox_2d[1] / 1000 * height, ...
 ```
 
+## Sorting cycle (`scripts/sort_cycle.py`, ADR 0013; untested on the robot)
+
+observe → find the brick → hover → grasp (checked on servo 6, 3 tries) → photo spot → release and raise →
+photo + PatchCore + mark classifier (NPU) → re-grasp → good / defect bowl → release and raise → observe.
+
+```bash
+PY=third_party/physical-ai-studio/application/backend/.venv/bin/python
+export ZE_ENABLE_ALT_DRIVERS=/usr/lib/x86_64-linux-gnu/libze_intel_gpu.so.1,/snap/intel-npu-driver/current/usr/lib/x86_64-linux-gnu/libze_intel_npu.so.1
+PYTHONPATH=src $PY scripts/sort_cycle.py --placeholder-bowls --target 220,40   # dry run, moves nothing
+PYTHONPATH=src $PY scripts/sort_cycle.py --go --step                            # real, asks before every move
+PYTHONPATH=src $PY scripts/sort_cycle.py --go --cycles 5 --grasp act            # real, ACT for the first grasp
+```
+
+Needs the poses `observe`, `photo`, `bowl_good` and `bowl_defect` in `configs/poses.yaml`. Save them with
+`$PY scripts/so101_goto.py save <name> --from leader`, with Studio's environment closed.
+Settings: `configs/sort_cycle.yaml`. Log and frames go to `captures/sort_cycle/<time>/`.
+Stop with Ctrl+C or `q` at a `--step` prompt; the arm holds, and the script then asks whether to drop gripper torque.
+
 ## Status
 
 See [docs/challenge.md](docs/challenge.md) and the latest file in [docs/log/](docs/log/).
