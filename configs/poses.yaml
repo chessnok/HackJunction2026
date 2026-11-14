@@ -32,3 +32,15 @@ photo:
   saved: '2026-11-14T09:36:15'
   snapshot: 20261114-093615-465
   note: place-and-photograph spot for the sort cycle (release the brick here, then raise). Read from Studio's teleop session via a state snapshot, all joints as measured (wrist_roll / motor 5 matters, keep it). Replaces the 09:34 version.
+bowl_defect:
+  joints:
+    shoulder_pan: 65.52
+    shoulder_lift: -6.6
+    elbow_flex: 23.85
+    wrist_flex: 73.94
+    wrist_roll: -6.42
+    gripper: 2.8
+  from: follower
+  saved: '2026-11-14T09:37:45'
+  snapshot: 20261114-093745-985
+  note: release over the defect bowl. Read from Studio's teleop session via a state snapshot, all joints as measured.
