@@ -1,0 +1,3 @@
+Look closely at every photo. A brick counts as broken if and only if a black marker mark (a line, arc, cross, dot or scribble drawn on the plastic) is clearly visible on it in at least one photo. Moulded studs, holes, shadows and edges are not marks.
+
+Is this brick broken?
