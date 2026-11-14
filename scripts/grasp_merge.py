@@ -66,7 +66,8 @@ def cmd_cuts(args: argparse.Namespace) -> None:
     C.write_outputs(Path(args.out), rows, ref, p, extra)
     df = pd.DataFrame(rows)
     print(C.criterion_text(p, ref))
-    print(df[["episode", "length", "cut_frame", "kept_frames", "h_mm", "d_mm", "gripper", "score", "source",
+    print(df[["episode", "length", "cut_frame", "end_frame", "kept_frames", "h_mm", "d_mm", "gripper", "score",
+              "source",
               "flags"]].to_string(index=False))
     k = df[df.source != "skip"].kept_frames
     print(f"kept frames: median {k.median():.0f} ({k.median() / fps:.1f} s), range {k.min()}-{k.max()}, "

@@ -71,6 +71,7 @@ def draw_overlay(img: np.ndarray, i: int, ep: dict, feat: dict | None, fps: floa
                  text_at: str = "bottom") -> np.ndarray:
     H, W = img.shape[:2]
     n, cut = ep["length"], ep["cut_frame"]
+    end = ep.get("end_frame", n - 1)
     skip = ep.get("source") == "skip"
     out = img.copy()
     font, small = cv2.FONT_HERSHEY_SIMPLEX, 0.38
@@ -88,7 +89,7 @@ def draw_overlay(img: np.ndarray, i: int, ep: dict, feat: dict | None, fps: floa
     label = conf + (" " + ",".join(ep["flags"]) if ep["flags"] else "")
     (tw, _), _ = cv2.getTextSize(label, font, small, 1)
     text(label, (W - tw - 5, y1), color)
-    if i >= cut and not skip:
+    if cut <= i <= end and not skip:
         cv2.rectangle(out, (0, 0), (W - 1, H - BAR_H - 1), (255, 40, 40), 3)
         text("CUT", (W - 52, y2 + 2), (255, 60, 60), 0.5)
         cv2.fillPoly(out, [np.array([[W - 16, y2 - 9], [W - 16, y2 + 1], [W - 8, y2 - 4]])], (255, 60, 60))
@@ -96,7 +97,7 @@ def draw_overlay(img: np.ndarray, i: int, ep: dict, feat: dict | None, fps: floa
     y0 = H - BAR_H
     out[y0:, :] = (90, 90, 90)
     if not skip:
-        out[y0:, _x(cut, n, W):] = (40, 170, 70)
+        out[y0:, _x(cut, n, W):_x(end, n, W) + 1] = (40, 170, 70)
     for f, c in ((ep.get("close_frame"), (0, 220, 255)), (ep.get("alt_cut_frame"), (255, 220, 0)),
                  (cut, (255, 30, 30))):
         if f is not None and f < n:
@@ -172,13 +173,13 @@ def make_clips(dataset_root: Path, cuts_doc: dict, feat, out_dir: Path, camera: 
                 raise RuntimeError(f"episode {e}: decoded {n_frames} frames, expected {ep['length']}")
             log(f"ep {e:3d}: {n_frames} frames, {clip.stat().st_size / 1e3:.0f} kB, {time.time() - t0:.1f} s"
                 + (f" (waited {waited:.0f} s for load)" if waited > 1 else ""))
-        index.append({k: ep.get(k) for k in ("episode", "task", "length", "cut_frame", "auto_cut_frame",
+        index.append({k: ep.get(k) for k in ("episode", "task", "length", "cut_frame", "end_frame", "auto_cut_frame",
                                              "alt_cut_frame", "close_frame", "kept_frames", "confidence",
                                              "flags", "source", "h_mm", "d_mm", "gripper")}
                      | {"fps": fps, "clip": clip.name, "clip_bytes": clip.stat().st_size if clip.exists() else None})
     doc = {"dataset": cuts_doc["old_dataset"], "camera": camera, "fps": fps, "size": list(size), "codec": "h264",
            "criterion": cuts_doc["criterion"], "flag_help": cuts_doc["flag_help"],
-           "legend": {"border": "red border and CUT: frames from the cut on (kept)",
+           "legend": {"border": "red border and CUT: kept frames [cut_frame, end_frame]",
                       "bar": "grey = dropped, green = kept, red = cut, yellow = alternative cut (gripper ignored), "
                              "cyan = close, white = playhead",
                       "text": "h = gripper-tip height above the table, d = horizontal tip-to-brick distance, "

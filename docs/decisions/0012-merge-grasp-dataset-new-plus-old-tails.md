@@ -3,6 +3,8 @@
 - Status: Proposed (cuts await a human review of the clips)
 - Date: 2026-11-14
 - Deciders: team lead (user), agent
+- Amended 2026-11-14 (user request): reviewers can also trim the end of an OLD tail; the kept
+  range is `[cut_frame, end_frame]` (overrides `episode,cut_frame|auto[,end_frame]`).
 
 ## Context
 

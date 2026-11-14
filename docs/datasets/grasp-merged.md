@@ -16,7 +16,7 @@ Code: `src/hackjunction2026/grasp_merge/`, entry point `scripts/grasp_merge.py`.
 | Studio | **not imported yet**: v0 uses the automatic cuts; the user is setting cuts by hand (`configs/grasp_merge_overrides.csv`), then rebuild and import |
 | Episodes / frames | 96 / 12756 (v0, 193 MB, one video file per camera) |
 | Merged episodes 0-28 | NEW episodes 0-1, 3-29 (whole), 4778 frames |
-| Merged episodes 29-95 | OLD episodes 0-66, frames `[cut_frame, end)`, 7978 frames |
+| Merged episodes 29-95 | OLD episodes 0-66, frames `[cut_frame, end_frame]` (v0: end_frame = last frame), 7978 frames |
 | Tasks | names kept as recorded (21 distinct, see below) |
 | Format | LeRobot v3.0, 30 fps, same features as both sources: `observation.state` and `action` (6, Studio normalized), cameras `top` / `floor` 848x480, `arm` 1024x768, AV1 (yuv420p, g 2, crf 30, preset 12) |
 | Provenance | `meta/grasp_merge.json` inside the dataset: sources, cut per OLD episode, overrides, criterion, code commit |
@@ -80,7 +80,8 @@ Rule (`cuts.py`, parameters in `cuts.json`):
    `((h - 120.3) / 15.1)^2 + (max(0, d - 25.1) / 12.7)^2` (being closer to the brick than NEW's
    median is not penalised).
 5. **Cut** = the latest of those frames with score <= best + 0.25 (the last hover frame before
-   the descent, not the middle of a long hover). Keep `[cut_frame, end)`; frame_index and
+   the descent, not the middle of a long hover). Keep `[cut_frame, end_frame]`, inclusive;
+   `end_frame` is the episode's last frame unless a reviewer trims the end; frame_index and
    timestamp restart at 0.
 6. For review only: `alt_cut_frame` = the same rule over all frames before the close with the
    gripper ignored (where the arm hovered when the jaws opened only during the descent).
@@ -156,7 +157,7 @@ the end of the episode agree to 16 mm median in NEW, 12 mm in OLD.
 - OLD tails: decoded from the cut and re-encoded through LeRobot's own writer
   (`LeRobotDataset.create` / `add_frame` / `save_episode`, streaming encoder, as Studio records),
   one single-episode dataset per (episode, cut) in a cache
-  (`captures/merge_review/work/old_tails/ep<NNN>_cut<CCCC>/`) that is kept between builds: a rebuild
+  (`captures/merge_review/work/old_tails/ep<NNN>_cut<CCCC>_end<EEEE>/`) that is kept between builds: a rebuild
   encodes only tails whose cut changed (2-4 s each) and reuses the rest unchanged. The cache was seeded
   from v0 with `seed-cache` (lossless split: each tail starts on a keyframe).
   Encoder from OLD's `info.json` via LeRobot's `encoder_config_from_video_info` (libsvtav1, yuv420p,
@@ -206,7 +207,12 @@ the user's go-ahead and never commit the output.
 ## Re-run with corrections
 
 1. Write corrections to `configs/grasp_merge_overrides.csv`, one line per OLD episode:
-   `episode,cut_frame` (first frame kept) or `episode,skip`. (On 2026-11-14 the user's local cut tool,
+   `episode,cut_frame[,end_frame]` or `episode,skip`. `cut_frame` is the first frame kept, or `auto`
+   to keep the automatic cut; `end_frame` (optional) is the last frame kept, inclusive. Examples:
+   `12,140` (new start, keep to the end), `12,auto,250` (automatic start, end at frame 250),
+   `12,140,250`, `40,skip`. A range that does not satisfy `0 <= cut_frame <= end_frame <= last
+   frame` stops `cuts` with an error; a kept range that ends before the close gets the flag
+   `ends_before_close`. Tests: `tests/test_grasp_merge_overrides.py`. (On 2026-11-14 the user's local cut tool,
    `/home/intel/dev/scripts/cut_tool.py`, writes this file of the build's worktree directly.)
    Leave NEW episodes out with `build --new-exclude <list>`.
 2. Run from the repo root:
