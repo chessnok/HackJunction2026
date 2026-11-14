@@ -46,7 +46,7 @@ CPU (load average 10–14); expect lower numbers on an idle laptop.
 | Qwen3-VL-8B int8 | verbatim | 3 crops | one request | 3.9 s | 0/58 | 15/49 | 2/20 |
 | Qwen3-VL-8B int8 | explicit | 3 crops | one request | 2.4 s | 0/58 | 38/49 | 19/20 |
 | Qwen3-VL-8B int8 | explicit | 1 crop × 3 | per crop, OR | 1.9 s per crop, 6.4 s per scene | 3/58 | 42/49 | 20/20 |
-| Qwen3-VL-8B int8 | explicit | 3 full frames | one request | about 13 s | (running) | | |
+| Qwen3-VL-8B int8 | explicit | 3 full frames | one request | about 13 s | (paused at 82/127, see Consequences) | | |
 | Qwen3-VL-8B int8 | explicit | 3 frames + 3 crops | one request | (pending) | | | |
 | gemma-4-26b-a4b int4 | | | | (downloading) | | | |
 | gemma-4-31B int4 / int8 | | | | (not downloaded) | | | |
@@ -90,6 +90,11 @@ recommended: it raises real recall from 15/49 to 38/49 at 0 false positives.
 - The server can never take Studio down: `oom_score_adj` 1000 and a watchdog that kills it below 4 GB
   available.
 - Prompt wording matters more than the model for this task; re-check it when the model changes.
+- Batch evals compete with Studio's recording: nice and CPU pinning do not limit GPU time or the
+  memory bandwidth the iGPU shares with the CPU. At 07:41 Studio discarded an episode ("fell 654 ms
+  behind") while the full-frame eval (about 1550 image tokens per request, back to back) ran next to
+  PatchCore training (log 2026-11-14). Run batch evals only when nobody records, or with
+  `brick_judge.py --pause`; one judgment per brick (3 crops, about 2.4 s) is a short burst.
 
 ## Open
 

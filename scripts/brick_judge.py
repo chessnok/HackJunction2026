@@ -47,6 +47,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
+cv2.setNumThreads(1)  # the laptop records with Studio at the same time: no CPU bursts on all cores
+
 SNAPSHOTS = Path.home() / ".local/share/physicalai/state_snapshots"
 DEFAULT_URL = os.environ.get("VLM_URL", "http://127.0.0.1:8000/v3")
 
@@ -482,6 +484,8 @@ def main() -> None:
     ap.add_argument("--limit", type=int, help="only the first N scenes")
     ap.add_argument("--skip", action="append", default=[], help="snapshot id to leave out (repeatable)")
     ap.add_argument("--no-vlm", action="store_true", help="only find bricks / save crops, no requests")
+    ap.add_argument("--pause", type=float, default=0.0,
+                    help="seconds to wait between scenes (batch evals while Studio records: keep the GPU duty low)")
     args = ap.parse_args()
 
     prompt = args.prompt_file.read_text().strip() if args.prompt_file else DEFAULT_PROMPT
@@ -506,6 +510,8 @@ def main() -> None:
             result = {"scene": scene.name, "label": scene.label, "error": str(err)}
         results.append(result)
         print(json.dumps(result), flush=True)
+        if args.pause:
+            time.sleep(args.pause)
         if args.out:
             with args.out.open("a") as f:
                 f.write(json.dumps(result) + "\n")

@@ -8,7 +8,7 @@ PERCEIVE ──► DETECT ──► REASON ──► EXECUTE ──► OPTIMIZE
 cameras      Anomalib    VLA policy  SO-101      OpenVINO on CPU / iGPU / NPU
 ```
 
-Agents and humans: read [AGENTS.md](AGENTS.md) first.
+Agents and humans: read [AGENTS.md](AGENTS.md) first. Current state of the project: [docs/SUMMARY.md](docs/SUMMARY.md).
 
 ## Repository layout
 
@@ -275,6 +275,8 @@ scripts/vlm_server.sh stop
 OVMS runs at nice 19 on 4 E-cores (`VLM_CPUS=8-11`) with `oom_score_adj` 1000. A watchdog kills it when
 `MemAvailable` drops below 4 GB (`VLM_MIN_AVAIL_MB`), so it cannot push Studio into an OOM kill.
 Compiled models are cached in `~/models/ovms/.ov_cache`. Logs: `~/.local/state/hj-vlm/`.
+**Batch evals (`--all`, `--csv`) load the GPU for many minutes: run them only when nobody records with
+Studio, or add `--pause 10`** (Studio discarded an episode during one, ADR 0005).
 
 ### Is the brick broken? (`scripts/brick_judge.py`)
 
