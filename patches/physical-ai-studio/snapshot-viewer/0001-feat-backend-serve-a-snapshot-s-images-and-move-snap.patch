@@ -1,0 +1,382 @@
+From c905770f84aaac2b72fb47f2ceecee4ed7aa255b Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Sat, 14 Nov 2026 05:13:00 -0800
+Subject: [PATCH 1/2] feat(backend): serve a snapshot's images, and move
+ snapshots to a trash
+
+- GET /api/projects/{id}/state_snapshots/{snapshot_id}/files/{name} serves one
+  of a snapshot's images: a file its state.json lists, or one named like them
+  (<camera>.color.png, .depth.png, .depth_preview.png). Anything else, a name
+  with a path separator or a leading dot, or a file (such as a symlink) that
+  resolves outside the snapshot's folder is 404 state_snapshot_file_not_found;
+  the snapshot id is validated like PATCH's. The content type follows the
+  name (image/png); cached for a day, since the images never change.
+- DELETE /api/projects/{id}/state_snapshots/{snapshot_id} deletes nothing: it
+  moves the folder, under the index lock, to
+  <storage>/state_snapshots_trash/<YYYYmmdd-HHMMSS>/<project_id>/<snapshot_id>
+  (with -1, -2 ... should that exist), then rebuilds snapshots.csv; moving it
+  back and downloading the CSV restores it. It answers {snapshot_id,
+  moved_to, csv_warning}; 404 state_snapshot_not_found for an unknown id.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../backend/src/api/state_snapshots.py        | 75 ++++++++++++++++++-
+ .../backend/src/runtime_session/snapshot.py   | 33 ++++++++
+ .../src/runtime_session/snapshot_index.py     | 34 +++++++++
+ .../backend/src/schemas/state_snapshot.py     | 11 +++
+ .../tests/runtime_session/test_snapshot.py    | 61 +++++++++++++++
+ .../runtime_session/test_snapshot_index.py    | 20 +++++
+ 6 files changed, 231 insertions(+), 3 deletions(-)
+
+diff --git a/application/backend/src/api/state_snapshots.py b/application/backend/src/api/state_snapshots.py
+index d667aab0..3e203e6f 100644
+--- a/application/backend/src/api/state_snapshots.py
++++ b/application/backend/src/api/state_snapshots.py
+@@ -8,11 +8,14 @@ changeable later; ``snapshots.csv`` (:mod:`runtime_session.snapshot_index`) list
+ 
+ import asyncio
+ import http
++import mimetypes
++from datetime import datetime
+ from pathlib import Path as FilePath
+ from typing import Annotated
+ from uuid import UUID
+ 
+ from fastapi import APIRouter, Body, Path, Query, Response, status
++from fastapi.responses import FileResponse
+ 
+ from api.dependencies import RuntimeSessionRegistryDep
+ from build_info import _run_git, get_build_info_async
+@@ -21,7 +24,7 @@ from exceptions import RuntimeSessionCommandError
+ from runtime_session import snapshot, snapshot_index
+ from runtime_session.registry import RuntimeSessionRegistry
+ from runtime_session.session import RuntimeSession
+-from schemas.state_snapshot import StateSnapshot, StateSnapshotLabel, StateSnapshotLabelUpdate
++from schemas.state_snapshot import StateSnapshot, StateSnapshotLabel, StateSnapshotLabelUpdate, StateSnapshotTrashed
+ from settings import get_settings
+ 
+ router = APIRouter(prefix="/api/projects/{project_id}/state_snapshots", tags=["State Snapshots"])
+@@ -34,6 +37,14 @@ def _project_root(project_id: UUID) -> FilePath:
+     return get_settings().storage_dir / "state_snapshots" / str(project_id)
+ 
+ 
++def _not_found(snapshot_id: str) -> StudioError:
++    return StudioError(
++        f"This project has no state snapshot {snapshot_id}.",
++        error_code="state_snapshot_not_found",
++        http_status=http.HTTPStatus.NOT_FOUND,
++    )
++
++
+ def _live_session(registry: RuntimeSessionRegistry, project_id: UUID, session_id: str | None) -> RuntimeSession:
+     """The project's session to capture: ``session_id``, or the one live session with an environment.
+ 
+@@ -140,9 +151,67 @@ async def update_state_snapshot(
+             defective=changes.defective,
+             comment=changes.comment,
+         )
++    except FileNotFoundError:
++        raise _not_found(snapshot_id) from None
++
++
++@router.delete("/{snapshot_id}")
++async def trash_state_snapshot(
++    project_id: UUID,
++    snapshot_id: Annotated[str, Path(pattern=SNAPSHOT_ID_PATTERN, description="The snapshot's folder name")],
++) -> StateSnapshotTrashed:
++    """Move a snapshot to ``<storage>/state_snapshots_trash/<YYYYmmdd-HHMMSS>/<project>/<snapshot>``.
++
++    Nothing is deleted: moving the folder back (and downloading the CSV) restores it. The snapshot
++    leaves the list and ``snapshots.csv``.
++    """
++    trash_dir = (
++        get_settings().storage_dir
++        / "state_snapshots_trash"
++        / datetime.now().strftime("%Y%m%d-%H%M%S")
++        / str(project_id)
++    )
++    try:
++        moved_to, index_error = await asyncio.to_thread(
++            snapshot_index.trash, _project_root(project_id), snapshot_id, trash_dir
++        )
++    except FileNotFoundError:
++        raise _not_found(snapshot_id) from None
++    return StateSnapshotTrashed(
++        snapshot_id=snapshot_id,
++        moved_to=str(moved_to),
++        csv_warning=None
++        if index_error is None
++        else f"{snapshot_index.CSV_NAME} could not be rewritten ({index_error}); "
++        "the next capture or CSV download brings it up to date.",
++    )
++
++
++@router.get(
++    "/{snapshot_id}/files/{name}",
++    response_class=FileResponse,
++    responses={200: {"content": {"image/png": {}}, "description": "The image file"}},
++)
++async def get_state_snapshot_file(
++    project_id: UUID,
++    snapshot_id: Annotated[str, Path(pattern=SNAPSHOT_ID_PATTERN, description="The snapshot's folder name")],
++    name: Annotated[str, Path(description="An image of the snapshot, such as top.color.png")],
++) -> FileResponse:
++    """One of a snapshot's images: ``<camera>.color.png``, ``.depth.png`` (16-bit, mm) or ``.depth_preview.png``.
++
++    Only files of that snapshot that its ``state.json`` lists or that are named like them.
++    """
++    try:
++        path = await asyncio.to_thread(snapshot.image_file, _project_root(project_id), snapshot_id, name)
+     except FileNotFoundError:
+         raise StudioError(
+-            f"This project has no state snapshot {snapshot_id}.",
+-            error_code="state_snapshot_not_found",
++            f"State snapshot {snapshot_id} has no image {name}.",
++            error_code="state_snapshot_file_not_found",
+             http_status=http.HTTPStatus.NOT_FOUND,
+         ) from None
++    # A snapshot's images never change once written.
++    return FileResponse(
++        path,
++        media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
++        headers={"Cache-Control": "private, max-age=86400"},
++    )
+diff --git a/application/backend/src/runtime_session/snapshot.py b/application/backend/src/runtime_session/snapshot.py
+index 098638ad..b3f82f38 100644
+--- a/application/backend/src/runtime_session/snapshot.py
++++ b/application/backend/src/runtime_session/snapshot.py
+@@ -23,6 +23,7 @@ Every snapshot also gets a row in the project's ``snapshots.csv``
+ from __future__ import annotations
+ 
+ import json
++import re
+ import time
+ from dataclasses import dataclass, field
+ from datetime import UTC, datetime
+@@ -47,6 +48,8 @@ if TYPE_CHECKING:
+     from schemas.project_camera import Camera
+ 
+ FORMAT = "physicalai-studio/state-snapshot/v1"
++IMAGE_NAME = re.compile(r"\w[\w .+-]*\.(color|depth|depth_preview)\.png")
++"""How a snapshot's image files are named: ``<camera>.color.png``, ``.depth.png``, ``.depth_preview.png``."""
+ 
+ 
+ @dataclass
+@@ -203,6 +206,36 @@ def list_snapshots(project_root: Path, limit: int | None = None) -> list[StateSn
+     return snapshots
+ 
+ 
++def image_file(project_root: Path, snapshot_id: str, name: str) -> Path:
++    """One of a snapshot's image files: one its ``state.json`` lists, or one named like them.
++
++    Raises:
++        FileNotFoundError: The project has no such snapshot, or the snapshot no such image.
++    """
++    folder = project_root / snapshot_id
++    if folder.resolve().parent != project_root.resolve() or not folder.is_dir():
++        raise FileNotFoundError(folder)
++    if "/" in name or "\\" in name or name.startswith("."):
++        raise FileNotFoundError(name)
++    try:
++        document = json.loads((folder / STATE_FILE).read_text(encoding="utf-8"))
++        listed = {
++            file
++            for camera in document.get("cameras") or []
++            if isinstance(camera, dict)
++            for file in (camera.get("files") or {}).values()
++            if isinstance(file, str)
++        }
++    except (OSError, ValueError, AttributeError):
++        listed = set()
++    path = folder / name
++    if (name not in listed and IMAGE_NAME.fullmatch(name) is None) or path.resolve().parent != folder.resolve():
++        raise FileNotFoundError(name)
++    if not path.is_file():
++        raise FileNotFoundError(path)
++    return path
++
++
+ def update_label(
+     project_root: Path, snapshot_id: str, *, defective: bool | None = None, comment: str | None = None
+ ) -> StateSnapshot:
+diff --git a/application/backend/src/runtime_session/snapshot_index.py b/application/backend/src/runtime_session/snapshot_index.py
+index 1211fec2..7f1713f7 100644
+--- a/application/backend/src/runtime_session/snapshot_index.py
++++ b/application/backend/src/runtime_session/snapshot_index.py
+@@ -43,6 +43,7 @@ import csv
+ import io
+ import json
+ import os
++import shutil
+ import threading
+ from typing import TYPE_CHECKING, Any
+ 
+@@ -222,6 +223,39 @@ def update(project_root: Path, snapshot_id: str, changes: dict[str, Any]) -> tup
+         return document, None
+ 
+ 
++def trash(project_root: Path, snapshot_id: str, trash_dir: Path) -> tuple[Path, OSError | None]:
++    """Move a snapshot's folder into ``trash_dir`` (not deleted: it can be moved back), then rebuild the index.
++
++    Returns:
++        Where the folder is now, and why the index could not be rebuilt, if it could not; the next
++        capture or download rebuilds it then.
++
++    Raises:
++        FileNotFoundError: There is no such snapshot.
++    """
++    folder = project_root / snapshot_id
++    if folder.resolve().parent != project_root.resolve():
++        raise FileNotFoundError(folder)
++    with locked(project_root):
++        if not folder.is_dir():
++            raise FileNotFoundError(folder)
++        destination = trash_dir / snapshot_id
++        for attempt in range(1, 100):
++            if not destination.exists():
++                break
++            destination = trash_dir / f"{snapshot_id}-{attempt}"
++        trash_dir.mkdir(parents=True, exist_ok=True)
++        (project_root / DIRTY_NAME).touch()
++        shutil.move(folder, destination)
++        logger.info("Moved state snapshot {} to {}", folder, destination)
++        try:
++            _rebuild_locked(project_root)
++        except OSError as error:
++            logger.exception("Moved {} but could not rebuild {}; the next check will", snapshot_id, CSV_NAME)
++            return destination, error
++        return destination, None
++
++
+ def write_json(path: Path, document: dict[str, Any]) -> None:
+     """Write a ``state.json`` atomically, so that a rebuild never reads half of one."""
+     partial = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+diff --git a/application/backend/src/schemas/state_snapshot.py b/application/backend/src/schemas/state_snapshot.py
+index 595f3d7a..d9fa9bfa 100644
+--- a/application/backend/src/schemas/state_snapshot.py
++++ b/application/backend/src/schemas/state_snapshot.py
+@@ -46,6 +46,17 @@ class StateSnapshotLabelUpdate(BaseModel):
+         return self
+ 
+ 
++class StateSnapshotTrashed(BaseModel):
++    """A snapshot moved to the trash: out of the list and the CSV, but kept, to move back by hand."""
++
++    snapshot_id: str
++    moved_to: str = Field(description="Its folder now, under <storage>/state_snapshots_trash/")
++    csv_warning: str | None = Field(
++        default=None,
++        description="Set when snapshots.csv could not be rewritten yet; the next capture or CSV download does",
++    )
++
++
+ class SnapshotCamera(BaseModel):
+     name: str
+     key: str
+diff --git a/application/backend/tests/runtime_session/test_snapshot.py b/application/backend/tests/runtime_session/test_snapshot.py
+index 70a4dc48..34825115 100644
+--- a/application/backend/tests/runtime_session/test_snapshot.py
++++ b/application/backend/tests/runtime_session/test_snapshot.py
+@@ -5,6 +5,7 @@ from __future__ import annotations
+ import csv
+ import io
+ import json
++import re
+ from pathlib import Path
+ from types import SimpleNamespace
+ from typing import TYPE_CHECKING
+@@ -493,3 +494,63 @@ def test_the_list_can_be_limited_to_the_newest(client, live, project) -> None:
+ 
+     assert [item["snapshot_id"] for item in listed] == created[:0:-1]
+     assert client.get(_url(project), params={"limit": 0}).status_code == 400
++
++
++# Viewing and deleting.
++
++
++def test_the_api_serves_a_snapshots_images(client, live, project) -> None:
++    created = _capture(client, live, project)
++    files = _url(project, f"/{created['snapshot_id']}/files")
++
++    response = client.get(f"{files}/top.color.png")
++
++    assert response.status_code == 200
++    assert response.headers["content-type"] == "image/png"
++    assert "max-age" in response.headers["cache-control"]
++    assert response.content == (Path(created["path"]) / "top.color.png").read_bytes()
++    assert client.get(f"{files}/top.depth_preview.png").status_code == 200
++    for name in ("state.json", "cam_9.color.png", "top.color.jpg"):
++        response = client.get(f"{files}/{name}")
++        assert response.status_code == 404, name
++        assert response.json()["error_code"] == "state_snapshot_file_not_found"
++    assert client.get(_url(project, "/20261114-000000-000/files/top.color.png")).status_code == 404
++    assert client.get(_url(project, "/not-a-snapshot/files/top.color.png")).status_code == 400
++
++
++def test_only_a_snapshots_own_images_are_served(live, tmp_path) -> None:
++    result = snapshot.write(snapshot.capture(live), tmp_path)
++    project_root, snapshot_id = Path(result.path).parent, result.snapshot_id
++    (project_root / snapshot_id / "evil.color.png").symlink_to(project_root / snapshot_index.CSV_NAME)
++
++    assert snapshot.image_file(project_root, snapshot_id, "cam_0.color.png").is_file()
++    for name in ("../snapshots.csv", "..", "state.json", ".hidden.color.png", "a/b.color.png", "evil.color.png"):
++        with pytest.raises(FileNotFoundError):
++            snapshot.image_file(project_root, snapshot_id, name)
++    with pytest.raises(FileNotFoundError):
++        snapshot.image_file(project_root, "..", "cam_0.color.png")
++
++
++def test_the_api_moves_a_deleted_snapshot_to_the_trash(client, live, project) -> None:
++    kept = _capture(client, live, project, comment="keep")
++    dropped = _capture(client, live, project, comment="part broke")
++
++    response = client.delete(_url(project, f"/{dropped['snapshot_id']}"))
++
++    assert response.status_code == 200
++    assert response.json()["csv_warning"] is None
++    moved = Path(response.json()["moved_to"])
++    # <storage>/state_snapshots_trash/<YYYYmmdd-HHMMSS>/<project>/<snapshot>
++    assert moved.parents[2] == get_settings().storage_dir / "state_snapshots_trash"
++    assert re.fullmatch(r"\d{8}-\d{6}", moved.parents[1].name)
++    assert (moved.parent.name, moved.name) == (str(project), dropped["snapshot_id"])
++    assert json.loads((moved / "state.json").read_text())["comment"] == "part broke"
++    assert (moved / "top.color.png").is_file()
++    assert not Path(dropped["path"]).exists()
++    assert [item["snapshot_id"] for item in client.get(_url(project)).json()] == [kept["snapshot_id"]]
++    assert [row["snapshot_id"] for row in _download(client, project)] == [kept["snapshot_id"]]
++
++    again = client.delete(_url(project, f"/{dropped['snapshot_id']}"))
++    assert again.status_code == 404
++    assert again.json()["error_code"] == "state_snapshot_not_found"
++    assert client.delete(_url(project, "/not-a-snapshot")).status_code == 400
+diff --git a/application/backend/tests/runtime_session/test_snapshot_index.py b/application/backend/tests/runtime_session/test_snapshot_index.py
+index 594de1f6..a4e227cb 100644
+--- a/application/backend/tests/runtime_session/test_snapshot_index.py
++++ b/application/backend/tests/runtime_session/test_snapshot_index.py
+@@ -449,3 +449,23 @@ def test_captures_in_several_processes_leave_one_row_each(tmp_path) -> None:
+     assert len({row["snapshot_id"] for row in rows}) == workers * count
+     assert all(row["comment"].endswith('\n"ok"') and row["defective"] == "true" for row in rows)
+     assert not snapshot_index.ensure(tmp_path)
++
++
++def test_trashing_moves_the_folder_and_rebuilds_the_index(tmp_path) -> None:
++    project, trash_dir = tmp_path / "project", tmp_path / "trash" / "20261114-120000" / "project"
++    for index in range(2):
++        snapshot_index.append(project, _save(project, _snapshot_id(index)))
++
++    moved, index_error = snapshot_index.trash(project, _snapshot_id(1), trash_dir)
++    _save(project, _snapshot_id(1))  # the same id again, then trashed in the same second
++    moved_again, _ = snapshot_index.trash(project, _snapshot_id(1), trash_dir)
++
++    assert index_error is None
++    assert moved == trash_dir / _snapshot_id(1)
++    assert moved_again == trash_dir / f"{_snapshot_id(1)}-1"
++    assert (moved / "state.json").is_file()
++    assert [row["snapshot_id"] for row in _rows(project)] == [_snapshot_id(0)]
++    assert not (project / snapshot_index.DIRTY_NAME).exists()
++    for snapshot_id in (_snapshot_id(1), ".."):
++        with pytest.raises(FileNotFoundError):
++            snapshot_index.trash(project, snapshot_id, trash_dir)
+-- 
+2.53.0
+
