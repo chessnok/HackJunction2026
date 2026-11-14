@@ -197,6 +197,21 @@ table area with the gripper straight down, plot in `captures/pick_above/reach_h6
 `--capture` refuses when Studio holds the camera or the port; it resolves the wrist camera by name
 under `/dev/v4l/by-id` and never uses the laptop's HP camera.
 
+## Perception: table frame, brick and gripper positions (offline, recorded data)
+
+Details, conventions and accuracy: [docs/perception/A-object-localization.md](docs/perception/A-object-localization.md).
+Outputs go to `captures/perception/A/` (gitignored). Needs numpy, opencv-python-headless, av,
+pyarrow, pandas, scipy (any venv; Studio's backend venv has all but scipy).
+
+```bash
+export PYTHONPATH=src
+nice -n 19 $PY scripts/perception_table_frame.py 431a71f7                 # table frame JSON
+nice -n 19 ionice -c 3 $PY scripts/perception_annotate.py 431a71f7 --workers 4   # objects + gripper parquet
+$PY scripts/perception_bowls.py 431a71f7
+$PY scripts/perception_register_robot.py 431a71f7                         # robot (FK) -> table
+$PY scripts/perception_eval.py --methods cv,gripper                        # accuracy vs hand-made GT
+```
+
 ## Status
 
 See [docs/challenge.md](docs/challenge.md) and the latest file in [docs/log/](docs/log/).

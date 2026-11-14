@@ -13,3 +13,4 @@ Numbers are never reused. To change a decision, write a new ADR and mark the old
 | [0007](0007-observe-pose-homography-ik.md) | Locate bricks with a fixed-pose homography and hover above them with numeric IK | Proposed |
 | [0008](0008-defect-decision-any-vote-on-zoomed-crops.md) | Defective if any camera or any detector says so, on zoomed brick crops | Accepted |
 | [0009](0009-anomalib-as-uv-extra-in-project-env.md) | Install Anomalib as a uv extra of this project, not a separate venv | Accepted |
+| [0010](0010-brick-localization-colour-cv-local-vlm-only.md) | Localize bricks with colour CV on the two D415s; VLMs only local and only as an option | Proposed |
