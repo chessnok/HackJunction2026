@@ -13,6 +13,23 @@ Template:
 - Refs: ADRs, log entries, upstream issues
 ```
 
+## T-011. Studio datasets contain no depth; RealSense quality is low
+
+- Date: 2026-11-13 · Status: Open (Studio patch in progress, see ADR 0004 when written)
+- Symptom: recorded datasets only have color video features (`observation.images.arm`, 1920×1080×3);
+  setting a RealSense camera's output type to `depth` / `both` changes nothing.
+- Cause (verified in `junction2026` @ 17714488):
+  1. `application/backend/src/utils/camera_factory.py` `_ALLOWED_KWARGS["realsense"]` passes only
+     width / height / fps to the capture driver; `output_type` and `depth_range_*` are dropped.
+  2. Nothing in Studio or `physicalai`'s recording path calls `RealSenseCamera.read_depth()` /
+     `read_rgbd()`, so depth is never captured or written.
+  3. Our station: the second D415 enumerates at **480 Mbps (USB 2)**, while the first is at 5000 Mbps.
+     It was added to Studio as a plain `usb_camera` ("floor regular", 1920×1080 at 8 fps), so no
+     depth and a low frame rate. "top realsense" is a `realsense` camera at 15 fps, color only.
+- Fix: Studio patch to record aligned color + depth (on branch `hj/realsense-rgbd` in the
+  third_party clone, exported to `patches/physical-ai-studio/`); move the second D415 to a USB 3 port
+  and cable; configure both D415 with driver `realsense`.
+
 ## T-010. Backend `uv sync --extra xpu` dies downloading torch on venue Wi-Fi
 
 - Date: 2026-11-13 · Status: Workaround
