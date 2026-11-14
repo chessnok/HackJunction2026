@@ -23,8 +23,8 @@ Agents and humans: read [AGENTS.md](AGENTS.md) first.
 | `docs/log/` | Daily engineering log |
 | `configs/hardware.yaml` | Stable device addresses used by code |
 | `configs/inspection.yaml` | Inspection cameras (D415 serials), exposure, crop and capture settings |
-| `src/hackjunction2026/` | Our Python package: Feetech bus helper; `defect/` = Anomalib dataset capture (later: training, detector) |
-| `scripts/` | Command-line tools (`so101_probe.py`, `so101_move.py`) |
+| `src/hackjunction2026/` | Our Python package: Feetech bus helper; `defect/` = Anomalib capture, cropping, training |
+| `scripts/` | Command-line tools (`so101_probe.py`, `so101_move.py`, `capture_inspection.sh`, `anomalib.sh`) |
 | `third_party/` | Upstream checkouts, **not committed** |
 
 ## Setup (laptop: Ubuntu 26.04, native, no Docker)
@@ -77,13 +77,30 @@ scripts/capture_inspection.sh --fake --once --brick test   # self-test without c
 ```
 
 Without Studio (e.g. a teammate's machine): `uv sync --extra capture`, then
-`uv run --extra capture python -m hackjunction2026.defect.capture_inspection ...`.
+`uv run --extra capture python -m hackjunction2026.defect.capture.capture_inspection ...`.
 `--webcam 0 --output-dir /tmp/x --no-check` tries the window with an ordinary webcam
 (**test only, never on the station laptop**: AGENTS.md forbids its built-in camera).
 
 One cycle: brick in the L-shape → SPACE (`top_pre` + `side_FR`) → turn the brick 180° → SPACE
 (`top_post` + `side_BL`). Output: `captures/anomalib/raw/<session>/{good,defect}/*.png` +
 `manifest.jsonl` (git-ignored). Reuse `--session <name>` to continue a session.
+
+## Anomalib training (tested on mock data only)
+
+```bash
+uv sync --extra capture --extra anomalib                    # once; ~8 GB (PyTorch XPU), ADR 0004
+scripts/anomalib.sh cropping.make_dataset --name v1         # raw captures → cropped 256×256 dataset
+scripts/anomalib.sh training.train_padim --dataset v1       # scenario 1 (baseline, ~1 min)
+scripts/anomalib.sh training.train_patchcore --dataset v1   # scenario 2 (--coreset 0.05 --tag c005)
+scripts/anomalib.sh training.train_efficientad --dataset v1 # scenario 3 (downloads ImageNette)
+scripts/anomalib.sh training.evaluate --device NPU          # latest run, every export (FP16, INT8)
+scripts/anomalib.sh training.compare                        # table of all runs → outputs/anomalib/compare.md
+scripts/anomalib.sh capture.mock_session --output-dir /tmp/mock   # synthetic session to test the chain
+```
+
+Code: `src/hackjunction2026/defect/{capture,cropping,training}/`. Runs: `outputs/anomalib/runs/<run>/`
+(`run.json`, `eval.json`, `errors/`); models: `exports/anomalib/<run>/{fp16,int8_ptq}/weights/openvino/model.xml`.
+Training uses the Intel GPU (XPU) when available, else CPU. Exports are static batch 1.
 
 ## Status
 

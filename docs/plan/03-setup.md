@@ -14,7 +14,7 @@ Claude Code). Never `pip install` into Studio's environment.
 | Env | Contents | Used for |
 | --- | --- | --- |
 | **Studio backend** (`third_party/physical-ai-studio/application/backend`, `uv sync --extra xpu`) | physicalai-studio 0.3.0, physicalai 0.4.1.dev5, physicalai-train 0.3.0, so101 plugin, torch 2.11.0+xpu, openvino 2026.4.1 | Studio UI/backend: robots, recording, training, Run model |
-| **anomalib-env** | `anomalib[openvino,xpu]==2.7.0` | training and exporting the anomaly model only |
+| **repo `.venv`** (`uv sync --extra capture --extra anomalib`, ADR 0004) | Anomalib 2.7.0, torch 2.15.0+xpu, OpenVINO 2026.4.1, OpenCV, pyrealsense2 | dataset capture, Anomalib training and export |
 | **Runtime for our loop** | see section 5 | `scripts/sort.py`: cameras, ACT via `InferenceModel`, anomaly model via plain `openvino` |
 
 Anomalib and Studio pin different PyTorch builds, which is why they are separate (guide, Step 4).
@@ -77,25 +77,23 @@ before deleting a target (deleting it deletes its Volume). Budget is in
 
 ## 4. Anomalib environment
 
-From the repo root (`*-env/` is already git-ignored):
+Anomalib is the `anomalib` uv extra of this repo (ADR 0004; Anomalib 2.7.0 as slide 8 requires,
+PyTorch from the Intel XPU index). From the repo root:
 
 ```bash
-uv venv anomalib-env --python 3.12
-source anomalib-env/bin/activate
-UV_HTTP_TIMEOUT=600 uv pip install "anomalib[openvino,xpu]==2.7.0"   # version required by slide 8; big download (T-010)
+UV_HTTP_TIMEOUT=600 uv sync --extra capture --extra anomalib   # ~8 GB; slow on venue Wi-Fi (T-010)
 ```
 
-Verify:
+Verify (scripts/anomalib.sh sets `ZE_ENABLE_ALT_DRIVERS` the same way):
 
 ```bash
-python -c "import torch; print(torch.xpu.is_available())"                 # True
+uv run --extra anomalib python -c "import torch, anomalib; print(torch.xpu.is_available(), anomalib.__version__)"
+# expect: True 2.7.0 on the station laptop (False on machines without an Intel GPU → CPU training)
 ZE_ENABLE_ALT_DRIVERS=/usr/lib/x86_64-linux-gnu/libze_intel_gpu.so.1,/snap/intel-npu-driver/current/usr/lib/x86_64-linux-gnu/libze_intel_npu.so.1 \
-  python -c "import openvino as ov; print(ov.Core().available_devices)"   # ['CPU', 'GPU', 'NPU']
-python -c "import anomalib; print(anomalib.__version__)"            # 2.7.0
+  uv run --extra anomalib python -c "import openvino as ov; print(ov.Core().available_devices)"   # ['CPU', 'GPU', 'NPU']
 ```
 
-`ZE_ENABLE_ALT_DRIVERS` must list **both** drivers or torch XPU breaks (T-008). Training on XPU:
-`Engine(strategy=SingleXPUStrategy(), accelerator=XPUAccelerator())`.
+`ZE_ENABLE_ALT_DRIVERS` must list **both** drivers or torch XPU breaks (T-008).
 
 ## 5. Runtime environment for our loop
 
@@ -145,7 +143,7 @@ benchmark_app -m exports/anomalib/model.xml -d NPU -hint latency -t 15
 - [ ] 3 cameras (2 × D415, wrist) show stable 30 FPS previews in one Studio environment
 - [ ] L-shape and bowls fixed; labelled-brick test done (F+R before, B+L after the 180° spin, top both times)
 - [ ] HF token set; Modal target healthy
-- [ ] anomalib-env sees XPU; OpenVINO sees NPU
+- [ ] repo `.venv` (anomalib extra) sees XPU; OpenVINO sees NPU
 - [ ] Runtime env decided (Option A or B), stop path implemented
 
 Then start with milestone M1 in [01-pipeline.md](01-pipeline.md#work-order-milestones).

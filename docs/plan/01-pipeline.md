@@ -258,7 +258,7 @@ All in this repo, `src/hackjunction2026/` + `scripts/` (planned, not written yet
 | `policy.py` | run the Studio ACT and SmolVLA exports via `physicalai.inference.InferenceModel` |
 | `reason.py` | structured detection result → rules → instruction string |
 | `loop.py` + `scripts/sort.py` | the state machine above, stop key, logging, metrics, demo screen |
-| `defect/capture_inspection.py` + `scripts/capture_inspection.sh` | Anomalib dataset capture (written, untested on cameras; see part 2) |
+| `defect/capture/capture_inspection.py` + `scripts/capture_inspection.sh` | Anomalib dataset capture (written, untested on cameras; see part 2) |
 
 A prototype of some of this exists outside the repo in `~/lego-sorter/` (single camera, LeRobot
 API). It is outdated: reuse ideas, not code.
@@ -269,7 +269,7 @@ Each milestone leaves a working demo behind it.
 
 | M | Deliverable | Depends on | Parallel owner idea |
 | --- | --- | --- | --- |
-| M0 | Setup done ([03-setup.md](03-setup.md)): both arms answer, 3 cameras mounted, Studio environment, HF token, Modal connected, anomalib-env | | everyone |
+| M0 | Setup done ([03-setup.md](03-setup.md)): both arms answer, 3 cameras mounted, Studio environment, HF token, Modal connected, repo `.venv` with the anomalib extra | | everyone |
 | M1 | **Scripted skeleton**: L-shape taped, waypoints recorded, 180° spin + scripted place work with a hand-placed brick | M0 | arm person |
 | M2 | Anomalib dataset captured automatically, model v1 exported, per-view evaluation | M1 | vision person |
 | M3 | ACT pick dataset recorded in Studio, smoke-trained locally, trained on Modal, tested with **Run model** | M0 (can start before M1) | data person |
