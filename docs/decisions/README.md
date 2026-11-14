@@ -10,3 +10,4 @@ Numbers are never reused. To change a decision, write a new ADR and mark the old
 | [0002](0002-no-ros2-stationary-arm-blueprint-on-host.md) | Do not base the project on the ROS 2 Stationary Arm blueprint | Accepted |
 | [0003](0003-run-studio-natively-from-upstream-lockfiles.md) | Run Studio natively from upstream lockfiles, not Docker or PyPI | Accepted |
 | [0004](0004-patch-studio-for-realsense-rgbd-recording.md) | Patch Studio to record RealSense color + depth (`hj/realsense-rgbd`) | Proposed |
+| [0005](0005-brick-localization-colour-cv-local-vlm-only.md) | Localize bricks with colour CV on the two D415s; VLMs only local and only as an option | Proposed |
