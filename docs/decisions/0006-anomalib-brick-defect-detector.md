@@ -123,9 +123,14 @@ Checks:
 
   The one brick no combination catches is `061820-859` (dark blue; its only mark-visible crop per
   Argon is the one the user excluded).
-- **Augmented normals for PatchCore** (`cropping/augment_normals.py`, `bricks_z14ta`): see the
-  log for the result. `layers=[layer1, layer2]` was not run (4x the patches per image, about 16x
-  the coreset time on 2 CPU threads) and `bricks_z24t` was not trained (deadline).
+- **Augmented normals for PatchCore** (`cropping/augment_normals.py`, `bricks_z14ta`: 150 episode
+  crops + 1 flip/rot90 copy each, 60 good-snapshot crops + rot90, rot180 and colour-jitter copies;
+  540 train crops; same test split; run `20261114-085036_patchcore_bricks_z14ta`): WORSE. Brick AUROC
+  0.907 (plain 0.943), crop 0.810 (0.835); brick recall at 0 % / 5 % crop FPR 56 % / 72 % (plain
+  76 % / 90 %); at the 5 %-brick rule 58 % recall (plain 84 %). Wider "normal" also absorbs part of
+  the marks; only the false alarms on episode crops drop (13 % → 7 %). Not adopted.
+  `layers=[layer1, layer2]` was not run (4x the patches per image, about 16x the coreset time on 2 CPU
+  threads) and `bricks_z24t` was not trained (deadline).
 
 ## Alternatives considered
 
