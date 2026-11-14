@@ -92,7 +92,7 @@ def benchmark(args) -> None:
     results = []
     for dev in args.benchmark.split(","):
         try:
-            det = BrickAnomalyDetector(xml, dev, crop=crop)
+            det = BrickAnomalyDetector(xml, dev, crop=crop, cpu_threads=args.cpu_threads)
         except Exception as exc:  # noqa: BLE001  report and continue with the next device
             results.append({"device": dev, "error": repr(exc)[:300]})
             continue
@@ -124,6 +124,7 @@ def main() -> None:
     p.add_argument("--heatmaps", nargs="?", const="captures/anomalib/heatmaps", help="write overlay PNGs here")
     p.add_argument("--benchmark", help="comma list of devices: latency per crop instead of scoring")
     p.add_argument("--bench-crops", help="folder of crops for --benchmark (default: a flat grey image)")
+    p.add_argument("--cpu-threads", type=int, default=4, help="OpenVINO CPU threads (2 while Studio records)")
     p.add_argument("-n", type=int, default=200, help="--benchmark iterations")
     p.add_argument("--out", help="also write results (JSON lines / benchmark JSON) here")
     args = p.parse_args()
