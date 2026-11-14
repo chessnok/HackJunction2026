@@ -1,0 +1,1937 @@
+From cb7292d4a2a4b7f4a87cdda3eaecfae209be0538 Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Fri, 13 Nov 2026 16:56:41 -0800
+Subject: [PATCH 02/13] feat(backend): record RealSense depth as LeRobot depth
+ features
+
+A RealSense camera with output_type "depth" or "both" now records its depth
+map, aligned to its color image, as observation.images.<camera>_depth next to
+observation.images.<camera>: a LeRobot 0.6 depth feature (shape [H, W, 1],
+info.is_depth_map, depth_unit mm). "color" records exactly as before.
+
+- Store: image slots carry a dtype; depth slots are uint16 millimetres.
+- Camera worker: unpacks color and depth, writes both with the frameset's
+  timestamp, zeroes depth outside depth_range_min/max, resizes depth with
+  nearest neighbour, and polls at twice the camera rate.
+- Recorder: rereads a color/depth pair whose timestamps differ, so both come
+  from one frameset.
+- Encoding: depth is 12-bit log-quantized over 0-10 m (0 stays 0, steps of
+  1.3 mm at 0.3 m to 2.1 mm at 3 m) and encoded as lossless HEVC gray12le with
+  the ultrafast preset; DEPTH_VIDEO_CRF switches to lossy. A dataset that has
+  depth keeps the quantization it was recorded with when appended to, and a
+  backend without a 12-bit HEVC encoder refuses depth clearly. RGB-only
+  datasets keep the placeholder depth encoder.
+- Viewing: episodes flag depth videos; the video endpoint serves a colorized,
+  browser-playable copy with the same timestamps (depth_preview=true, cached);
+  depth thumbnails are colorized and the default thumbnail is a color camera.
+- Sessions show a depth-only camera's colorized depth and skip the depth
+  frames of cameras that also have color; camera claims include the output
+  type, as a publisher serves one at a time.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ application/backend/src/api/dataset.py        |  32 ++++
+ application/backend/src/api/runtime_ws.py     |  18 +-
+ application/backend/src/exceptions.py         |   7 +-
+ .../src/internal_datasets/dataset_client.py   |   8 +
+ .../internal_datasets/lerobot/depth_video.py  | 150 +++++++++++++++++
+ .../lerobot/lerobot_dataset.py                |  61 ++++++-
+ .../lerobot/video_encoding_settings.py        | 145 ++++++++++++++--
+ .../backend/src/internal_datasets/utils.py    |   5 +-
+ .../backend/src/runtime_session/dataset.py    |  16 +-
+ .../src/runtime_session/environment.py        |  42 +++--
+ .../backend/src/runtime_session/session.py    |   3 +-
+ .../backend/src/runtime_session/store.py      |  27 ++-
+ application/backend/src/schemas/dataset.py    |   2 +
+ .../backend/src/schemas/runtime_session.py    |   6 +-
+ .../backend/src/services/camera_claims.py     |  11 +-
+ .../src/services/episode_thumbnail_service.py |   4 +-
+ application/backend/src/settings.py           |   3 +
+ .../backend/src/workers/camera_worker.py      | 103 ++++++++++--
+ .../backend/src/workers/dataset_worker.py     |  28 +++-
+ .../backend/tests/api/test_dataset_video.py   |  40 +++++
+ .../internal_datasets/test_depth_recording.py | 158 ++++++++++++++++++
+ .../tests/internal_datasets/test_utils.py     |   3 +-
+ .../tests/runtime_session/test_environment.py |  51 ++++++
+ .../tests/runtime_session/test_recording.py   | 101 ++++++++++-
+ .../tests/runtime_session/test_store.py       |  25 +++
+ .../tests/services/test_camera_claims.py      |  28 ++++
+ .../tests/workers/test_camera_worker.py       | 100 +++++++++++
+ .../tests/workers/test_dataset_worker.py      |  47 ++++++
+ 28 files changed, 1160 insertions(+), 64 deletions(-)
+ create mode 100644 application/backend/src/internal_datasets/lerobot/depth_video.py
+ create mode 100644 application/backend/tests/internal_datasets/test_depth_recording.py
+
+diff --git a/application/backend/src/api/dataset.py b/application/backend/src/api/dataset.py
+index c0d5f1b..9e26b1a 100644
+--- a/application/backend/src/api/dataset.py
++++ b/application/backend/src/api/dataset.py
+@@ -1,4 +1,5 @@
+ import asyncio
++import json
+ import os
+ from pathlib import Path
+ from typing import Annotated
+@@ -25,6 +26,7 @@ from internal_datasets.utils import get_internal_read_dataset
+ from runtime_session.dataset import editing, is_being_edited
+ from schemas import Dataset, Episode, EpisodeInfo
+ from services import DatasetDownloadService, DatasetService, EpisodeThumbnailService
++from settings import get_settings
+ 
+ router = APIRouter(prefix="/api/dataset", tags=["Dataset"])
+ 
+@@ -162,6 +164,15 @@ async def dataset_video_endpoint(
+     dataset_id: UUID,
+     video_path: str,
+     dataset_service: Annotated[DatasetService, Depends(get_dataset_service)],
++    depth_preview: Annotated[
++        bool,
++        Query(
++            description=(
++                "For a depth video: a colorized, browser-playable copy with the same timestamps "
++                "(made on first request, then cached)"
++            )
++        ),
++    ] = False,
+ ) -> FileResponse:
+     """Get path to video of episode"""
+     dataset = await dataset_service.get_dataset_by_id(dataset_id)
+@@ -180,12 +191,33 @@ async def dataset_video_endpoint(
+     if not Path(requested_path).is_file():
+         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found.")
+ 
++    if depth_preview and (info := _depth_video_info(dataset, normalized_video_path)) is not None:
++        from internal_datasets.lerobot.depth_video import ensure_depth_preview
++
++        preview = await asyncio.to_thread(ensure_depth_preview, Path(requested_path), get_settings().cache_dir, info)
++        return FileResponse(preview, media_type="video/mp4", headers={"Cache-Control": "no-cache"})
++
+     # Recording appends episodes to the same mp4, so a cached copy goes stale: it ends where the
+     # file ended when it was fetched, and every later episode then fails to play. Make browsers
+     # check the ETag before reusing it.
+     return FileResponse(requested_path, headers={"Cache-Control": "no-cache"})
+ 
+ 
++def _depth_video_info(dataset: Dataset, video_path: Path) -> dict | None:
++    """The ``info`` of the depth feature whose video ``video_path`` is, or ``None`` for any other file.
++
++    LeRobot keeps a feature's videos under ``videos/<feature key>/``.
++    """
++    if len(video_path.parts) < 2 or video_path.parts[0] != "videos":
++        return None
++    info_path = Path(dataset.path) / "meta" / "info.json"
++    if not info_path.is_file():
++        return None
++    feature = json.loads(info_path.read_text()).get("features", {}).get(video_path.parts[1], {})
++    info = feature.get("info") or {}
++    return info if info.get("is_depth_map") or info.get("video.is_depth_map") else None
++
++
+ @router.get("/{dataset_id}/download")
+ async def dataset_download_endpoint(
+     dataset_id: UUID,
+diff --git a/application/backend/src/api/runtime_ws.py b/application/backend/src/api/runtime_ws.py
+index 6a62574..4e3ea66 100644
+--- a/application/backend/src/api/runtime_ws.py
++++ b/application/backend/src/api/runtime_ws.py
+@@ -10,6 +10,7 @@ and the store is sampled at ``hz`` into one binary observation per tick. See
+ """
+ 
+ import asyncio
++from collections.abc import Collection
+ from typing import Annotated, Any
+ from uuid import UUID
+ 
+@@ -34,7 +35,7 @@ from runtime_session import session as runtime_session
+ from runtime_session.bus import STATUSES, Bus, BusRequestError, NoResponderError, Subscription, command_key
+ from runtime_session.resolve import project_resolvers
+ from runtime_session.session import RuntimeSession
+-from runtime_session.store import ACTION, STATE, Sample
++from runtime_session.store import ACTION, DEPTH_SUFFIX, STATE, Sample
+ from schemas.runtime_session import (
+     AckMessage,
+     ObservationFrame,
+@@ -179,7 +180,7 @@ def _named(sample: Sample | None) -> dict[str, float] | None:
+ 
+ async def _sample_store(websocket: WebSocket, session: RuntimeSession, hz: float) -> None:
+     """Send the store at ``hz``: one observation per tick with the joints and every new camera frame."""
+-    from utils.jpeg import encode_jpeg_rgb
++    from utils.jpeg import encode_jpeg_frame
+ 
+     rate = Rate(hz, name=f"session-sampler-{session.id}")
+     sent: dict[str, float] = {}
+@@ -192,12 +193,12 @@ async def _sample_store(websocket: WebSocket, session: RuntimeSession, hz: float
+             joints_at = max((sample.timestamp for sample in (state, action) if sample is not None), default=None)
+             frames = {
+                 key: frame
+-                for key in store.spec.observations
++                for key in _shown_frames(store.spec.observations)
+                 if (frame := store.read_observation(key)) is not None and frame.timestamp != sent.get(key)
+             }
+             if frames or (joints_at is not None and joints_at != sent.get(STATE)):
+                 jpegs = await asyncio.gather(
+-                    *(asyncio.to_thread(encode_jpeg_rgb, frame.value) for frame in frames.values())
++                    *(asyncio.to_thread(encode_jpeg_frame, frame.value) for frame in frames.values())
+                 )
+                 header = ObservationMessage(
+                     timestamp=max([joints_at or 0.0, *(frame.timestamp for frame in frames.values())]),
+@@ -215,6 +216,15 @@ async def _sample_store(websocket: WebSocket, session: RuntimeSession, hz: float
+         await rate.sleep()
+ 
+ 
++def _shown_frames(observations: Collection[str]) -> list[str]:
++    """The frames a session shows: every camera's, but not the depth map of a camera that has color too."""
++    return [
++        key
++        for key in observations
++        if not (key.endswith(DEPTH_SUFFIX) and key.removesuffix(DEPTH_SUFFIX) in observations)
++    ]
++
++
+ def observation_message(header: ObservationMessage, jpegs: list[bytes]) -> bytes:
+     """``[u32 big-endian header length][header JSON][jpeg bytes, in the order of header.frames]``."""
+     encoded = header.model_dump_json().encode()
+diff --git a/application/backend/src/exceptions.py b/application/backend/src/exceptions.py
+index 99c9e10..72d26bc 100644
+--- a/application/backend/src/exceptions.py
++++ b/application/backend/src/exceptions.py
+@@ -248,13 +248,16 @@ class CameraSettingsConflictError(BaseException):
+         project_name: str,
+         pinned: tuple[int, int, int],
+         requested: tuple[int, int, int],
++        pinned_output: str = "color",
++        requested_output: str = "color",
+     ) -> None:
+         width, height, fps = pinned
+         req_width, req_height, req_fps = requested
++        outputs = (f" {pinned_output}", f" {requested_output}") if pinned_output != requested_output else ("", "")
+         super().__init__(
+             message=(
+-                f"Camera is already in use by project {project_name!r} at {width}x{height}@{fps}. "
+-                f"This session requested {req_width}x{req_height}@{req_fps}."
++                f"Camera is already in use by project {project_name!r} at {width}x{height}@{fps}{outputs[0]}. "
++                f"This session requested {req_width}x{req_height}@{req_fps}{outputs[1]}."
+             ),
+             error_code="camera_settings_conflict",
+             http_status=http.HTTPStatus.LOCKED,
+diff --git a/application/backend/src/internal_datasets/dataset_client.py b/application/backend/src/internal_datasets/dataset_client.py
+index 85aa1dd..f36d57e 100644
+--- a/application/backend/src/internal_datasets/dataset_client.py
++++ b/application/backend/src/internal_datasets/dataset_client.py
+@@ -49,6 +49,14 @@ class DatasetClient(ABC):
+     def get_video_keys(self) -> list[str]:
+         """Get the video keys used to record the dataset"""
+ 
++    def get_depth_keys(self) -> list[str]:
++        """The video keys that hold depth maps rather than color images."""
++        return []
++
++    def get_feature_info(self, key: str) -> dict:  # noqa: ARG002
++        """The ``info`` LeRobot recorded for a feature, such as a depth video's quantization."""
++        return {}
++
+     @abstractmethod
+     def get_episode_thumbnail_png(
+         self,
+diff --git a/application/backend/src/internal_datasets/lerobot/depth_video.py b/application/backend/src/internal_datasets/lerobot/depth_video.py
+new file mode 100644
+index 0000000..563fc6f
+--- /dev/null
++++ b/application/backend/src/internal_datasets/lerobot/depth_video.py
+@@ -0,0 +1,150 @@
++"""Read depth-map videos back for people: thumbnails and browser-playable previews.
++
++A depth feature is a 12-bit ``gray12le`` HEVC video of quantized depth (see
++``StudioDepthEncoderConfig``), which browsers cannot play. Its frames are
++dequantized to millimetres with the parameters recorded in the feature's
++``info`` and colorized; a preview is re-encoded with the same frame timestamps,
++so an episode's ``from_timestamp`` seeks to the same frame in it.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import os
++import threading
++from fractions import Fraction
++from typing import TYPE_CHECKING, Any
++
++import numpy as np
++
++if TYPE_CHECKING:
++    from collections.abc import Mapping
++    from pathlib import Path
++
++_PREVIEW_CODECS = (("libx264", {"crf": "23", "preset": "veryfast"}), ("libsvtav1", {"crf": "35", "preset": "10"}))
++"""Browser-playable encoders for previews, in order of preference."""
++_RANGE_FRAMES = 15
++"""How many frames from the start of a video set its color range, so colors do not flicker."""
++_locks: dict[Path, threading.Lock] = {}
++_locks_guard = threading.Lock()
++
++
++def depth_quantization(info: Mapping[str, Any] | None) -> dict[str, Any]:
++    """The quantization a depth feature was recorded with, as ``dequantize_depth`` takes it.
++
++    Falls back to LeRobot's defaults for what the ``info`` lacks, as LeRobot's reader does.
++    """
++    from lerobot.configs.video import DEPTH_ENCODER_INFO_FIELD_NAMES, DepthEncoderConfig
++
++    info = info or {}
++    defaults = {name: getattr(DepthEncoderConfig, name) for name in DEPTH_ENCODER_INFO_FIELD_NAMES}
++    return {name: info.get(f"video.{name}", default) for name, default in defaults.items()}
++
++
++def _to_millimetres(codes: np.ndarray, quantization: Mapping[str, Any]) -> np.ndarray:
++    from lerobot.datasets.depth_utils import dequantize_depth
++
++    depth = dequantize_depth(codes, **quantization, output_unit="mm", output_tensor=False)
++    return np.asarray(depth).reshape(codes.shape[-2:])
++
++
++def decode_depth_frame_mm(
++    video_path: Path, timestamp: float, tolerance_s: float, info: Mapping[str, Any] | None
++) -> np.ndarray:
++    """The ``(H, W)`` depth in millimetres of the frame at ``timestamp`` of a depth video."""
++    from lerobot.datasets.video_utils import decode_video_frames
++
++    codes = decode_video_frames(video_path, [timestamp], tolerance_s, backend="pyav", is_depth=True)
++    return _to_millimetres(np.asarray(codes[0]), depth_quantization(info))
++
++
++def depth_preview_path(video_path: Path, cache_dir: Path) -> Path:
++    """Where the preview of ``video_path`` is cached; a new one when the video changes, as recording appends to it."""
++    stat = video_path.stat()
++    key = hashlib.sha256(f"{video_path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}".encode()).hexdigest()[:32]
++    return cache_dir / "depth_previews" / f"{key}.mp4"
++
++
++def ensure_depth_preview(video_path: Path, cache_dir: Path, info: Mapping[str, Any] | None) -> Path:
++    """A browser-playable, colorized copy of a depth video, made once and cached.
++
++    Raises:
++        RuntimeError: No browser-playable encoder is available.
++    """
++    preview = depth_preview_path(video_path, cache_dir)
++    with _locks_guard:
++        lock = _locks.setdefault(preview, threading.Lock())
++    with lock:
++        if not preview.is_file():
++            preview.parent.mkdir(parents=True, exist_ok=True)
++            partial = preview.with_suffix(f".{os.getpid()}.part.mp4")
++            try:
++                transcode_depth_preview(video_path, partial, info)
++                partial.replace(preview)
++            finally:
++                partial.unlink(missing_ok=True)
++    return preview
++
++
++def transcode_depth_preview(source: Path, target: Path, info: Mapping[str, Any] | None) -> None:
++    """Re-encode a depth video as colorized H.264 (or AV1) with the same frame timestamps.
++
++    Raises:
++        RuntimeError: No browser-playable encoder is available.
++    """
++    import av
++
++    from internal_datasets.lerobot.video_encoding_settings import _is_vcodec_usable
++    from utils.depth_colormap import colorize_depth
++
++    codec, options = next(((name, opts) for name, opts in _PREVIEW_CODECS if _is_vcodec_usable(name)), (None, None))
++    if codec is None or options is None:
++        raise RuntimeError("No browser-playable video encoder (libx264 or libsvtav1) to preview depth with")
++    quantization = depth_quantization(info)
++    with av.open(str(source)) as reader, av.open(str(target), "w") as writer:
++        stream = reader.streams.video[0]
++        time_base = stream.time_base or Fraction(1, int(stream.average_rate or 30))
++        output = writer.add_stream(codec, rate=stream.average_rate or 30, options=dict(options))
++        if not isinstance(output, av.VideoStream):
++            raise RuntimeError(f"Codec {codec!r} did not create a video stream")
++        output.width, output.height = stream.width, stream.height
++        output.pix_fmt = "yuv420p"
++        output.time_base = time_base
++        near = far = None
++        frames: list[tuple[Any, np.ndarray]] = []
++        for frame in reader.decode(stream):
++            depth = _to_millimetres(frame.to_ndarray(format="gray12le"), quantization)
++            if near is None:
++                frames.append((frame.pts, depth))
++                if len(frames) < _RANGE_FRAMES:
++                    continue
++                near, far = _color_range(np.stack([d for _, d in frames]))
++                pending, frames = frames, []
++            else:
++                pending = [(frame.pts, depth)]
++            for pts, mm in pending:
++                _encode(writer, output, colorize_depth(mm, near, far), pts, time_base)
++        if frames:  # a video shorter than the range sample
++            near, far = _color_range(np.stack([d for _, d in frames]))
++            for pts, mm in frames:
++                _encode(writer, output, colorize_depth(mm, near, far), pts, time_base)
++        for packet in output.encode():
++            writer.mux(packet)
++
++
++def _color_range(depth: np.ndarray) -> tuple[float, float]:
++    valid = depth[depth > 0]
++    if not valid.size:
++        return 0.0, 1000.0
++    low, high = np.percentile(valid[:: max(1, valid.size // 200_000)], (2, 98))
++    return float(low), float(high)
++
++
++def _encode(writer: Any, output: Any, rgb: np.ndarray, pts: int | None, time_base: Fraction) -> None:
++    import av
++
++    frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
++    frame.pts = pts  # type: ignore[assignment]  # PyAV accepts None: no timestamp
++    frame.time_base = time_base
++    for packet in output.encode(frame):
++        writer.mux(packet)
+diff --git a/application/backend/src/internal_datasets/lerobot/lerobot_dataset.py b/application/backend/src/internal_datasets/lerobot/lerobot_dataset.py
+index f21d1cf..bc21097 100644
+--- a/application/backend/src/internal_datasets/lerobot/lerobot_dataset.py
++++ b/application/backend/src/internal_datasets/lerobot/lerobot_dataset.py
+@@ -1,4 +1,6 @@
+ import copy
++import functools
++import json
+ import shutil
+ from functools import lru_cache
+ from pathlib import Path
+@@ -20,7 +22,7 @@ from loguru import logger
+ from internal_datasets.access_mode import DatasetAccessMode
+ from internal_datasets.dataset_client import DatasetClient
+ from internal_datasets.lerobot.episode_task import set_episode_task
+-from internal_datasets.lerobot.video_encoding_settings import VideoEncodingSettings
++from internal_datasets.lerobot.video_encoding_settings import VideoEncodingSettings, depth_features
+ from internal_datasets.mutations.recording_mutation import RecordingMutation
+ from schemas import Episode, EpisodeInfo, EpisodeVideo
+ from settings import get_settings
+@@ -71,8 +73,15 @@ class InternalLeRobotDataset(DatasetClient):
+                 )
+             self.has_episodes = self._dataset.num_episodes > 0
+ 
+-    def _resolved_recording_video_encoding_settings_write(self) -> dict:
+-        return self._recording_video_encoding_settings.to_lerobot_write_kwargs()
++    def _resolved_recording_video_encoding_settings_write(self, features: dict | None = None) -> dict:
++        """LeRobot writer arguments for ``features``, or for the features already on disk."""
++        if features is None:
++            features = self._features_on_disk()
++        return self._recording_video_encoding_settings.to_lerobot_write_kwargs(depth_features(features))
++
++    def _features_on_disk(self) -> dict:
++        info = self.path / "meta/info.json"
++        return json.loads(info.read_text()).get("features", {}) if info.is_file() else {}
+ 
+     def _resume_for_writing(self, repo_id: str | None = None) -> None:
+         if not self._check_repository_exists(self.path):
+@@ -108,7 +117,7 @@ class InternalLeRobotDataset(DatasetClient):
+             features=features,
+             robot_type=robot_type,
+             use_videos=True,
+-            **self._resolved_recording_video_encoding_settings_write(),
++            **self._resolved_recording_video_encoding_settings_write(features),
+         )
+         self.has_episodes = False
+ 
+@@ -142,6 +151,13 @@ class InternalLeRobotDataset(DatasetClient):
+     def get_video_keys(self) -> list[str]:
+         return list(self._dataset.meta.video_keys)
+ 
++    def get_depth_keys(self) -> list[str]:
++        meta = self._dataset.meta
++        return [key for key in getattr(meta, "depth_keys", ()) if key in meta.video_keys]
++
++    def get_feature_info(self, key: str) -> dict:
++        return dict(self._dataset.meta.features.get(key, {}).get("info") or {})
++
+     def get_episode_thumbnail_png(
+         self,
+         episode_index: int,
+@@ -167,6 +183,10 @@ class InternalLeRobotDataset(DatasetClient):
+         build_thumbnail = (
+             self._cached_thumbnail_png_bytes if width <= 320 and height <= 240 else self._build_thumbnail_png_bytes
+         )
++        if video_key in self.get_depth_keys():
++            build_thumbnail = functools.partial(
++                self._build_depth_thumbnail_png_bytes, info=json.dumps(self.get_feature_info(video_key), sort_keys=True)
++            )
+         try:
+             thumbnail_png = build_thumbnail(
+                 str(video_path),
+@@ -290,8 +310,8 @@ class InternalLeRobotDataset(DatasetClient):
+ 
+     def start_recording_mutation(self, fps: int, features: dict, robot_type: str) -> RecordingMutation:
+         """Start recording mutation."""
+-        # Fail before copying the dataset if PyAV has no usable video encoder.
+-        self._resolved_recording_video_encoding_settings_write()
++        # Fail before copying the dataset if PyAV has no usable video encoder, for depth too.
++        self._resolved_recording_video_encoding_settings_write(features if not self.exists_on_disk else None)
+ 
+         settings = get_settings()
+         cache_dir = settings.cache_dir / str(uuid4())
+@@ -327,8 +347,9 @@ class InternalLeRobotDataset(DatasetClient):
+ 
+         end = data["timestamp"][-1]
+         episode_index = data["episode_index"].tolist()[0]
++        depth_keys = set(self._dataset.meta.depth_keys)
+         video_timestamps = {
+-            video_key: EpisodeVideo(start=0, end=end, path="")  # TODO: Implement path
++            video_key: EpisodeVideo(start=0, end=end, path="", is_depth=video_key in depth_keys)  # TODO: Implement path
+             for video_key in self._dataset.meta.video_keys
+         }
+         if episode is not None:
+@@ -396,11 +417,13 @@ class InternalLeRobotDataset(DatasetClient):
+     def _build_videos(self, episode: EpisodeMetadata) -> dict[str, EpisodeVideo]:
+         """Build video info for episode."""
+         metadata = self._dataset.meta
++        depth_keys = set(metadata.depth_keys)
+         return {
+             video_key: EpisodeVideo(
+                 start=episode[f"videos/{video_key}/from_timestamp"],
+                 end=episode[f"videos/{video_key}/to_timestamp"],
+                 path=str(metadata.get_video_file_path(episode["episode_index"], video_key)),
++                is_depth=video_key in depth_keys,
+             )
+             for video_key in metadata.video_keys
+         }
+@@ -459,6 +482,30 @@ class InternalLeRobotDataset(DatasetClient):
+ 
+         return imagebytes.tobytes()
+ 
++    @staticmethod
++    @lru_cache(maxsize=128)
++    def _build_depth_thumbnail_png_bytes(
++        video_path: str,
++        start: float,
++        width: int,
++        height: int,
++        _mtime_ns: int,
++        _size: int,
++        tolerance_s: float,
++        *,
++        info: str,
++    ) -> bytes:
++        """A colorized thumbnail of a depth video's frame at ``start``; ``info`` is the feature's info, as JSON."""
++        from internal_datasets.lerobot.depth_video import decode_depth_frame_mm
++        from utils.depth_colormap import colorize_depth
++
++        depth = decode_depth_frame_mm(Path(video_path), start, tolerance_s, json.loads(info))
++        frame = cv2.cvtColor(colorize_depth(depth), cv2.COLOR_RGB2BGR)
++        encoded, imagebytes = cv2.imencode(".png", cv2.resize(frame, (width, height), interpolation=cv2.INTER_NEAREST))
++        if not encoded:
++            raise RuntimeError(f"Failed to encode thumbnail PNG from '{video_path}'")
++        return imagebytes.tobytes()
++
+     def _get_episode_buffer_snapshot(self) -> dict | None:
+         writer = self._dataset.writer
+         if writer is None:
+diff --git a/application/backend/src/internal_datasets/lerobot/video_encoding_settings.py b/application/backend/src/internal_datasets/lerobot/video_encoding_settings.py
+index 69d2e53..65700b1 100644
+--- a/application/backend/src/internal_datasets/lerobot/video_encoding_settings.py
++++ b/application/backend/src/internal_datasets/lerobot/video_encoding_settings.py
+@@ -1,5 +1,6 @@
+ import logging
+ import tempfile
++from collections.abc import Mapping
+ from dataclasses import dataclass, field
+ from fractions import Fraction
+ from functools import cache
+@@ -192,16 +193,115 @@ def _normalise_preset(vcodec: str, preset: Any) -> Any:
+     return _numeric_preset_choices(vcodec).get(preset, preset)
+ 
+ 
++# How depth maps are quantized into 12-bit video codes (LeRobot's log quantization, in metres).
++# Fixed for every Studio dataset, so episodes recorded with different cameras or depth ranges decode
++# alike. Depth 0 (no data) maps to code 0 and decodes back to exactly 0. The step between codes is
++# 1.3 mm at 0.3 m, 1.5 mm at 1 m and 2.1 mm at 3 m: finer than a RealSense D400's depth noise.
++DEPTH_QUANT_MIN_M = 0.0
++DEPTH_QUANT_MAX_M = 10.0
++DEPTH_QUANT_SHIFT_M = 3.5
++DEPTH_QUANT_USE_LOG = True
++_DEPTH_QUANT_FIELDS = ("depth_min", "depth_max", "shift", "use_log")
++
++
++_USABLE_DEPTH_ENCODERS: set[tuple[str, str, tuple[tuple[str, str], ...]]] = set()
++"""Depth encoder configurations that encoded a frame; a failure is not remembered, so it is probed again."""
++
++
++def _is_depth_encoder_usable(vcodec: str, pix_fmt: str, options: tuple[tuple[str, str], ...]) -> bool:
++    """Probe a depth encoder configuration by encoding and muxing one 12-bit depth frame, in memory."""
++    import io
++
++    import av
++    import numpy as np
++
++    key = (vcodec, pix_fmt, options)
++    if key in _USABLE_DEPTH_ENCODERS:
++        return True
++    try:
++        with av.open(io.BytesIO(), "w", format="mp4") as container:
++            stream = container.add_stream(vcodec, 30, options=dict(options))
++            if not isinstance(stream, av.VideoStream):
++                raise ValueError(f"Codec {vcodec!r} did not create a video stream")
++            stream.pix_fmt = pix_fmt
++            stream.width, stream.height, stream.time_base = 320, 240, Fraction(1, 30)
++            frame = av.VideoFrame.from_ndarray(np.zeros((240, 320), dtype=np.uint16), format=pix_fmt)
++            frame.pts, frame.time_base = 0, Fraction(1, 30)
++            for packet in stream.encode(frame):
++                container.mux(packet)
++            for packet in stream.encode():
++                container.mux(packet)
++    except Exception as exc:
++        logging.warning("Depth video encoder '%s' (%s) is unavailable: %s", vcodec, pix_fmt, exc)
++        return False
++    _USABLE_DEPTH_ENCODERS.add(key)
++    return True
++
++
++@dataclass
++class StudioDepthEncoderConfig(DepthEncoderConfig):
++    """How Studio encodes RealSense depth maps: 12-bit HEVC, lossless unless a CRF is configured.
++
++    LeRobot's depth defaults (HEVC Main 12, ``gray12le``, lossless) with a real-time preset, so two
++    1280x720 cameras keep up at 30 fps, and Studio's fixed quantization range (see
++    ``DEPTH_QUANT_*``). ``crf`` set switches to lossy encoding: far smaller files, at the cost of
++    errors around depth edges and holes.
++    """
++
++    vcodec: str = "hevc"
++    pix_fmt: str = "gray12le"
++    g: int | None = 2
++    crf: int | float | None = None
++    preset: int | str | None = "ultrafast"
++    fast_decode: int = 0
++    video_backend: str = "pyav"
++    extra_options: dict[str, Any] = field(default_factory=dict)
++    depth_min: float = DEPTH_QUANT_MIN_M
++    depth_max: float = DEPTH_QUANT_MAX_M
++    shift: float = DEPTH_QUANT_SHIFT_M
++    use_log: bool = DEPTH_QUANT_USE_LOG
++
++    def __post_init__(self) -> None:
++        x265_params = "log-level=error" if self.crf is not None else "lossless=1:log-level=error"
++        self.extra_options = {"x265-params": x265_params, **self.extra_options}
++        super().__post_init__()
++
++    def resolve_vcodec(self) -> None:
++        self.vcodec = VIDEO_CODECS_ALIASES.get(self.vcodec, self.vcodec)
++        options = tuple(sorted(self.get_codec_options(as_strings=True).items()))
++        if not _is_depth_encoder_usable(self.vcodec, self.pix_fmt, options):
++            raise RuntimeError(
++                f"Depth recording needs the '{self.vcodec}' video encoder with '{self.pix_fmt}' (12-bit gray) "
++                "support, which this backend's FFmpeg (PyAV) lacks. Record the RealSense camera with "
++                "output type 'color', or install a PyAV build with libx265."
++            )
++
++    @classmethod
++    def for_recording(
++        cls, crf: int | None = None, recorded: Mapping[str, Any] | None = None
++    ) -> "StudioDepthEncoderConfig":
++        """The encoder for new episodes; a dataset that has depth episodes keeps the quantization it has.
++
++        Args:
++            crf: Lossy quality (lower is better), or ``None`` for lossless.
++            recorded: The ``info`` of a depth feature already recorded, holding ``video.depth_min`` & co.
++        """
++        quantization = {
++            name: (recorded or {})[f"video.{name}"]
++            for name in _DEPTH_QUANT_FIELDS
++            if (recorded or {}).get(f"video.{name}") is not None
++        }
++        return cls(crf=crf, **quantization)
++
++
+ class _UnsupportedDepthEncoderConfig(DepthEncoderConfig):
+     """Keep RGB-only writers independent of LeRobot's unused depth defaults.
+ 
+     LeRobot 0.6 eagerly constructs and validates a HEVC/gray12le depth encoder
+     in both DatasetWriter and StreamingVideoEncoder, even for RGB-only data.
+-    Studio's LGPL FFmpeg build cannot supply that encoder. Pass an explicit
+-    placeholder instead, without probing a codec that we never use.
+-
+-    Replace this placeholder with a validated depth configuration when Studio
+-    adds depth recording; do not silently encode depth with the RGB settings.
++    An LGPL FFmpeg build cannot supply that encoder. Pass an explicit
++    placeholder for datasets without depth instead, without probing a codec
++    that we never use; datasets with depth get :class:`StudioDepthEncoderConfig`.
+     """
+ 
+     def __post_init__(self) -> None:
+@@ -209,7 +309,7 @@ class _UnsupportedDepthEncoderConfig(DepthEncoderConfig):
+         pass
+ 
+     def get_codec_options(self, encoder_threads: int | None = None, as_strings: bool = False) -> dict[str, Any]:
+-        raise NotImplementedError("Depth video recording is not supported by Studio")
++        raise NotImplementedError("Depth video recording is not supported for a dataset created without depth features")
+ 
+ 
+ class VideoEncodingSettings(BaseModel):
+@@ -222,14 +322,25 @@ class VideoEncodingSettings(BaseModel):
+     extra_options: dict[str, Any] = Field(default_factory=dict)
+     encoder_threads: int | None = None
+     encoder_queue_maxsize: int = 60
++    depth_crf: int | None = None
++    """Lossy depth encoding at this CRF; ``None`` encodes depth losslessly."""
++
++    def to_lerobot_write_kwargs(self, depth_features: Mapping[str, Mapping[str, Any]] | None = None) -> dict[str, Any]:
++        """LeRobot writer arguments; ``depth_features`` are the dataset's depth features, by key, with their info.
+ 
+-    def to_lerobot_write_kwargs(self) -> dict[str, Any]:
++        Raises:
++            RuntimeError: The dataset has depth and this backend cannot encode it.
++        """
++        depth_encoder: DepthEncoderConfig = _UnsupportedDepthEncoderConfig()
++        if depth_features:
++            recorded = next((ft.get("info") or {} for ft in depth_features.values()), None)
++            depth_encoder = StudioDepthEncoderConfig.for_recording(self.depth_crf, recorded)
+         return {
+             "streaming_encoding": self.streaming_encoding,
+             "encoder_threads": self.encoder_threads,
+             "encoder_queue_maxsize": self.encoder_queue_maxsize,
+             "rgb_encoder": self._build_rgb_encoder_config(),
+-            "depth_encoder": _UnsupportedDepthEncoderConfig(),
++            "depth_encoder": depth_encoder,
+         }
+ 
+     def _build_rgb_encoder_config(self) -> StudioRGBEncoderConfig:
+@@ -319,17 +430,29 @@ def available_video_encoding_presets() -> tuple[VideoEncodingPreset, ...]:
+     return tuple(preset for preset in video_encoding_presets() if video_encoding_preset_is_usable(preset))
+ 
+ 
+-def resolve_video_encoding_settings(preset_id: str | None) -> VideoEncodingSettings:
++def resolve_video_encoding_settings(preset_id: str | None, depth_crf: int | None = None) -> VideoEncodingSettings:
+     """Resolve Default or a verified explicit preset for a recording writer.
+ 
+     Default retains Studio's historic ``auto`` behavior: probe the ordered
+     encoder candidates and use the first codec that can encode a real frame.
++    ``depth_crf`` is how depth maps are encoded (``None``: losslessly).
+     """
+     if preset_id is None:
+-        return VideoEncodingSettings()
++        return VideoEncodingSettings(depth_crf=depth_crf)
+     preset = get_video_encoding_preset(preset_id)
+     if preset is None:
+         raise ValueError(f"Unknown video recording preset '{preset_id}'")
+     if not video_encoding_preset_is_usable(preset):
+         raise ValueError(f"Video recording preset '{preset.name}' is unavailable on this backend")
+-    return preset.settings.model_copy(deep=True)
++    return preset.settings.model_copy(deep=True, update={"depth_crf": depth_crf})
++
++
++def depth_features(features: Mapping[str, Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
++    """The depth-map features among LeRobot ``features``, as ``LeRobotDatasetMetadata.depth_keys`` tells them."""
++
++    def is_depth(feature: Mapping[str, Any]) -> bool:
++        info = feature.get("info") or {}
++        video_info = feature.get("video_info") or {}
++        return bool(info.get("is_depth_map") or info.get("video.is_depth_map") or video_info.get("video.is_depth_map"))
++
++    return {key: feature for key, feature in features.items() if is_depth(feature)}
+diff --git a/application/backend/src/internal_datasets/utils.py b/application/backend/src/internal_datasets/utils.py
+index e849524..442c35c 100644
+--- a/application/backend/src/internal_datasets/utils.py
++++ b/application/backend/src/internal_datasets/utils.py
+@@ -30,8 +30,11 @@ def get_internal_read_dataset(dataset: Dataset) -> DatasetClient:
+ 
+ def get_internal_recording_dataset(dataset: Dataset) -> DatasetClient:
+     """Load a dataset in recording-mutation mode for worker flows, encoding with the configured preset."""
++    settings = get_settings()
+     return InternalLeRobotDataset(
+         Path(dataset.path),
+         access_mode=DatasetAccessMode.RECORDING_MUTATION,
+-        recording_video_encoding_settings=resolve_video_encoding_settings(get_settings().video_recording.preset),
++        recording_video_encoding_settings=resolve_video_encoding_settings(
++            settings.video_recording.preset, depth_crf=settings.depth_video_crf
++        ),
+     )
+diff --git a/application/backend/src/runtime_session/dataset.py b/application/backend/src/runtime_session/dataset.py
+index 3d0f7f2..56aaa44 100644
+--- a/application/backend/src/runtime_session/dataset.py
++++ b/application/backend/src/runtime_session/dataset.py
+@@ -2,8 +2,10 @@
+ 
+ A dataset stores the follower's joints packed into ``observation.state`` and
+ ``action`` with ``<joint>.pos`` names, and each camera as
+-``observation.images.<key>``. The store uses the same names and keys, so a
+-dataset's spec compares to a session's directly. A dataset with nothing
++``observation.images.<key>``; a RealSense camera's depth map, aligned to its
++color image, as ``observation.images.<key>_depth``, a LeRobot depth feature
++(``uint16`` millimetres, ``info.is_depth_map``). The store uses the same names
++and keys, so a dataset's spec compares to a session's directly. A dataset with nothing
+ recorded yet has no shape of its own and takes the session's.
+ 
+ A :class:`Recording` then records into it, from the session's store, through a
+@@ -108,13 +110,21 @@ def dataset_spec(dataset: Dataset) -> FeatureSpec | None:
+     if tuple(features["action"]["names"]) != joints:
+         raise ValueError(f"Dataset {dataset.name!r} records an action for other joints than its state")
+     cameras = {
+-        key.removeprefix(_IMAGE_PREFIX): ImageSpec(*(int(dim) for dim in value["shape"]))
++        key.removeprefix(_IMAGE_PREFIX): _image_spec(value)
+         for key, value in features.items()
+         if key.startswith(_IMAGE_PREFIX)
+     }
+     return FeatureSpec(joints, cameras)
+ 
+ 
++def _image_spec(feature: dict[str, Any]) -> ImageSpec:
++    """A recorded camera feature's store slot: a depth map is ``uint16`` millimetres, color ``uint8``."""
++    height, width, channels = (int(dim) for dim in feature["shape"])
++    info = feature.get("info") or {}
++    is_depth = info.get("is_depth_map") or info.get("video.is_depth_map")
++    return ImageSpec(height, width, channels, "uint16" if is_depth else "uint8")
++
++
+ def lerobot_features(spec: FeatureSpec) -> dict[str, Any]:
+     """The LeRobot feature metadata a new dataset is created with, from the session's spec."""
+     # Imported here: lerobot is heavy, and only the dataset worker's process needs it.
+diff --git a/application/backend/src/runtime_session/environment.py b/application/backend/src/runtime_session/environment.py
+index 029148b..6b1c84b 100644
+--- a/application/backend/src/runtime_session/environment.py
++++ b/application/backend/src/runtime_session/environment.py
+@@ -29,10 +29,10 @@ from loguru import logger
+ from exceptions import RuntimeSessionCommandError
+ from robots.features import sanitize_camera_name
+ from runtime_session.bus import Bus, Subscription, publish_status, status_key
+-from runtime_session.store import FeatureSpec, Store
++from runtime_session.store import FeatureSpec, ImageSpec, Store, depth_key
+ from schemas.runtime_session import CommandDone, ReloadEnvironment, SessionCamera, SessionEnvironment, StatusMessage
+ from workers.base import WorkerStartupError
+-from workers.camera_worker import CameraWorker, camera_image_spec
++from workers.camera_worker import CameraWorker, camera_observations
+ from workers.robot_worker import DEFAULT_ROBOT_HZ, RobotRecipe, RobotWorker, claim_robot
+ 
+ if TYPE_CHECKING:
+@@ -71,16 +71,19 @@ class EnvironmentDescription:
+             robot_id=self.follower.robot_id,
+             leader_id=self.leader.robot_id if self.leader is not None else None,
+             joint_names=list(self.spec.joint_names),
+-            cameras=[
+-                SessionCamera(
+-                    camera_id=camera.id,
+-                    name=camera.name,
+-                    key=key,
+-                    height=self.spec.observations[key].height,
+-                    width=self.spec.observations[key].width,
+-                )
+-                for key, camera in self.cameras.items()
+-            ],
++            cameras=[self._session_camera(key, camera) for key, camera in self.cameras.items()],
++        )
++
++    def shown_key(self, key: str) -> str:
++        """The frame a session shows for the camera at ``key``: its color image, or its depth map if it has no color."""
++        return key if key in self.spec.observations or depth_key(key) not in self.spec.observations else depth_key(key)
++
++    def _session_camera(self, key: str, camera: Camera) -> SessionCamera:
++        depth = depth_key(key) if depth_key(key) in self.spec.observations else None
++        shown = self.shown_key(key)
++        image = self.spec.observations[shown]
++        return SessionCamera(
++            camera_id=camera.id, name=camera.name, key=shown, depth_key=depth, height=image.height, width=image.width
+         )
+ 
+ 
+@@ -109,12 +112,19 @@ async def describe_environment(
+         robot_names[leader_robot.id] = leader_robot.name
+ 
+     cameras: dict[str, Camera] = {}
++    observations: dict[str, ImageSpec] = {}
++    recorded_by: dict[str, Camera] = {}
+     for camera in environment.cameras:
+         key = sanitize_camera_name(camera.name)
+         if key in cameras:
+             raise ValueError(f"Cameras {cameras[key].name!r} and {camera.name!r} would both be recorded as {key!r}")
+         cameras[key] = camera
+-    spec = FeatureSpec(follower.joint_names, {key: camera_image_spec(camera) for key, camera in cameras.items()})
++        for slot, image in camera_observations(key, camera).items():
++            if (other := recorded_by.get(slot)) is not None:
++                raise ValueError(f"Cameras {other.name!r} and {camera.name!r} would both be recorded as {slot!r}")
++            recorded_by[slot] = camera
++            observations[slot] = image
++    spec = FeatureSpec(follower.joint_names, observations)
+     return EnvironmentDescription(
+         environment_id=None if environment.id == UNSAVED_ENVIRONMENT_ID else environment.id,
+         name=environment.name,
+@@ -221,8 +231,10 @@ class Environment:
+                 )
+                 managers: dict[str, AbstractAsyncContextManager[Any]] = {"follower": follower}
+                 for key, row in description.cameras.items():
+-                    managers[key] = CameraWorker(
+-                        row, store, key, session_id=self.session_id, component=f"{COMPONENT}/{key}"
++                    # Named after the frame the session shows for it, as its status is looked up.
++                    shown = description.shown_key(key)
++                    managers[shown] = CameraWorker(
++                        row, store, key, session_id=self.session_id, component=f"{COMPONENT}/{shown}"
+                     )
+                 if description.leader is not None:
+                     managers["leader"] = _connected_driver(description.leader)
+diff --git a/application/backend/src/runtime_session/session.py b/application/backend/src/runtime_session/session.py
+index 630254d..b3b7eeb 100644
+--- a/application/backend/src/runtime_session/session.py
++++ b/application/backend/src/runtime_session/session.py
+@@ -68,7 +68,7 @@ from schemas.runtime_session import (
+     UnloadEnvironmentCommand,
+     UnloadModelCommand,
+ )
+-from services.camera_claims import CameraClaim, settings_from_camera
++from services.camera_claims import CameraClaim, output_from_camera, settings_from_camera
+ from workers import dataset_worker as dataset_rpc
+ from workers.base import WorkerStartupError
+ from workers.dataset_worker import RecordingStatus
+@@ -429,6 +429,7 @@ class RuntimeSession:
+                 CameraClaim(
+                     fingerprint=camera.fingerprint,
+                     settings=settings_from_camera(camera),
++                    output=output_from_camera(camera),
+                     holder=self.id,
+                     project_id=self.project_id,
+                     project_name=self.project_name,
+diff --git a/application/backend/src/runtime_session/store.py b/application/backend/src/runtime_session/store.py
+index 6e96821..d161548 100644
+--- a/application/backend/src/runtime_session/store.py
++++ b/application/backend/src/runtime_session/store.py
+@@ -32,6 +32,15 @@ ACTION = "action"
+ VECTOR_KEYS = (STATE, ACTION)
+ """Joint vectors the store always holds; they share the spec's joint names."""
+ 
++DEPTH_SUFFIX = "_depth"
++"""Appended to a camera's key for the slot, and dataset camera, of its depth map."""
++
++
++def depth_key(key: str) -> str:
++    """The store key, and dataset camera name, of the depth map of the camera at ``key``."""
++    return f"{key}{DEPTH_SUFFIX}"
++
++
+ BLOCK_PREFIX = "pai-"
+ # macOS limits names to 31 bytes including Python's leading "/": this leaves room for a 7-digit pid.
+ _BLOCK_SESSION_CHARS = 18
+@@ -41,16 +50,29 @@ _WORD = 8
+ 
+ @dataclass(frozen=True, slots=True)
+ class ImageSpec:
++    """One camera image: ``uint8`` color, or a ``uint16`` depth map in millimetres with one channel."""
++
+     height: int
+     width: int
+     channels: int = 3
++    dtype: str = "uint8"
++
++    @classmethod
++    def depth(cls, height: int, width: int) -> ImageSpec:
++        """A depth map: one ``uint16`` channel of millimetres, 0 where there is no depth."""
++        return cls(height, width, 1, "uint16")
+ 
+     @property
+     def shape(self) -> tuple[int, int, int]:
+         return (self.height, self.width, self.channels)
+ 
++    @property
++    def is_depth(self) -> bool:
++        return self.dtype == "uint16"
++
+     def __str__(self) -> str:
+-        return f"{self.height}x{self.width}x{self.channels}"
++        shape = f"{self.height}x{self.width}x{self.channels}"
++        return shape if self.dtype == "uint8" else f"{shape} {self.dtype}"
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -136,7 +158,8 @@ def _layout(spec: FeatureSpec) -> tuple[dict[str, _Slot], dict[str, _Slot], int]
+         offset += vectors[key].nbytes
+     images: dict[str, _Slot] = {}
+     for index, key in enumerate(sorted(spec.observations), start=len(VECTOR_KEYS)):
+-        images[key] = _Slot(index, offset, spec.observations[key].shape, np.uint8)
++        image = spec.observations[key]
++        images[key] = _Slot(index, offset, image.shape, np.dtype(image.dtype).type)
+         offset += -(-images[key].nbytes // _WORD) * _WORD  # keep the next slot 8-byte aligned
+     return vectors, images, max(offset, _WORD)
+ 
+diff --git a/application/backend/src/schemas/dataset.py b/application/backend/src/schemas/dataset.py
+index b77266e..13c9aae 100644
+--- a/application/backend/src/schemas/dataset.py
++++ b/application/backend/src/schemas/dataset.py
+@@ -12,6 +12,8 @@ class EpisodeVideo(BaseModel):
+     start: float
+     end: float
+     path: str
++    is_depth: bool = False
++    """A depth map (12-bit HEVC, which browsers cannot play): fetch it with ``depth_preview=true`` to view it."""
+ 
+ 
+ class EpisodeInfo(BaseModel):
+diff --git a/application/backend/src/schemas/runtime_session.py b/application/backend/src/schemas/runtime_session.py
+index 03e940e..04435d5 100644
+--- a/application/backend/src/schemas/runtime_session.py
++++ b/application/backend/src/schemas/runtime_session.py
+@@ -196,7 +196,11 @@ class SessionCamera(BaseModel):
+     camera_id: UUID
+     name: str
+     key: str
+-    """The store and frame key; also the key a dataset records this camera under."""
++    """The store and frame key shown for this camera; also the key a dataset records it under.
++
++    The color image, or the depth map (``<camera>_depth``) of a depth-only camera."""
++    depth_key: str | None = None
++    """The store and frame key of the camera's depth map, aligned to its color image, if it records depth."""
+     height: int
+     width: int
+ 
+diff --git a/application/backend/src/services/camera_claims.py b/application/backend/src/services/camera_claims.py
+index ff2f3ba..59b71d3 100644
+--- a/application/backend/src/services/camera_claims.py
++++ b/application/backend/src/services/camera_claims.py
+@@ -21,6 +21,8 @@ class CameraClaim:
+     holder: str
+     project_id: UUID
+     project_name: str
++    output: str = "color"
++    """What a RealSense streams (``color``, ``depth`` or ``both``): its publisher serves one of them at a time."""
+ 
+ 
+ def settings_from_camera(camera: Camera) -> tuple[int, int, int]:
+@@ -33,6 +35,11 @@ def settings_from_camera(camera: Camera) -> tuple[int, int, int]:
+     )
+ 
+ 
++def output_from_camera(camera: Camera) -> str:
++    """What a camera streams: a RealSense its ``output_type``, any other camera ``color``."""
++    return str(getattr(camera.payload, "output_type", "color"))
++
++
+ def _fingerprint_key(fingerprint: dict[str, Any]) -> str:
+     return json.dumps(fingerprint, sort_keys=True, separators=(",", ":"))
+ 
+@@ -63,11 +70,13 @@ class CameraClaimRegistry:
+                 if not holders:
+                     continue
+                 pinned = next(iter(holders.values()))
+-                if pinned.settings != incoming.settings:
++                if (pinned.settings, pinned.output) != (incoming.settings, incoming.output):
+                     raise CameraSettingsConflictError(
+                         project_name=pinned.project_name,
+                         pinned=pinned.settings,
+                         requested=incoming.settings,
++                        pinned_output=pinned.output,
++                        requested_output=incoming.output,
+                     )
+             for incoming in claims:
+                 holders = self._claims.setdefault(_fingerprint_key(incoming.fingerprint), {})
+diff --git a/application/backend/src/services/episode_thumbnail_service.py b/application/backend/src/services/episode_thumbnail_service.py
+index db43a15..d91f5ac 100644
+--- a/application/backend/src/services/episode_thumbnail_service.py
++++ b/application/backend/src/services/episode_thumbnail_service.py
+@@ -47,7 +47,9 @@ class EpisodeThumbnailService:
+             return None
+ 
+         if camera is None:
+-            return video_keys[0]
++            # A color camera when there is one: a depth map makes a poor thumbnail.
++            depth_keys = set(dataset.get_depth_keys())
++            return next((key for key in video_keys if key not in depth_keys), video_keys[0])
+ 
+         if camera in video_keys:
+             return camera
+diff --git a/application/backend/src/settings.py b/application/backend/src/settings.py
+index 90004f8..44d73b5 100644
+--- a/application/backend/src/settings.py
++++ b/application/backend/src/settings.py
+@@ -298,6 +298,9 @@ class Settings(BaseSettings):
+     hotkeys: HotkeySettings = HotkeySettings()
+     # User-configurable video encoding for dataset recordings.
+     video_recording: VideoRecordingSettings = VideoRecordingSettings()
++    # Depth maps are recorded losslessly (about 0.5-1 GB per minute per 1280x720 camera at 30 fps).
++    # A CRF (e.g. 8) records them lossy instead: around 50x smaller, with errors near depth edges.
++    depth_video_crf: int | None = Field(default=None, ge=0, le=51, alias="DEPTH_VIDEO_CRF")
+ 
+     # Managed SSH trainers require a loopback-bound backend; see
+     # `core.security.ssh_network_exposure`. The UI warns that SSH access has
+diff --git a/application/backend/src/workers/camera_worker.py b/application/backend/src/workers/camera_worker.py
+index 0dcff93..0802b6d 100644
+--- a/application/backend/src/workers/camera_worker.py
++++ b/application/backend/src/workers/camera_worker.py
+@@ -4,26 +4,58 @@ from collections.abc import AsyncIterator
+ from contextlib import asynccontextmanager, nullcontext
+ 
+ import cv2
++import numpy as np
+ from loguru import logger
+ from physicalai.capture import SharedCamera
++from physicalai.capture.frame import Frame
+ 
+ from runtime_session.bus import Bus, publish_status
+-from runtime_session.store import ImageSpec, Store
++from runtime_session.store import ImageSpec, Store, depth_key
+ from schemas.project_camera import Camera
+ from schemas.runtime_session import ComponentState
+ from utils.camera_factory import build_shared_camera
++from utils.realsense_rgbd import output_has_color, output_has_depth, unpack_rgbd
+ from workers.base import ThreadWorker
+ from workers.rate import Rate
+ 
++POLLS_PER_FRAME = 2
++"""How many times per frame interval a camera is polled, so a new frame reaches the store within half a frame."""
++
+ 
+ def camera_image_spec(config: Camera) -> ImageSpec:
+-    """The frame shape a camera's store slot has."""
++    """The frame shape a camera's color store slot has."""
+     # TODO explicitly add width, height to ip camera
+     return ImageSpec(height=config.payload.height or 480, width=config.payload.width or 640)
+ 
+ 
++def camera_observations(key: str, config: Camera) -> dict[str, ImageSpec]:
++    """The store slots a camera at ``key`` writes: its color image, its depth map, or both.
++
++    A RealSense camera's ``output_type`` picks them; its depth map is aligned to the color image,
++    so it has the same height and width, and is stored at :func:`depth_key`. Any other camera has
++    its color image only.
++    """
++    color = camera_image_spec(config)
++    if config.driver != "realsense":
++        return {key: color}
++    output_type = config.payload.output_type
++    slots: dict[str, ImageSpec] = {}
++    if output_has_color(output_type):
++        slots[key] = color
++    if output_has_depth(output_type):
++        slots[depth_key(key)] = ImageSpec.depth(color.height, color.width)
++    return slots
++
++
++def depth_range_mm(config: Camera) -> tuple[int, int] | None:
++    """The depth a RealSense camera keeps, in millimetres; ``None`` for a camera without depth."""
++    if config.driver != "realsense" or not output_has_depth(config.payload.output_type):
++        return None
++    return round(config.payload.depth_range_min * 1000), round(config.payload.depth_range_max * 1000)
++
++
+ class CameraWorker(ThreadWorker[SharedCamera]):
+-    """Read one camera into its store slot at the camera's fps.
++    """Read one camera into its store slots (see :func:`camera_observations`) as its frames arrive.
+ 
+     A thread: ``SharedCamera`` already runs the capture in a publisher process.
+ 
+@@ -60,7 +92,10 @@ class CameraWorker(ThreadWorker[SharedCamera]):
+         self.store = store
+         self.key = key
+         self.is_locked = is_locked
+-        self._image = camera_image_spec(config)
++        self._slots = camera_observations(key, config)
++        self._color_key = key if key in self._slots else None
++        self._depth_key = depth_key(key) if depth_key(key) in self._slots else None
++        self._depth_range = depth_range_mm(config)
+ 
+     @asynccontextmanager
+     async def lifecycle(self) -> AsyncIterator[SharedCamera]:
+@@ -88,13 +123,17 @@ class CameraWorker(ThreadWorker[SharedCamera]):
+         try:
+             await self._capture(context)
+         except Exception as error:
+-            self.store.invalidate_observation(self.key)
++            self._invalidate()
+             self._publish("failed", str(error))
+             raise
+ 
++    def _invalidate(self) -> None:
++        for key in self._slots:
++            self.store.invalidate_observation(key)
++
+     async def _capture(self, context: SharedCamera) -> None:
+-        rate = Rate(self.config.payload.fps, name=self.name)
+-        size = (self._image.width, self._image.height)
++        # Polled faster than frames arrive, so each new frame reaches the store within half a frame.
++        rate = Rate(self.config.payload.fps * POLLS_PER_FRAME, name=self.name)
+         camera: SharedCamera | None = context
+         previous = None
+         reconnecting = False
+@@ -103,8 +142,7 @@ class CameraWorker(ThreadWorker[SharedCamera]):
+             frame = camera.read_latest()
+             if frame is not previous:
+                 previous, last_new_frame = frame, time.monotonic()
+-                data = frame.data if frame.data.shape[:2] == self._image.shape[:2] else cv2.resize(frame.data, size)
+-                self.store.write_observation(self.key, data, timestamp=frame.timestamp)
++                self._write(frame)
+                 if reconnecting:
+                     self._publish("running")
+                     reconnecting = False
+@@ -115,6 +153,37 @@ class CameraWorker(ThreadWorker[SharedCamera]):
+                 continue
+             await rate.sleep()
+ 
++    def _write(self, frame: Frame) -> None:
++        """Write a frame's color image and depth map to their slots, with the frame's timestamp.
++
++        Color is written before depth, both with the frameset's timestamp, so a reader that finds
++        the same timestamp on both has a matching pair.
++
++        Raises:
++            RuntimeError: The camera does not deliver the streams its configuration asks for.
++        """
++        if self._depth_key is None:
++            color, depth = frame.data, None
++        else:
++            color, depth = unpack_rgbd(np.asarray(frame.data))
++            if depth is None or (self._color_key is not None and color is None):
++                wanted = "color and depth" if self._color_key is not None else "depth"
++                raise RuntimeError(
++                    f"Camera {self.config.name!r} delivers {frame.data.shape[-1]}-channel frames without the "
++                    f"{wanted} streams it is configured for; it may still be running with older settings. "
++                    "Reload the environment."
++                )
++        if self._color_key is not None and color is not None:
++            self.store.write_observation(
++                self._color_key, _fit(color, self._slots[self._color_key]), timestamp=frame.timestamp
++            )
++        if self._depth_key is not None and depth is not None:
++            depth = _fit(depth, self._slots[self._depth_key])
++            if self._depth_range is not None:
++                nearest, farthest = self._depth_range
++                depth = np.where((depth < nearest) | (depth > farthest), np.uint16(0), depth)
++            self.store.write_observation(self._depth_key, depth, timestamp=frame.timestamp)
++
+     async def _reconnect(self, lost: SharedCamera) -> SharedCamera | None:
+         """Release a camera that stopped sending frames and reopen it until it is back.
+ 
+@@ -122,7 +191,7 @@ class CameraWorker(ThreadWorker[SharedCamera]):
+             The reopened camera, or ``None`` if the worker was asked to stop first.
+         """
+         logger.warning("Camera {!r} sent no frame for {:.1f}s; reconnecting", self.config.name, self.stale_after_s)
+-        self.store.invalidate_observation(self.key)
++        self._invalidate()
+         self._publish("starting", f"no frames for {self.stale_after_s:.1f}s; reconnecting")
+         self._camera = None
+         try:
+@@ -148,3 +217,17 @@ class CameraWorker(ThreadWorker[SharedCamera]):
+     def _publish(self, state: ComponentState, error: str | None = None) -> None:
+         if self._bus is not None and self.component is not None:
+             publish_status(self._bus, self.component, state, error)
++
++
++def _fit(image: np.ndarray, slot: ImageSpec) -> np.ndarray:
++    """``image`` at the slot's resolution: resized if the publisher runs at another one.
++
++    Depth is resized with nearest-neighbour, so no depth is invented between surfaces.
++    """
++    if image.shape[:2] == slot.shape[:2]:
++        return image
++    size = (slot.width, slot.height)
++    image = np.ascontiguousarray(image)  # a color view into an RGB-D frame is strided
++    if not slot.is_depth:
++        return cv2.resize(image, size)
++    return cv2.resize(image.reshape(image.shape[:2]), size, interpolation=cv2.INTER_NEAREST).reshape(slot.shape)
+diff --git a/application/backend/src/workers/dataset_worker.py b/application/backend/src/workers/dataset_worker.py
+index 56b9033..76f5897 100644
+--- a/application/backend/src/workers/dataset_worker.py
++++ b/application/backend/src/workers/dataset_worker.py
+@@ -26,7 +26,7 @@ from pydantic import BaseModel
+ 
+ from exceptions import RuntimeSessionCommandError
+ from runtime_session.bus import Bus, command_key, status_key
+-from runtime_session.store import ACTION, STATE, FeatureSpec, Store
++from runtime_session.store import ACTION, STATE, FeatureSpec, Sample, Store, depth_key
+ from schemas.runtime_session import DiscardEpisodeCommand, SaveEpisodeCommand, StartEpisodeCommand, StatusMessage
+ from workers.base import ProcessWorker
+ from workers.rate import Rate
+@@ -41,6 +41,8 @@ STATUS = "rpc/dataset/status"
+ EVENTS = "evt/dataset"
+ MIN_EPISODE_FRAMES = 2
+ """lerobot's streaming encoder gives a 1-frame episode no video stats; it saves, then closing the dataset fails."""
++PAIR_READS = 3
++"""How often a color image and its depth map are read again when a camera wrote between the two reads."""
+ 
+ 
+ class Empty(BaseModel):
+@@ -118,9 +120,29 @@ class Recorder:
+     def camera_status(self, status: StatusMessage) -> None:
+         """Discard on camera loss even if the feed recovers between recording ticks."""
+         key = status.component.removeprefix("environment/")
+-        if key in self.store.spec.observations and status.state in {"starting", "failed"}:
++        recorded = key in self.store.spec.observations or depth_key(key) in self.store.spec.observations
++        if recorded and status.state in {"starting", "failed"}:
+             self._camera_lost(key)
+ 
++    def _read_frames(self) -> dict[str, Sample | None]:
++        """Every camera's latest frame; a color image and its depth map from the same frameset.
++
++        A camera writes its color image and then its depth map, both with the frameset's
++        timestamp. A pair read while it was writing has two timestamps, and is read again.
++        """
++        observations = self.store.spec.observations
++        frames = {key: self.store.read_observation(key) for key in observations}
++        for color in observations:
++            depth = depth_key(color)
++            if depth not in observations:
++                continue
++            for _ in range(PAIR_READS):
++                pair = frames[color], frames[depth]
++                if pair[0] is None or pair[1] is None or pair[0].timestamp == pair[1].timestamp:
++                    break
++                frames[color], frames[depth] = self.store.read_observation(color), self.store.read_observation(depth)
++        return frames
++
+     def _camera_lost(self, key: str) -> None:
+         if self._open:
+             error = (
+@@ -135,7 +157,7 @@ class Recorder:
+         if not self._open or self.task is None:
+             return
+         state, action = self.store.read(STATE), self.store.read(ACTION)
+-        frames = {key: self.store.read_observation(key) for key in self.store.spec.observations}
++        frames = self._read_frames()
+         for key, frame in frames.items():
+             if frame is None:
+                 self._camera_lost(key)
+diff --git a/application/backend/tests/api/test_dataset_video.py b/application/backend/tests/api/test_dataset_video.py
+index 677db97..ce36eaa 100644
+--- a/application/backend/tests/api/test_dataset_video.py
++++ b/application/backend/tests/api/test_dataset_video.py
+@@ -107,3 +107,43 @@ def test_video_returns_not_found_for_missing_files_and_directories(dataset: Data
+     response = TestClient(app).get(f"/api/dataset/{dataset.id}/video/{video_path}")
+ 
+     assert response.status_code == 404
++
++
++DEPTH_VIDEO_PATH = "videos/observation.images.top_depth/chunk-000/file-000.mp4"
++
++
++def _write_info(dataset: Dataset) -> None:
++    import json
++
++    meta = Path(dataset.path) / "meta"
++    meta.mkdir(parents=True, exist_ok=True)
++    features = {
++        "observation.images.gripper": {"dtype": "video", "shape": [4, 4, 3], "info": {"is_depth_map": False}},
++        "observation.images.top_depth": {"dtype": "video", "shape": [4, 4, 1], "info": {"is_depth_map": True}},
++    }
++    (meta / "info.json").write_text(json.dumps({"features": features}))
++
++
++def test_a_depth_video_is_previewed_as_a_browser_playable_copy(dataset: Dataset, tmp_path: Path) -> None:
++    from unittest.mock import patch
++
++    _write_info(dataset)
++    depth_video = Path(dataset.path) / DEPTH_VIDEO_PATH
++    depth_video.parent.mkdir(parents=True)
++    depth_video.write_bytes(b"depth")
++    preview = tmp_path / "preview.mp4"
++    preview.write_bytes(b"colorized")
++    with patch("internal_datasets.lerobot.depth_video.ensure_depth_preview", return_value=preview) as ensure:
++        response = TestClient(app).get(f"/api/dataset/{dataset.id}/video/{DEPTH_VIDEO_PATH}?depth_preview=true")
++        raw = TestClient(app).get(f"/api/dataset/{dataset.id}/video/{DEPTH_VIDEO_PATH}")
++        color = TestClient(app).get(f"{_video_url(dataset)}?depth_preview=true")
++
++    assert response.status_code == 200
++    assert response.content == b"colorized"
++    assert response.headers["content-type"] == "video/mp4"
++    assert ensure.call_count == 1
++    assert ensure.call_args.args[0] == depth_video.resolve()
++    assert ensure.call_args.args[2] == {"is_depth_map": True}
++    assert raw.content == b"depth"  # without the flag, the recorded file itself
++    assert color.status_code == 200  # a color video has nothing to preview: the file itself
++    assert len(color.content) == 4096
+diff --git a/application/backend/tests/internal_datasets/test_depth_recording.py b/application/backend/tests/internal_datasets/test_depth_recording.py
+new file mode 100644
+index 0000000..bce36a6
+--- /dev/null
++++ b/application/backend/tests/internal_datasets/test_depth_recording.py
+@@ -0,0 +1,158 @@
++"""Depth maps in LeRobot datasets: how they are encoded, and how people look at them."""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING
++from unittest.mock import patch
++
++import av
++import numpy as np
++import pytest
++
++from internal_datasets.access_mode import DatasetAccessMode
++from internal_datasets.lerobot import video_encoding_settings
++from internal_datasets.lerobot.lerobot_dataset import InternalLeRobotDataset
++from internal_datasets.lerobot.video_encoding_settings import (
++    StudioDepthEncoderConfig,
++    VideoEncodingSettings,
++    depth_features,
++)
++
++if TYPE_CHECKING:
++    from pathlib import Path
++
++HEIGHT, WIDTH = 64, 96
++FEATURES = {
++    "action": {"dtype": "float32", "shape": (2,), "names": ["arm.pos", "gripper.pos"]},
++    "observation.state": {"dtype": "float32", "shape": (2,), "names": ["arm.pos", "gripper.pos"]},
++    "observation.images.top": {"dtype": "video", "shape": (HEIGHT, WIDTH, 3), "names": ["height", "width", "channels"]},
++    "observation.images.top_depth": {
++        "dtype": "video",
++        "shape": (HEIGHT, WIDTH, 1),
++        "names": ["height", "width", "channels"],
++        "info": {"is_depth_map": True},
++    },
++}
++
++
++def _depth(frame: int) -> np.ndarray:
++    depth = np.tile(np.linspace(250, 4000, WIDTH, dtype=np.float32), (HEIGHT, 1)).astype(np.uint16) + frame
++    depth[:8, :8] = 0
++    return depth[..., None]
++
++
++def test_depth_is_lossless_12_bit_hevc_with_a_real_time_preset() -> None:
++    encoder = StudioDepthEncoderConfig()
++    options = encoder.get_codec_options(as_strings=True)
++    assert (encoder.vcodec, encoder.pix_fmt) == ("hevc", "gray12le")
++    assert options["preset"] == "ultrafast"
++    assert "lossless=1" in options["x265-params"]
++    assert "crf" not in options
++    assert (encoder.depth_min, encoder.depth_max, encoder.use_log) == (0.0, 10.0, True)
++
++
++def test_a_crf_records_depth_lossy() -> None:
++    options = StudioDepthEncoderConfig(crf=8).get_codec_options(as_strings=True)
++    assert options["crf"] == "8"
++    assert "lossless" not in options["x265-params"]
++
++
++def test_appending_keeps_the_quantization_a_dataset_was_recorded_with() -> None:
++    recorded = {"video.depth_min": 0.01, "video.depth_max": 4.0, "video.shift": 3.5, "video.use_log": False}
++    encoder = StudioDepthEncoderConfig.for_recording(None, recorded)
++    assert (encoder.depth_min, encoder.depth_max, encoder.use_log) == (0.01, 4.0, False)
++
++
++def test_only_datasets_with_depth_get_a_real_depth_encoder() -> None:
++    settings = VideoEncodingSettings(vcodec="libsvtav1", depth_crf=8)
++    rgb_only = settings.to_lerobot_write_kwargs({})
++    assert isinstance(rgb_only["depth_encoder"], video_encoding_settings._UnsupportedDepthEncoderConfig)
++    rgbd = settings.to_lerobot_write_kwargs(depth_features(FEATURES))
++    assert isinstance(rgbd["depth_encoder"], StudioDepthEncoderConfig)
++    assert rgbd["depth_encoder"].crf == 8
++    assert list(depth_features(FEATURES)) == ["observation.images.top_depth"]
++
++
++def test_a_backend_without_a_12_bit_hevc_encoder_refuses_depth_clearly() -> None:
++    with (
++        patch.object(video_encoding_settings, "_is_depth_encoder_usable", return_value=False),
++        pytest.raises(RuntimeError, match="Depth recording needs the 'hevc' video encoder"),
++    ):
++        StudioDepthEncoderConfig()
++
++
++@pytest.fixture
++def rgbd_dataset(tmp_path: Path) -> InternalLeRobotDataset:
++    dataset = InternalLeRobotDataset(
++        tmp_path / "dataset",
++        recording_video_encoding_settings=VideoEncodingSettings(vcodec="libsvtav1", encoder_threads=1),
++        access_mode=DatasetAccessMode.RECORDING_MUTATION,
++    )
++    dataset.create(fps=30, features=FEATURES, robot_type="test")
++    dataset.prepare_for_writing()
++    for frame in range(6):
++        dataset.add_frame(
++            {
++                "arm.pos": 0.0,
++                "gripper.pos": 1.0,
++                "top": np.full((HEIGHT, WIDTH, 3), 40 * frame, np.uint8),
++                "top_depth": _depth(frame),
++            },
++            {"arm.pos": 0.0, "gripper.pos": 1.0},
++            "test",
++        )
++    dataset.save_episode()
++    dataset.finalize()
++    return InternalLeRobotDataset(dataset.path)
++
++
++def test_episodes_say_which_videos_are_depth(rgbd_dataset: InternalLeRobotDataset) -> None:
++    videos = rgbd_dataset.get_episodes()[0].videos
++    assert not videos["observation.images.top"].is_depth
++    assert videos["observation.images.top_depth"].is_depth
++    assert rgbd_dataset.get_depth_keys() == ["observation.images.top_depth"]
++    assert rgbd_dataset.get_feature_info("observation.images.top_depth")["video.depth_max"] == 10.0
++
++
++def test_a_depth_thumbnail_is_colorized(rgbd_dataset: InternalLeRobotDataset) -> None:
++    import cv2
++
++    result = rgbd_dataset.get_episode_thumbnail_png(0, "observation.images.top_depth", WIDTH, HEIGHT)
++    assert result is not None
++    image = cv2.imdecode(np.frombuffer(result[0], np.uint8), cv2.IMREAD_COLOR)
++    assert image is not None
++    assert image.shape == (HEIGHT, WIDTH, 3)
++    assert np.all(image[:8, :8] == 0)  # no depth is black
++    assert len(np.unique(image.reshape(-1, 3), axis=0)) > 10  # near to far is a gradient
++
++
++def test_a_depth_preview_plays_in_browsers_with_the_same_timestamps(
++    rgbd_dataset: InternalLeRobotDataset, tmp_path: Path
++) -> None:
++    from internal_datasets.lerobot.depth_video import ensure_depth_preview
++
++    source = rgbd_dataset.get_video_path(0, "top_depth")
++    preview = ensure_depth_preview(
++        source, tmp_path / "cache", rgbd_dataset.get_feature_info("observation.images.top_depth")
++    )
++    assert preview == ensure_depth_preview(source, tmp_path / "cache", {})  # cached
++    with av.open(str(source)) as original, av.open(str(preview)) as copy:
++        original_times = [float(frame.time) for frame in original.decode(video=0)]
++        stream = copy.streams.video[0]
++        assert stream.codec_context.name in {"h264", "libsvtav1", "av1"}
++        frames = list(copy.decode(stream))
++        assert [float(frame.time) for frame in frames] == pytest.approx(original_times)
++        assert frames[0].to_ndarray(format="rgb24").shape == (HEIGHT, WIDTH, 3)
++
++
++def test_lerobot_reads_back_the_recorded_millimetres(rgbd_dataset: InternalLeRobotDataset) -> None:
++    from lerobot.datasets.lerobot_dataset import LeRobotDataset
++
++    lerobot = LeRobotDataset("depth", root=rgbd_dataset.path)
++    assert lerobot.meta.depth_keys == ["observation.images.top_depth"]
++    for index in (0, 5):
++        depth = lerobot[index]["observation.images.top_depth"].numpy()[0]
++        expected = _depth(index)[..., 0].astype(np.float32)
++        assert np.all(depth[:8, :8] == 0)
++        # 12-bit log codes over 0-10 m: within half a step, under 1 mm up to 1 m and 1.5 mm at 4 m.
++        assert np.abs(depth - expected).max() <= 1.5
+diff --git a/application/backend/tests/internal_datasets/test_utils.py b/application/backend/tests/internal_datasets/test_utils.py
+index 0151a38..d91c39f 100644
+--- a/application/backend/tests/internal_datasets/test_utils.py
++++ b/application/backend/tests/internal_datasets/test_utils.py
+@@ -83,6 +83,7 @@ def test_get_internal_recording_dataset_uses_recording_mode() -> None:
+ def test_get_internal_recording_dataset_uses_configured_video_recording_settings() -> None:
+     settings = MagicMock()
+     settings.video_recording.preset = "cpu-h264"
++    settings.depth_video_crf = 8
+     with (
+         patch("internal_datasets.utils.get_settings", return_value=settings),
+         patch("internal_datasets.utils.resolve_video_encoding_settings") as resolve_preset,
+@@ -90,5 +91,5 @@ def test_get_internal_recording_dataset_uses_configured_video_recording_settings
+     ):
+         get_internal_recording_dataset(_make_dataset())
+ 
+-    resolve_preset.assert_called_once_with("cpu-h264")
++    resolve_preset.assert_called_once_with("cpu-h264", depth_crf=8)
+     assert mocked_cls.call_args.kwargs["recording_video_encoding_settings"] is resolve_preset.return_value
+diff --git a/application/backend/tests/runtime_session/test_environment.py b/application/backend/tests/runtime_session/test_environment.py
+index dc0c669..3cf316b 100644
+--- a/application/backend/tests/runtime_session/test_environment.py
++++ b/application/backend/tests/runtime_session/test_environment.py
+@@ -67,3 +67,54 @@ async def test_cameras_that_would_share_a_key_are_refused(test_environment, fact
+     test_environment.cameras[1].name = "Grabber"
+     with pytest.raises(ValueError, match="'grabber'"):
+         await describe_environment(test_environment, factory)
++
++
++def _realsense_row(name: str, output_type: str) -> dict:
++    return {
++        "id": "5b8f3a3e-8d5e-4c55-9d43-2f1f2b9c1a01",
++        "driver": "realsense",
++        "name": name,
++        "fingerprint": {"serial": "243622062352"},
++        "hardware_name": "Intel RealSense D415",
++        "payload": {"width": 1280, "height": 720, "fps": 30, "output_type": output_type},
++    }
++
++
++@pytest.mark.parametrize(
++    ("output_type", "slots"),
++    [
++        ("color", {"top": ImageSpec(720, 1280)}),
++        ("depth", {"top_depth": ImageSpec.depth(720, 1280)}),
++        ("both", {"top": ImageSpec(720, 1280), "top_depth": ImageSpec.depth(720, 1280)}),
++    ],
++)
++async def test_a_realsense_camera_records_what_its_output_type_asks(
++    test_environment, factory, output_type, slots
++) -> None:
++    from schemas.project_camera import CameraAdapter
++
++    test_environment.cameras.append(CameraAdapter.validate_python(_realsense_row("Top", output_type)))
++    description = await describe_environment(test_environment, factory)
++
++    observations = dict(description.spec.observations)
++    assert {key: observations.pop(key) for key in slots} == slots
++    assert set(observations) == {"grabber", "front"}
++    shown = description.session_environment().cameras[-1]
++    assert shown.key == ("top_depth" if output_type == "depth" else "top")
++    assert shown.depth_key == (None if output_type == "color" else "top_depth")
++    assert (shown.height, shown.width) == (720, 1280)
++
++
++async def test_a_camera_named_like_another_ones_depth_is_refused(test_environment, factory) -> None:
++    from schemas.project_camera import CameraAdapter
++
++    test_environment.cameras.append(CameraAdapter.validate_python(_realsense_row("Top", "both")))
++    test_environment.cameras[0].name = "top_depth"
++    with pytest.raises(ValueError, match="'top_depth'"):
++        await describe_environment(test_environment, factory)
++
++
++def test_a_session_shows_a_cameras_color_and_a_depth_only_cameras_depth() -> None:
++    from api.runtime_ws import _shown_frames
++
++    assert _shown_frames(["top", "top_depth", "floor_depth", "arm"]) == ["top", "floor_depth", "arm"]
+diff --git a/application/backend/tests/runtime_session/test_recording.py b/application/backend/tests/runtime_session/test_recording.py
+index d32247b..9b8a7a8 100644
+--- a/application/backend/tests/runtime_session/test_recording.py
++++ b/application/backend/tests/runtime_session/test_recording.py
+@@ -6,9 +6,10 @@ import os
+ import signal
+ import time
+ from pathlib import Path
+-from unittest.mock import patch
++from unittest.mock import MagicMock, patch
+ from uuid import uuid4
+ 
++import numpy as np
+ import pytest
+ 
+ from exceptions import IncompatiblePartsError, RuntimeSessionCommandError
+@@ -19,6 +20,7 @@ from runtime_session.dataset import DEFAULT_RECORDING_FPS, dataset_fps, dataset_
+ from runtime_session.session import RuntimeSession
+ from runtime_session.store import FeatureSpecMismatchError, ImageSpec
+ from schemas.dataset import Dataset
++from schemas.project_camera import CameraAdapter
+ from schemas.runtime_session import DiscardEpisodeCommand, SaveEpisodeCommand, StartEpisodeCommand
+ from tests.workers.fake_dataset import FakeDatasetWorker, recording_log
+ from workers.dataset_worker import RecordingStatus
+@@ -483,3 +485,100 @@ async def test_a_saved_episode_reaches_the_dataset_when_the_recording_finishes(n
+ 
+     await session.unload_dataset()
+     assert get_internal_read_dataset(dataset).find_episode(0) is not None
++
++
++def _realsense_environment(output_type: str = "both"):
++    environment = make_environment(cameras=0)
++    environment.cameras.append(
++        CameraAdapter.validate_python(
++            {
++                "id": str(uuid4()),
++                "driver": "realsense",
++                "name": "Top",
++                "fingerprint": {"serial": "243622062352"},
++                "hardware_name": "Intel RealSense D415",
++                "payload": {"width": 424, "height": 240, "fps": 30, "output_type": output_type},
++            }
++        )
++    )
++    return environment
++
++
++def _expected_depth() -> np.ndarray:
++    """Millimetres across the 0.3-3 m range of the camera, with holes (0) where the sensor saw nothing."""
++    depth = np.tile(np.linspace(300, 2900, 424, dtype=np.float32), (240, 1)).astype(np.uint16)
++    depth[100:140, 50:90] = 0
++    return depth
++
++
++@pytest.fixture
++def fake_rgbd_cameras():
++    """RealSense publishers that always have a fresh frameset of known color and depth."""
++    from utils.realsense_rgbd import pack_rgbd
++
++    color = np.zeros((240, 424, 3), dtype=np.uint8)
++    color[..., 0] = np.arange(424, dtype=np.uint16)[None, :] % 256
++    packed = pack_rgbd(color, _expected_depth())
++
++    def frame() -> MagicMock:
++        latest = MagicMock()
++        latest.data = packed
++        latest.timestamp = time.monotonic()
++        return latest
++
++    with patch("workers.camera_worker.build_shared_camera") as build:
++        build.return_value.read_latest.side_effect = frame
++        yield build
++
++
++async def test_a_real_rgbd_recording_lands_in_the_dataset_with_depth_aligned_to_color(
++    new_session, fake_rgbd_cameras
++) -> None:
++    """Through lerobot: color and depth of a RealSense camera are separate features LeRobot reads back."""
++    from lerobot.datasets.lerobot_dataset import LeRobotDataset
++
++    dataset = _dataset()
++    session = await new_session()
++    await session.load_environment(_realsense_environment())
++    await session.load_dataset(dataset)
++    await _start(session, "pick the block")
++    await asyncio.sleep(0.4)
++    await _save(session)
++    await session.unload_dataset()
++
++    info = json.loads((Path(dataset.path) / "meta" / "info.json").read_text())
++    color_feature = info["features"]["observation.images.top"]
++    depth_feature = info["features"]["observation.images.top_depth"]
++    assert color_feature["shape"] == [240, 424, 3]
++    assert not color_feature["info"]["is_depth_map"]
++    assert depth_feature["shape"] == [240, 424, 1]
++    assert depth_feature["info"]["is_depth_map"]
++    assert depth_feature["info"]["depth_unit"] == "mm"
++    assert depth_feature["info"]["video.pix_fmt"] == "gray12le"
++    assert (depth_feature["info"]["video.depth_min"], depth_feature["info"]["video.depth_max"]) == (0.0, 10.0)
++    assert dataset_spec(dataset).observations == {
++        "top": ImageSpec(240, 424, 3),
++        "top_depth": ImageSpec.depth(240, 424),
++    }
++
++    lerobot = LeRobotDataset(str(uuid4()), root=dataset.path)
++    item = lerobot[len(lerobot) // 2]
++    depth = item["observation.images.top_depth"].numpy()[0]
++    expected = _expected_depth().astype(np.float32)
++    assert depth.shape == (240, 424)
++    holes = expected == 0
++    assert np.all(depth[holes] == 0)  # no data stays no data
++    # Lossless 12-bit log quantization over 0-10 m: within one code, 1.4 mm at 3 m.
++    assert np.abs(depth[~holes] - expected[~holes]).max() <= 1.5
++    assert item["observation.images.top"].shape == (3, 240, 424)
++
++    # Appending keeps the quantization the dataset was recorded with.
++    await session.load_dataset(dataset)
++    await _start(session, "pick the block")
++    await asyncio.sleep(0.4)
++    await _save(session)
++    await session.unload_dataset()
++    lerobot = LeRobotDataset(str(uuid4()), root=dataset.path)
++    assert lerobot.meta.total_episodes == 2
++    last = lerobot[len(lerobot) - 1]["observation.images.top_depth"].numpy()[0]
++    assert np.abs(last[~holes] - expected[~holes]).max() <= 1.5
+diff --git a/application/backend/tests/runtime_session/test_store.py b/application/backend/tests/runtime_session/test_store.py
+index 23e5ee2..3c0f7c3 100644
+--- a/application/backend/tests/runtime_session/test_store.py
++++ b/application/backend/tests/runtime_session/test_store.py
+@@ -170,3 +170,28 @@ def test_sweep_removes_only_blocks_whose_creator_is_gone(store: Store) -> None:
+     assert store.name not in removed
+     assert store.name.startswith(f"{BLOCK_PREFIX}{os.getpid()}-")
+     Store.attach(SPEC, store.name).close()
++
++
++def test_a_depth_slot_holds_uint16_millimetres() -> None:
++    spec = FeatureSpec(JOINTS, {"top": ImageSpec(2, 3), "top_depth": ImageSpec.depth(2, 3)})
++    store = Store.create(spec, f"test-{uuid.uuid4().hex}")
++    try:
++        depth = np.arange(6, dtype=np.uint16).reshape(2, 3, 1) * 1000 + 65000 // 6
++        store.write_observation("top_depth", depth, timestamp=3.0)
++        store.write_observation("top", np.full((2, 3, 3), 9, np.uint8), timestamp=3.0)
++
++        sample = store.read_observation("top_depth")
++        assert sample is not None
++        assert sample.value.dtype == np.uint16
++        np.testing.assert_array_equal(sample.value, depth)
++        assert np.all(store.read_observation("top").value == 9)
++    finally:
++        store.unlink()
++
++
++def test_depth_image_spec_differs_from_a_one_channel_color_one() -> None:
++    assert ImageSpec.depth(2, 3) == ImageSpec(2, 3, 1, "uint16")
++    assert ImageSpec.depth(2, 3) != ImageSpec(2, 3, 1)
++    assert ImageSpec.depth(2, 3).is_depth
++    assert str(ImageSpec.depth(2, 3)) == "2x3x1 uint16"
++    assert str(ImageSpec(2, 3)) == "2x3x3"
+diff --git a/application/backend/tests/services/test_camera_claims.py b/application/backend/tests/services/test_camera_claims.py
+index 2f0198e..4931bef 100644
+--- a/application/backend/tests/services/test_camera_claims.py
++++ b/application/backend/tests/services/test_camera_claims.py
+@@ -96,3 +96,31 @@ def test_a_stale_generation_does_not_release() -> None:
+     assert registry.holder_of({"serial": "cam"}) is not None
+     registry.release("rt-a", generation=second)
+     assert registry.holder_of({"serial": "cam"}) is None
++
++
++def test_a_realsense_cannot_stream_two_outputs_at_once() -> None:
++    from uuid import uuid4
++
++    from exceptions import CameraSettingsConflictError
++    from services.camera_claims import CameraClaim, CameraClaimRegistry
++
++    def claim(holder: str, output: str) -> CameraClaim:
++        return CameraClaim(
++            fingerprint={"serial": "243622062352"},
++            settings=(1280, 720, 30),
++            holder=holder,
++            project_id=uuid4(),
++            project_name="Alpha",
++            output=output,
++        )
++
++    registry = CameraClaimRegistry()
++    registry.claim([claim("session-a", "both")])
++    registry.claim([claim("session-b", "both")])  # same settings: they share the publisher
++    try:
++        registry.claim([claim("session-c", "color")])
++    except CameraSettingsConflictError as error:
++        assert "1280x720@30 both" in error.message
++        assert "1280x720@30 color" in error.message
++    else:
++        raise AssertionError("A second output of the same camera was allowed")
+diff --git a/application/backend/tests/workers/test_camera_worker.py b/application/backend/tests/workers/test_camera_worker.py
+index ebcdc0e..8ff3c44 100644
+--- a/application/backend/tests/workers/test_camera_worker.py
++++ b/application/backend/tests/workers/test_camera_worker.py
+@@ -245,3 +245,103 @@ class TestCameraReconnect:
+ 
+         old.disconnect.assert_called_once()
+         new.disconnect.assert_called_once()
++
++
++def _realsense_config(output_type="both", width=8, height=6, depth_range=(0.3, 3.0)):
++    from schemas.project_camera import CameraAdapter
++
++    # The schema's minimum resolution is irrelevant to the worker; bypass it to keep frames tiny.
++    camera = CameraAdapter.validate_python(
++        {
++            "driver": "realsense",
++            "name": "top",
++            "fingerprint": {"serial": "123"},
++            "hardware_name": None,
++            "payload": {
++                "width": 1280,
++                "height": 720,
++                "fps": 30,
++                "output_type": output_type,
++                "depth_range_min": depth_range[0],
++                "depth_range_max": depth_range[1],
++            },
++        }
++    )
++    camera.payload.width, camera.payload.height = width, height
++    return camera
++
++
++def _rgbd_frame(color, depth, timestamp=4.0):
++    from utils.realsense_rgbd import pack_rgbd
++
++    frame = MagicMock()
++    frame.data = pack_rgbd(color, depth)
++    frame.timestamp = timestamp
++    return frame
++
++
++def _run_once(worker, frame):
++    camera = MagicMock()
++
++    def read_latest():
++        worker.request_stop()
++        return frame
++
++    camera.read_latest.side_effect = read_latest
++    asyncio.run(worker.run_loop(camera))
++
++
++class TestRealSenseCameraWorker:
++    @pytest.fixture
++    def rgbd_store(self):
++        from workers.camera_worker import camera_observations
++
++        store = Store.create(FeatureSpec((), camera_observations("top", _realsense_config())), uuid.uuid4().hex)
++        yield store
++        store.unlink()
++
++    def test_both_writes_color_and_aligned_depth_with_one_timestamp(self, rgbd_store):
++        color = np.full((6, 8, 3), 5, np.uint8)
++        depth = np.full((6, 8), 1500, np.uint16)
++        depth[0, 0], depth[0, 1], depth[0, 2] = 0, 200, 3500  # no data, nearer and farther than the range
++        _run_once(CameraWorker(_realsense_config(), rgbd_store, "top"), _rgbd_frame(color, depth))
++
++        color_sample, depth_sample = rgbd_store.read_observation("top"), rgbd_store.read_observation("top_depth")
++        assert color_sample.timestamp == depth_sample.timestamp == 4.0
++        np.testing.assert_array_equal(color_sample.value, color)
++        assert depth_sample.value.dtype == np.uint16
++        assert depth_sample.value.shape == (6, 8, 1)
++        assert depth_sample.value[0, :3, 0].tolist() == [0, 0, 0]  # outside 0.3-3 m is no data
++        assert np.all(depth_sample.value[1:] == 1500)
++
++    def test_depth_at_another_resolution_is_resized_without_inventing_depth(self, rgbd_store):
++        depth = np.zeros((3, 4), np.uint16)
++        depth[:, 2:] = 1000
++        _run_once(
++            CameraWorker(_realsense_config(), rgbd_store, "top"), _rgbd_frame(np.zeros((3, 4, 3), np.uint8), depth)
++        )
++
++        values = set(np.unique(rgbd_store.read_observation("top_depth").value).tolist())
++        assert values == {0, 1000}
++
++    def test_depth_only(self):
++        from workers.camera_worker import camera_observations
++
++        config = _realsense_config("depth")
++        store = Store.create(FeatureSpec((), camera_observations("top", config)), uuid.uuid4().hex)
++        try:
++            _run_once(CameraWorker(config, store, "top"), _rgbd_frame(None, np.full((6, 8), 900, np.uint16)))
++            assert set(store.spec.observations) == {"top_depth"}
++            assert np.all(store.read_observation("top_depth").value == 900)
++        finally:
++            store.unlink()
++
++    def test_a_publisher_without_the_configured_streams_fails_clearly(self, rgbd_store):
++        frame = MagicMock()
++        frame.data, frame.timestamp = np.zeros((6, 8, 3), np.uint8), 1.0  # color only, from an older publisher
++        camera = MagicMock()
++        camera.read_latest.return_value = frame
++        with pytest.raises(RuntimeError, match="without the color and depth streams"):
++            asyncio.run(CameraWorker(_realsense_config(), rgbd_store, "top").run_loop(camera))
++        assert rgbd_store.read_observation("top") is None
++        assert rgbd_store.read_observation("top_depth") is None
+diff --git a/application/backend/tests/workers/test_dataset_worker.py b/application/backend/tests/workers/test_dataset_worker.py
+index 207b711..67e04c2 100644
+--- a/application/backend/tests/workers/test_dataset_worker.py
++++ b/application/backend/tests/workers/test_dataset_worker.py
+@@ -77,3 +77,50 @@ def test_camera_loss_while_idle_does_not_discard_or_notify(recorder):
+ 
+     recorder.publish.assert_not_called()
+     recorder.mutation.discard_buffer.assert_not_called()
++
++
++def test_a_color_image_and_its_depth_map_are_recorded_from_the_same_frameset():
++    store = Store.create(FeatureSpec((), {"top": ImageSpec(2, 2), "top_depth": ImageSpec.depth(2, 2)}), uuid4().hex)
++    try:
++        for key in (STATE, ACTION):
++            store.write(key, [], timestamp=1.0)
++        store.write_observation("top", np.full((2, 2, 3), 1, np.uint8), timestamp=1.0)
++        store.write_observation("top_depth", np.full((2, 2, 1), 100, np.uint16), timestamp=1.0)
++        recorder = Recorder(MagicMock(), store, publish=MagicMock())
++        recorder.start(StartEpisodeCommand(request_id="start", task="pick"))
++
++        # The camera writes the next frameset while the recorder reads: it gets the new color image
++        # and the old depth map, then the camera writes the new depth map.
++        store.write_observation("top", np.full((2, 2, 3), 2, np.uint8), timestamp=2.0)
++        original = store.read_observation
++        depth_reads = 0
++
++        def read_observation(key):
++            nonlocal depth_reads
++            sample = original(key)
++            if key == "top_depth":
++                depth_reads += 1
++                if depth_reads == 1:
++                    store.write_observation("top_depth", np.full((2, 2, 1), 200, np.uint16), timestamp=2.0)
++            return sample
++
++        store.read_observation = read_observation
++        recorder.record_frame()
++
++        observation = recorder.mutation.add_frame.call_args.args[0]
++        assert np.all(observation["top"] == 2)
++        assert np.all(observation["top_depth"] == 200)
++        assert depth_reads == 2
++    finally:
++        store.unlink()
++
++
++def test_a_depth_only_camera_lost_between_ticks_discards_the_episode():
++    store = Store.create(FeatureSpec((), {"top_depth": ImageSpec.depth(2, 2)}), uuid4().hex)
++    try:
++        recorder = Recorder(MagicMock(), store, publish=MagicMock())
++        recorder.start(StartEpisodeCommand(request_id="start", task="pick"))
++        recorder.camera_status(StatusMessage(component="environment/top", state="starting", error="lost"))
++        recorder.mutation.discard_buffer.assert_called_once()
++    finally:
++        store.unlink()
+-- 
+2.53.0
+

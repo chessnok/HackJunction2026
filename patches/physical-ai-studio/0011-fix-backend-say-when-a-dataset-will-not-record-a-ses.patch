@@ -1,0 +1,125 @@
+From 28a543d18db59643a612001de329e590d34e9f11 Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Fri, 13 Nov 2026 18:28:33 -0800
+Subject: [PATCH 11/13] fix(backend): say when a dataset will not record a
+ session's camera or depth
+
+A dataset records the cameras it was first recorded with, so a RealSense
+switched to "Color + depth" after the dataset's first episodes silently
+recorded no depth. Loading such a dataset now reports which cameras and depth
+maps will not be recorded, and to record into a new dataset to keep them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../backend/src/runtime_session/dataset.py    | 22 +++++++++++++++++++
+ .../backend/src/runtime_session/session.py    | 19 ++++++++++------
+ .../tests/runtime_session/test_recording.py   | 18 +++++++++++++++
+ 3 files changed, 52 insertions(+), 7 deletions(-)
+
+diff --git a/application/backend/src/runtime_session/dataset.py b/application/backend/src/runtime_session/dataset.py
+index 09a5a16..9b38632 100644
+--- a/application/backend/src/runtime_session/dataset.py
++++ b/application/backend/src/runtime_session/dataset.py
+@@ -141,6 +141,26 @@ def slow_cameras_warning(cameras: Iterable[Camera], fps: int) -> str | None:
+     )
+ 
+ 
++def unrecorded_cameras_warning(dataset: Dataset, spec: FeatureSpec) -> str | None:
++    """Why some of the session's cameras or depth maps will not be recorded into ``dataset``, or ``None``.
++
++    A dataset records the cameras it was first recorded with; the session's others are left
++    out, such as the depth of a RealSense switched to "Color + depth" after its first episodes.
++    """
++    recorded = dataset_spec(dataset)
++    if recorded is None:
++        return None
++    missing = [key for key in spec.observations if key not in recorded.observations]
++    if not missing:
++        return None
++    kinds = ["depth map" if spec.observations[key].is_depth else "camera" for key in missing]
++    listed = ", ".join(f"{kind} {key!r}" for kind, key in zip(kinds, missing, strict=True))
++    return (
++        f"Dataset {dataset.name!r} was recorded without {listed}: it will not be recorded. "
++        "Record into a new dataset to keep it."
++    )
++
++
+ def lerobot_features(spec: FeatureSpec) -> dict[str, Any]:
+     """The LeRobot feature metadata a new dataset is created with, from the session's spec."""
+     # Imported here: lerobot is heavy, and only the dataset worker's process needs it.
+@@ -188,6 +208,8 @@ class Recording:
+         )
+         self._session_id = session_id
+         self._store = store
++        self.spec = store.spec
++        """The session's features, of which the recording records those the dataset has."""
+         self._stack: AsyncExitStack | None = None
+         self._started = False
+ 
+diff --git a/application/backend/src/runtime_session/session.py b/application/backend/src/runtime_session/session.py
+index b4a1769..376c7a1 100644
+--- a/application/backend/src/runtime_session/session.py
++++ b/application/backend/src/runtime_session/session.py
+@@ -41,7 +41,7 @@ from runtime_session.bus import EVENTS, Bus, BusRequestError, command_key, publi
+ from runtime_session.controls import build_control
+ from runtime_session.controls.base import CHANGED as CONTROL_CHANGED
+ from runtime_session.dataset import COMPONENT as DATASET
+-from runtime_session.dataset import Recording, dataset_spec, slow_cameras_warning
++from runtime_session.dataset import Recording, dataset_spec, slow_cameras_warning, unrecorded_cameras_warning
+ from runtime_session.environment import COMPONENT as ENVIRONMENT
+ from runtime_session.environment import RELOAD, Environment, describe_environment
+ from runtime_session.model import COMPONENT as MODEL
+@@ -525,13 +525,18 @@ class RuntimeSession:
+             recording = await self._dataset.load(self._recording(dataset, environment.robot_type, fps))
+             logger.info("Session {} records into dataset {!r}", self.id, dataset.name)
+         self._emit(StateMessage(data=self.state()))
+-        if warning := slow_cameras_warning(environment.environment.description.cameras.values(), recording.fps):
+-            logger.warning("Session {}: {}", self.id, warning)
+-            self._emit(
+-                ErrorMessage(
+-                    component="dataset", message=warning, error_code="camera_fps_below_dataset_fps", session_alive=True
++        warnings = {
++            "camera_fps_below_dataset_fps": slow_cameras_warning(
++                environment.environment.description.cameras.values(), recording.fps
++            ),
++            "cameras_not_recorded": unrecorded_cameras_warning(dataset, recording.spec),
++        }
++        for error_code, warning in warnings.items():
++            if warning is not None:
++                logger.warning("Session {}: {}", self.id, warning)
++                self._emit(
++                    ErrorMessage(component="dataset", message=warning, error_code=error_code, session_alive=True)
+                 )
+-            )
+ 
+     def _recording(self, dataset: Dataset, robot_type: str, fps: int | None) -> Recording:
+         # The store is there with any environment, even one that failed to connect.
+diff --git a/application/backend/tests/runtime_session/test_recording.py b/application/backend/tests/runtime_session/test_recording.py
+index baafabd..1019d42 100644
+--- a/application/backend/tests/runtime_session/test_recording.py
++++ b/application/backend/tests/runtime_session/test_recording.py
+@@ -597,3 +597,21 @@ async def test_recording_faster_than_a_camera_warns_that_frames_repeat(new_sessi
+     assert len(warnings) == 1
+     assert "'Cam 0' (15 fps)" in warnings[0].message
+     assert warnings[0].session_alive
++
++
++def test_cameras_a_dataset_was_recorded_without_are_named() -> None:
++    from runtime_session.dataset import unrecorded_cameras_warning
++    from runtime_session.store import FeatureSpec
++
++    dataset = _dataset()
++    spec = FeatureSpec(
++        ("shoulder_pan.pos", "gripper.pos"), {"top": ImageSpec(120, 160), "top_depth": ImageSpec.depth(60, 80)}
++    )
++    assert unrecorded_cameras_warning(dataset, spec) is None  # a new dataset records them all
++    _write_info(dataset, ["shoulder_pan.pos", "gripper.pos"], {"top": [120, 160, 3]})
++
++    warning = unrecorded_cameras_warning(dataset, spec)
++
++    assert warning is not None
++    assert "without depth map 'top_depth'" in warning
++    assert "new dataset" in warning
+-- 
+2.53.0
+

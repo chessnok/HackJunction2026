@@ -1,0 +1,416 @@
+From 8fe84a175189fb5e0a1a631195b335993a2a53a4 Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Fri, 13 Nov 2026 16:56:41 -0800
+Subject: [PATCH 06/13] feat(ui): RealSense output and depth range, depth
+ previews, color-only camera lists
+
+- Camera form: a RealSense camera picks its output (color, depth, or color +
+  depth aligned to color) and, with depth, the depth range; resolutions and
+  frame rates follow the output and the camera's USB connection, and an
+  unavailable mode is pointed out.
+- Episode viewer: depth videos play as their colorized preview.
+- Dataset cameras (thumbnails, training camera mapping) leave depth maps out.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../episodes/episode-video-cell.component.tsx |  2 +
+ .../use-thumbnail-camera.test.tsx             | 18 +++-
+ .../features/datasets/use-dataset-cameras.ts  | 11 ++-
+ .../train-model-dialog.test.tsx               |  4 +-
+ .../camera-form/components/fps-picker.tsx     | 15 ++-
+ .../components/resolution-picker.tsx          | 13 ++-
+ .../camera-form/components/use-camera-data.ts | 14 ++-
+ .../robots/camera-form/drivers/realsense.tsx  | 97 ++++++++++++++++---
+ .../features/robots/camera-form/preview.tsx   | 13 ++-
+ .../test-utils/mocks/mock-episode-detail.ts   |  1 +
+ .../ui/tests/training-menu-layout.spec.ts     |  2 +-
+ 11 files changed, 155 insertions(+), 35 deletions(-)
+
+diff --git a/application/ui/src/features/datasets/episodes/episode-video-cell.component.tsx b/application/ui/src/features/datasets/episodes/episode-video-cell.component.tsx
+index 0ef348e..b46217a 100644
+--- a/application/ui/src/features/datasets/episodes/episode-video-cell.component.tsx
++++ b/application/ui/src/features/datasets/episodes/episode-video-cell.component.tsx
+@@ -67,6 +67,8 @@ export const EpisodeVideoCell = ({ videoId, datasetId }: { videoId: string; data
+                           dataset_id: datasetId,
+                           video_path: episodeVideo.path,
+                       },
++                      // Depth is recorded as 12-bit video browsers cannot play: ask for a colorized copy.
++                      query: episodeVideo.is_depth ? { depth_preview: true } : undefined,
+                   },
+               });
+ 
+diff --git a/application/ui/src/features/datasets/thumbnail-camera/use-thumbnail-camera.test.tsx b/application/ui/src/features/datasets/thumbnail-camera/use-thumbnail-camera.test.tsx
+index 6fc567e..f7797f3 100644
+--- a/application/ui/src/features/datasets/thumbnail-camera/use-thumbnail-camera.test.tsx
++++ b/application/ui/src/features/datasets/thumbnail-camera/use-thumbnail-camera.test.tsx
+@@ -15,7 +15,7 @@ const TOP = 'observation.images.top';
+ const WRIST = 'observation.images.wrist';
+ const STORAGE_PREFIX = 'physicalai:thumbnailCamera:';
+ 
+-const mockDatasetCameras = (datasetId: string, videoKeys: string[]) => {
++const mockDatasetCameras = (datasetId: string, videoKeys: string[], depthKeys: string[] = []) => {
+     server.use(
+         http.get('/api/dataset/{dataset_id}/episodes', ({ params }) =>
+             params.dataset_id === datasetId ? HttpResponse.json(getMockedEpisodes()) : undefined
+@@ -25,7 +25,10 @@ const mockDatasetCameras = (datasetId: string, videoKeys: string[]) => {
+                 ? HttpResponse.json(
+                       getMockedEpisodeDetail({
+                           videos: Object.fromEntries(
+-                              videoKeys.map((key) => [key, { start: 0, end: 3, path: `${key}.mp4` }])
++                              [...videoKeys, ...depthKeys].map((key) => [
++                                  key,
++                                  { start: 0, end: 3, path: `${key}.mp4`, is_depth: depthKeys.includes(key) },
++                              ])
+                           ),
+                       })
+                   )
+@@ -58,6 +61,17 @@ describe('useThumbnailCamera', () => {
+         expect(localStorage.getItem(`${STORAGE_PREFIX}dataset-1`)).toBe(WRIST);
+     });
+ 
++    it('leaves RealSense depth maps out of the cameras', async () => {
++        mockDatasetCameras('dataset-1', [TOP], [`${TOP}_depth`]);
++
++        const { result } = renderHook(() => useThumbnailCamera('dataset-1'));
++
++        await waitFor(() => expect(result.current.cameras).toHaveLength(1));
++
++        expect(result.current.cameras.map((camera) => camera.key)).toEqual([TOP]);
++        expect(result.current.thumbnailCamera).toBe(TOP);
++    });
++
+     it('falls back to the first camera when nothing is stored and persists a selection', async () => {
+         mockDatasetCameras('dataset-1', [TOP, WRIST]);
+ 
+diff --git a/application/ui/src/features/datasets/use-dataset-cameras.ts b/application/ui/src/features/datasets/use-dataset-cameras.ts
+index 9baecd6..d079c82 100644
+--- a/application/ui/src/features/datasets/use-dataset-cameras.ts
++++ b/application/ui/src/features/datasets/use-dataset-cameras.ts
+@@ -42,12 +42,15 @@ export const useDatasetCameras = (datasetId: string | undefined): UseDatasetCame
+         { enabled: datasetId !== undefined && firstEpisodeIndex !== undefined }
+     );
+ 
++    // Depth maps (RealSense ``<camera>_depth``) are not cameras a policy or a thumbnail uses.
+     const cameras = useMemo(
+         () =>
+-            Object.keys(episode?.videos ?? {}).map((key) => ({
+-                key,
+-                name: key.startsWith(IMAGE_KEY_PREFIX) ? key.slice(IMAGE_KEY_PREFIX.length) : key,
+-            })),
++            Object.entries(episode?.videos ?? {})
++                .filter(([, video]) => !video.is_depth)
++                .map(([key]) => ({
++                    key,
++                    name: key.startsWith(IMAGE_KEY_PREFIX) ? key.slice(IMAGE_KEY_PREFIX.length) : key,
++                })),
+         [episode]
+     );
+ 
+diff --git a/application/ui/src/features/models/train-model-dialog/train-model-dialog.test.tsx b/application/ui/src/features/models/train-model-dialog/train-model-dialog.test.tsx
+index 48d8d92..3b85eaf 100644
+--- a/application/ui/src/features/models/train-model-dialog/train-model-dialog.test.tsx
++++ b/application/ui/src/features/models/train-model-dialog/train-model-dialog.test.tsx
+@@ -111,8 +111,8 @@ const mockProjectWithRemoteTrainer = (datasets = [testDataset, otherDataset]) =>
+                 actions: [],
+                 action_keys: [],
+                 videos: {
+-                    'observation.images.top': { start: 0, end: 3, path: 'top.mp4' },
+-                    'observation.images.wrist': { start: 0, end: 3, path: 'wrist.mp4' },
++                    'observation.images.top': { start: 0, end: 3, path: 'top.mp4', is_depth: false },
++                    'observation.images.wrist': { start: 0, end: 3, path: 'wrist.mp4', is_depth: false },
+                 },
+             })
+         ),
+diff --git a/application/ui/src/features/robots/camera-form/components/fps-picker.tsx b/application/ui/src/features/robots/camera-form/components/fps-picker.tsx
+index 74923da..f6685a3 100644
+--- a/application/ui/src/features/robots/camera-form/components/fps-picker.tsx
++++ b/application/ui/src/features/robots/camera-form/components/fps-picker.tsx
+@@ -2,7 +2,7 @@ import { Item, Picker } from '@geti-ui/ui';
+ 
+ import { CameraFingerprint } from '../../../cameras/fingerprint';
+ import { CameraDriver } from '../provider';
+-import { useSupportedFormats } from './use-camera-data';
++import { RealsenseOutputType, useSupportedFormats } from './use-camera-data';
+ 
+ interface FpsPickerProps {
+     driver: CameraDriver;
+@@ -11,10 +11,19 @@ interface FpsPickerProps {
+     height: number | undefined;
+     selectedFps: number | undefined;
+     onSelect: (fps: number) => void;
++    outputType?: RealsenseOutputType;
+ }
+ 
+-export const FpsPicker = ({ driver, fingerprint, width, height, selectedFps, onSelect }: FpsPickerProps) => {
+-    const supportedFormats = useSupportedFormats(driver, fingerprint);
++export const FpsPicker = ({
++    driver,
++    fingerprint,
++    width,
++    height,
++    selectedFps,
++    onSelect,
++    outputType,
++}: FpsPickerProps) => {
++    const supportedFormats = useSupportedFormats(driver, fingerprint, outputType);
+ 
+     const resolution = supportedFormats.find((r) => r.width === width && r.height === height);
+     const supportedFps = resolution?.fps ?? [];
+diff --git a/application/ui/src/features/robots/camera-form/components/resolution-picker.tsx b/application/ui/src/features/robots/camera-form/components/resolution-picker.tsx
+index 51c0495..2a3f46a 100644
+--- a/application/ui/src/features/robots/camera-form/components/resolution-picker.tsx
++++ b/application/ui/src/features/robots/camera-form/components/resolution-picker.tsx
+@@ -2,7 +2,7 @@ import { Item, Picker } from '@geti-ui/ui';
+ 
+ import { CameraFingerprint } from '../../../cameras/fingerprint';
+ import { CameraDriver } from '../provider';
+-import { useSupportedFormats } from './use-camera-data';
++import { RealsenseOutputType, useSupportedFormats } from './use-camera-data';
+ 
+ interface Resolution {
+     width: number;
+@@ -15,10 +15,17 @@ interface ResolutionPickerProps {
+     fingerprint: CameraFingerprint | null | undefined;
+     selectedResolution: { width: number | undefined; height: number | undefined } | undefined;
+     onSelect: (resolution: Resolution) => void;
++    outputType?: RealsenseOutputType;
+ }
+ 
+-export const ResolutionPicker = ({ driver, fingerprint, selectedResolution, onSelect }: ResolutionPickerProps) => {
+-    const supportedResolutions = useSupportedFormats(driver, fingerprint);
++export const ResolutionPicker = ({
++    driver,
++    fingerprint,
++    selectedResolution,
++    onSelect,
++    outputType,
++}: ResolutionPickerProps) => {
++    const supportedResolutions = useSupportedFormats(driver, fingerprint, outputType);
+ 
+     const selectedKey =
+         selectedResolution?.width && selectedResolution?.height
+diff --git a/application/ui/src/features/robots/camera-form/components/use-camera-data.ts b/application/ui/src/features/robots/camera-form/components/use-camera-data.ts
+index 937848c..02c54e5 100644
+--- a/application/ui/src/features/robots/camera-form/components/use-camera-data.ts
++++ b/application/ui/src/features/robots/camera-form/components/use-camera-data.ts
+@@ -15,14 +15,24 @@ export const useAllAvailableCameras = () => {
+     return $api.useSuspenseQuery('get', '/api/hardware/cameras');
+ };
+ 
+-export const useSupportedFormats = (driver: CameraDriver, fingerprint: CameraFingerprint | null | undefined) => {
++export type RealsenseOutputType = 'color' | 'depth' | 'both';
++
++export const useSupportedFormats = (
++    driver: CameraDriver,
++    fingerprint: CameraFingerprint | null | undefined,
++    outputType?: RealsenseOutputType
++) => {
+     const query = $api.useQuery(
+         'get',
+         '/api/cameras/supported_formats/{driver}',
+         {
+             params: {
+                 path: { driver },
+-                query: { fingerprint: fingerprintKey(fingerprint) ?? '' },
++                query: {
++                    fingerprint: fingerprintKey(fingerprint) ?? '',
++                    // A RealSense offers other modes for depth, and fewer on USB 2.
++                    ...(outputType !== undefined ? { output_type: outputType } : {}),
++                },
+             },
+         },
+         { enabled: !!fingerprint }
+diff --git a/application/ui/src/features/robots/camera-form/drivers/realsense.tsx b/application/ui/src/features/robots/camera-form/drivers/realsense.tsx
+index 7cb0d00..80a6041 100644
+--- a/application/ui/src/features/robots/camera-form/drivers/realsense.tsx
++++ b/application/ui/src/features/robots/camera-form/drivers/realsense.tsx
+@@ -1,10 +1,11 @@
+-import { Flex } from '@geti-ui/ui';
++import { Flex, Item, NumberField, Picker, Text } from '@geti-ui/ui';
+ 
+ import { SchemaRealsenseCameraInput } from '../../../../api/openapi-spec';
+ import { CameraPicker } from '../components/camera-picker';
+ import { FpsPicker } from '../components/fps-picker';
+ import { NameField } from '../components/name-field';
+ import { ResolutionPicker } from '../components/resolution-picker';
++import { RealsenseOutputType, useSupportedFormats } from '../components/use-camera-data';
+ import { useCameraFormFields } from '../components/use-camera-form-fields';
+ import { DriverFormSchema } from '../provider';
+ 
+@@ -18,17 +19,35 @@ export const initialRealsenseState: DriverFormSchema<'realsense'> = {
+ };
+ 
+ export const validateRealsense = (formData: DriverFormSchema<'realsense'>): formData is SchemaRealsenseCameraInput => {
++    const payload = formData.payload;
+     return (
+         !!formData.name &&
+         !!formData.fingerprint &&
+-        !!formData.payload?.width &&
+-        !!formData.payload?.height &&
+-        !!formData.payload?.fps
++        !!payload?.width &&
++        !!payload?.height &&
++        !!payload?.fps &&
++        (payload.depth_range_min ?? 0.3) < (payload.depth_range_max ?? 3)
+     );
+ };
+ 
++const OUTPUT_TYPES: { key: RealsenseOutputType; label: string }[] = [
++    { key: 'color', label: 'Color' },
++    { key: 'depth', label: 'Depth' },
++    { key: 'both', label: 'Color + depth (aligned to color)' },
++];
++
+ export const RealsenseFormFields = () => {
+     const { formData, updateField, updatePayload } = useCameraFormFields('realsense');
++    const outputType: RealsenseOutputType = formData.payload?.output_type ?? 'color';
++    const hasDepth = outputType !== 'color';
++    const supportedFormats = useSupportedFormats('realsense', formData.fingerprint, outputType);
++    const { width, height, fps } = formData.payload ?? {};
++    const isModeUnavailable =
++        supportedFormats.length > 0 &&
++        width !== undefined &&
++        !supportedFormats.some(
++            (format) => format.width === width && format.height === height && format.fps.includes(fps ?? -1)
++        );
+ 
+     return (
+         <Flex gap='size-100' alignItems='end' direction='column'>
+@@ -41,26 +60,74 @@ export const RealsenseFormFields = () => {
+                     updateField('hardware_name', name);
+                 }}
+             />
++            <Picker
++                label='Output'
++                width='100%'
++                selectedKey={outputType}
++                onSelectionChange={(key) => {
++                    if (key !== null) {
++                        updatePayload({ output_type: key as RealsenseOutputType });
++                    }
++                }}
++            >
++                {OUTPUT_TYPES.map(({ key, label }) => (
++                    <Item key={key}>{label}</Item>
++                ))}
++            </Picker>
+             <ResolutionPicker
+                 driver='realsense'
+                 fingerprint={formData.fingerprint}
+-                selectedResolution={{
+-                    width: formData.payload?.width,
+-                    height: formData.payload?.height,
+-                }}
+-                onSelect={({ width, height, fps }) => {
+-                    const newFps = fps.find((f) => f === formData.payload?.fps) ?? fps.at(-1) ?? 30;
+-                    updatePayload({ width, height, fps: newFps });
++                outputType={outputType}
++                selectedResolution={{ width, height }}
++                onSelect={(resolution) => {
++                    const newFps = resolution.fps.find((f) => f === fps) ?? resolution.fps.at(-1) ?? 30;
++                    updatePayload({ width: resolution.width, height: resolution.height, fps: newFps });
+                 }}
+             />
+             <FpsPicker
+                 driver='realsense'
+                 fingerprint={formData.fingerprint}
+-                width={formData.payload?.width}
+-                height={formData.payload?.height}
+-                selectedFps={formData.payload?.fps}
+-                onSelect={(fps) => updatePayload({ fps })}
++                outputType={outputType}
++                width={width}
++                height={height}
++                selectedFps={fps}
++                onSelect={(newFps) => updatePayload({ fps: newFps })}
+             />
++            {isModeUnavailable && (
++                <Text width='100%'>
++                    {`This camera does not offer ${width} x ${height} at ${fps} fps for this output on its current ` +
++                        'USB connection. Pick another resolution or frame rate; 1280 x 720 at 30 fps needs USB 3.'}
++                </Text>
++            )}
++            {hasDepth && (
++                <Flex gap='size-100' width='100%'>
++                    <NumberField
++                        label='Nearest depth (m)'
++                        width='50%'
++                        minValue={0.1}
++                        maxValue={5}
++                        step={0.05}
++                        value={formData.payload?.depth_range_min ?? 0.3}
++                        onChange={(value) => updatePayload({ depth_range_min: value })}
++                    />
++                    <NumberField
++                        label='Farthest depth (m)'
++                        width='50%'
++                        minValue={1}
++                        maxValue={10}
++                        step={0.1}
++                        value={formData.payload?.depth_range_max ?? 3}
++                        onChange={(value) => updatePayload({ depth_range_max: value })}
++                    />
++                </Flex>
++            )}
++            {hasDepth && (
++                <Text width='100%'>
++                    Depth is recorded in millimetres as a camera of its own, named after this one with
++                    &quot;_depth&quot; appended, aligned to the color image. Depth outside this range is recorded as 0
++                    (no data).
++                </Text>
++            )}
+         </Flex>
+     );
+ };
+diff --git a/application/ui/src/features/robots/camera-form/preview.tsx b/application/ui/src/features/robots/camera-form/preview.tsx
+index 1311385..c15346d 100644
+--- a/application/ui/src/features/robots/camera-form/preview.tsx
++++ b/application/ui/src/features/robots/camera-form/preview.tsx
+@@ -35,9 +35,16 @@ export const Preview = () => {
+         ...cameraForm,
+     };
+ 
+-    // Make sure we completely refresh the camera preview when changing camera or resolution
+-    // eslint-disable-next-line max-len
+-    const key = `${camera.driver}-${fingerprintKey(camera.fingerprint)}-${camera.payload?.fps}-${camera.payload?.height}-${camera.payload?.width}`;
++    // Make sure we completely refresh the camera preview when changing camera, resolution or RealSense output
++    const outputType = camera.driver === 'realsense' ? camera.payload?.output_type : undefined;
++    const key = [
++        camera.driver,
++        fingerprintKey(camera.fingerprint),
++        camera.payload?.fps,
++        camera.payload?.height,
++        camera.payload?.width,
++        outputType,
++    ].join('-');
+ 
+     return (
+         <View height={'100%'} position={'relative'}>
+diff --git a/application/ui/src/test-utils/mocks/mock-episode-detail.ts b/application/ui/src/test-utils/mocks/mock-episode-detail.ts
+index c27bb57..2b56ed8 100644
+--- a/application/ui/src/test-utils/mocks/mock-episode-detail.ts
++++ b/application/ui/src/test-utils/mocks/mock-episode-detail.ts
+@@ -7,6 +7,7 @@ export const getMockedEpisodeVideo = (overrides: Partial<SchemaEpisodeVideo> = {
+     start: 0,
+     end: 3,
+     path: 'video.mp4',
++    is_depth: false,
+     ...overrides,
+ });
+ 
+diff --git a/application/ui/tests/training-menu-layout.spec.ts b/application/ui/tests/training-menu-layout.spec.ts
+index cb8c76a..a2cbbb3 100644
+--- a/application/ui/tests/training-menu-layout.spec.ts
++++ b/application/ui/tests/training-menu-layout.spec.ts
+@@ -45,7 +45,7 @@ for (const policy of policies) {
+                     tasks: [],
+                     actions: [],
+                     action_keys: [],
+-                    videos: { 'observation.images.top': { start: 0, end: 3, path: 'top.mp4' } },
++                    videos: { 'observation.images.top': { start: 0, end: 3, path: 'top.mp4', is_depth: false } },
+                 })
+             )
+         );
+-- 
+2.53.0
+

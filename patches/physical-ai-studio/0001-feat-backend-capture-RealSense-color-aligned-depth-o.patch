@@ -1,0 +1,1262 @@
+From a3ef7cc381020bc5f8525cfc5b903bec3373cc36 Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Fri, 13 Nov 2026 16:56:41 -0800
+Subject: [PATCH 01/13] feat(backend): capture RealSense color, aligned depth
+ or both
+
+The RealSense payload's output_type and depth range were dropped by the camera
+factory, and physicalai's RealSenseCamera always streams depth at the color
+resolution (1920x1080 fails with "Couldn't resolve requests") while its
+publisher forwards color only.
+
+Studio now captures RealSense cameras with its own RealSenseRGBDCamera: it
+enables only the streams output_type asks for, aligns depth to color, and
+packs color and depth of one frameset into a single uint8 frame so they share
+a timestamp through the unchanged shared-memory publisher. The requested mode
+is checked against the modes the device offers on its current USB connection,
+with a clear error (including a USB 2 hint) when it is not available. Each
+output type gets its own publisher service. The supported-formats endpoint
+lists the modes per output type and is no longer cached for RealSense, and a
+preview shows color, or colorized depth for depth-only cameras.
+
+The portable runtime-export recipe now gives physicalai's RealSenseCamera a
+depth resolution the D400 depth sensor has.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ application/backend/src/api/camera.py         |  30 +-
+ .../backend/src/schemas/project_camera.py     |  42 +-
+ .../backend/src/utils/camera_factory.py       |  68 ++-
+ .../backend/src/utils/depth_colormap.py       |  31 ++
+ application/backend/src/utils/jpeg.py         |  33 ++
+ .../backend/src/utils/realsense_rgbd.py       | 443 ++++++++++++++++++
+ .../backend/tests/api/test_camera_stream.py   |  41 ++
+ .../backend/tests/unit/test_camera_factory.py |  99 ++++
+ .../backend/tests/unit/test_realsense_rgbd.py | 267 +++++++++++
+ 9 files changed, 1036 insertions(+), 18 deletions(-)
+ create mode 100644 application/backend/src/utils/depth_colormap.py
+ create mode 100644 application/backend/src/utils/realsense_rgbd.py
+ create mode 100644 application/backend/tests/unit/test_camera_factory.py
+ create mode 100644 application/backend/tests/unit/test_realsense_rgbd.py
+
+diff --git a/application/backend/src/api/camera.py b/application/backend/src/api/camera.py
+index 1b92eac..37eecfb 100644
+--- a/application/backend/src/api/camera.py
++++ b/application/backend/src/api/camera.py
+@@ -2,7 +2,7 @@ import asyncio
+ import json
+ from collections import defaultdict
+ from functools import cache
+-from typing import Annotated
++from typing import Annotated, Literal
+ 
+ import anyio
+ from fastapi import APIRouter, Depends, Query, WebSocket, status
+@@ -20,6 +20,8 @@ from workers.rate import Rate
+ 
+ router = APIRouter(prefix="/api/cameras", tags=["Cameras"])
+ 
++RealsenseOutputType = Literal["color", "depth", "both"]
++
+ 
+ def _formats_to_response(raw: list[tuple[int, int, int]]) -> list[SupportedCameraFormat]:
+     """Group (w, h, fps) tuples into SupportedCameraFormat responses."""
+@@ -52,19 +54,29 @@ def _query_formats(driver: str, fingerprint_key: str) -> list[SupportedCameraFor
+ 
+         return _formats_to_response(UVCCamera.query_formats(deserialized_fingerprint))
+ 
+-    if driver == "realsense":
+-        from physicalai.capture.cameras.realsense import RealSenseCamera
+-
+-        return _formats_to_response(RealSenseCamera.query_formats(deserialized_fingerprint))
+-
+     msg = f"Format discovery not supported for driver {driver!r}"
+     raise ValueError(msg)
+ 
+ 
++def _query_realsense_formats(fingerprint: dict, output_type: RealsenseOutputType) -> list[SupportedCameraFormat]:
++    """The modes a RealSense offers for ``output_type`` on its current USB connection.
++
++    Not cached: listing them does not open the camera, and they change when it is replugged
++    into another port (USB 2 offers far fewer).
++    """
++    from utils.realsense_rgbd import RealSenseRGBDCamera
++
++    return _formats_to_response(RealSenseRGBDCamera.query_formats(fingerprint, output_type))
++
++
+ @router.get("/supported_formats/{driver}")
+ async def get_supported_formats(
+     driver: str,
+     fingerprint: str,
++    output_type: Annotated[
++        RealsenseOutputType,
++        Query(description="RealSense only: the modes for color, depth, or color with depth aligned to it"),
++    ] = "color",
+ ) -> list[SupportedCameraFormat]:
+     """Returns the supported camera resolution and fps associated to the camera."""
+     try:
+@@ -73,6 +85,8 @@ async def get_supported_formats(
+         raise ValueError(f"Unable to parse fingerprint into a dictionary: {e}") from e
+     if not isinstance(parsed, dict) or not parsed:
+         raise ValueError("Camera fingerprint must be a non-empty JSON object")
++    if driver == "realsense":
++        return await asyncio.to_thread(_query_realsense_formats, parsed, output_type)
+     fingerprint_key = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+     return _query_formats(driver, fingerprint_key)
+ 
+@@ -119,7 +133,7 @@ async def camera_websocket(
+         Server sends jpeg encoded bytes, or one JSON error before closing:
+             {"event": "error", "message": str, "error_code": str}
+     """
+-    from utils.jpeg import encode_jpeg_rgb
++    from utils.jpeg import encode_jpeg_camera_frame
+ 
+     await websocket.accept()
+ 
+@@ -139,7 +153,7 @@ async def camera_websocket(
+             while True:
+                 frame = await asyncio.to_thread(shared_camera.read_latest)
+                 if frame.sequence != sent:
+-                    await websocket.send_bytes(await asyncio.to_thread(encode_jpeg_rgb, frame.data))
++                    await websocket.send_bytes(await asyncio.to_thread(encode_jpeg_camera_frame, frame.data))
+                     sent = frame.sequence
+                 await rate.sleep()
+         finally:
+diff --git a/application/backend/src/schemas/project_camera.py b/application/backend/src/schemas/project_camera.py
+index d21123f..18fa04b 100644
+--- a/application/backend/src/schemas/project_camera.py
++++ b/application/backend/src/schemas/project_camera.py
+@@ -1,7 +1,7 @@
+ from abc import ABC
+ from typing import Annotated, Any, Literal
+ 
+-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
++from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+ 
+ from schemas.base import BaseIDModel, UTCDatetime
+ 
+@@ -65,14 +65,37 @@ class BaslerCameraPayload(BaseModel):
+ 
+ 
+ class RealsenseCameraPayload(BaseModel):
+-    """Configuration for RealsenseCapture."""
++    """Configuration for an Intel RealSense camera.
++
++    ``width``/``height``/``fps`` is the color mode, and the depth mode for depth-only output. With
++    ``both``, depth is aligned to the color image, so both have the color resolution.
++    """
+ 
+     width: int = Field(640, ge=424, le=1920, description="Frame width in pixels")
+     height: int = Field(480, ge=240, le=1080, description="Frame height in pixels")
+     fps: int = Field(30, ge=6, le=90, description="Frames per second")
+-    depth_range_min: float = Field(0.3, ge=0.1, le=5.0, description="Minimum depth detection range in meters")
+-    depth_range_max: float = Field(3.0, ge=1.0, le=10.0, description="Maximum depth detection range in meters")
+-    output_type: Literal["color", "depth", "both"] = Field("color", description="Type of output frames")
++    depth_range_min: float = Field(
++        0.3, ge=0.1, le=5.0, description="Nearest valid depth in meters; nearer depth is recorded as 0 (no data)"
++    )
++    depth_range_max: float = Field(
++        3.0, ge=1.0, le=10.0, description="Farthest valid depth in meters; farther depth is recorded as 0 (no data)"
++    )
++    output_type: Literal["color", "depth", "both"] = Field(
++        "color",
++        description=(
++            "What to stream and record: 'color' (observation.images.<camera>), 'depth' "
++            "(observation.images.<camera>_depth, millimetres) or 'both' (depth aligned to color)"
++        ),
++    )
++
++    @model_validator(mode="after")
++    def check_depth_range(self) -> "RealsenseCameraPayload":
++        """Reject a depth range that keeps no depth at all."""
++        if self.depth_range_min >= self.depth_range_max:
++            raise ValueError(
++                f"depth_range_min ({self.depth_range_min} m) must be below depth_range_max ({self.depth_range_max} m)"
++            )
++        return self
+ 
+ 
+ class GenicamCameraPayload(BaseModel):
+@@ -173,11 +196,14 @@ class RealsenseCamera(BaseCamera):
+                 "name": "depth_camera",
+                 "driver": "realsense",
+                 "fingerprint": {"serial": "123456789"},
+-                "hardware_name": "Intel RealSense D435",
++                "hardware_name": "Intel RealSense D415",
+                 "payload": {
+-                    "width": 640,
+-                    "height": 480,
++                    "width": 1280,
++                    "height": 720,
+                     "fps": 30,
++                    "output_type": "both",
++                    "depth_range_min": 0.3,
++                    "depth_range_max": 3.0,
+                 },
+             }
+         }
+diff --git a/application/backend/src/utils/camera_factory.py b/application/backend/src/utils/camera_factory.py
+index c895793..aa77633 100644
+--- a/application/backend/src/utils/camera_factory.py
++++ b/application/backend/src/utils/camera_factory.py
+@@ -40,6 +40,17 @@ _DRIVER_TO_CLASS_PATH: dict[str, str] = {
+     "ipcam": "physicalai.capture.IPCamera",
+ }
+ 
++# What Studio's own publishers capture with, where it differs from the portable class above:
++# physicalai's RealSenseCamera streams depth at the color resolution and publishes color only.
++_DRIVER_TO_CAPTURE_CLASS_PATH: dict[str, str] = {
++    "realsense": "utils.realsense_rgbd.RealSenseRGBDCamera",
++}
++
++# Depth resolutions of Intel RealSense D400 cameras, for a portable recipe that has to pick one blindly.
++_D400_DEPTH_SIZES: frozenset[tuple[int, int]] = frozenset(
++    {(1280, 720), (848, 480), (640, 480), (640, 360), (480, 270), (424, 240)}
++)
++
+ # Per-driver kwargs that are safe to pass through to the nested camera recipe.
+ _ALLOWED_KWARGS: dict[str, frozenset[str]] = {
+     "usb_camera": frozenset({"width", "height", "fps"}),
+@@ -50,7 +61,10 @@ _ALLOWED_KWARGS: dict[str, frozenset[str]] = {
+ 
+ 
+ def build_camera_config(config: Camera) -> Config:
+-    """Build a camera configuration from a config schema."""
++    """Build the portable ``physicalai.capture`` recipe for a camera, as a runtime export runs it.
++
++    Studio captures some drivers with its own class instead; see :func:`build_capture_config`.
++    """
+     class_path = _DRIVER_TO_CLASS_PATH[config.driver]
+     allowed = _ALLOWED_KWARGS.get(config.driver, frozenset())
+ 
+@@ -69,9 +83,58 @@ def build_camera_config(config: Camera) -> Config:
+             raise ValueError(f"Camera fingerprint for {config.driver!r} must include a non-empty 'serial'")
+         init_args["serial_number"] = serial
+ 
++    if config.driver == "realsense":
++        # physicalai's RealSenseCamera always streams depth too, by default at the color resolution,
++        # which the depth sensor may lack (1920x1080, 960x540): give it one it has.
++        width, height = init_args.get("width", 640), init_args.get("height", 480)
++        depth = (
++            (width, height) if (width, height) in _D400_DEPTH_SIZES else (1280, 720) if width >= 1280 else (848, 480)
++        )
++        init_args["depth_width"], init_args["depth_height"] = depth
++
+     return Config(class_path, init_args)
+ 
+ 
++def build_capture_config(config: Camera) -> Config:
++    """Build the recipe Studio's camera publisher captures with.
++
++    A RealSense camera is captured with :class:`utils.realsense_rgbd.RealSenseRGBDCamera`, which
++    streams what ``output_type`` asks for (color, depth aligned to color, or both) and fails with
++    the modes the device offers on its current USB connection when the requested one is not among
++    them. Every other driver uses its portable recipe.
++    """
++    if config.driver != "realsense":
++        return build_camera_config(config)
++    payload = config.payload
++    serial = (config.fingerprint or {}).get("serial")
++    if not config.fingerprint:
++        raise ValueError("Camera must be reselected")
++    if not isinstance(serial, str) or not serial:
++        raise ValueError("Camera fingerprint for 'realsense' must include a non-empty 'serial'")
++    return Config(
++        _DRIVER_TO_CAPTURE_CLASS_PATH["realsense"],
++        {
++            "serial_number": serial,
++            "width": payload.width,
++            "height": payload.height,
++            "fps": payload.fps,
++            "output_type": payload.output_type,
++        },
++    )
++
++
++def capture_service_name(config: Camera) -> str | None:
++    """The shared-memory service a camera's publisher serves, when it is not the derived default.
++
++    A RealSense publisher delivers only the streams of its ``output_type``, so each output type
++    gets its own service: a subscriber never attaches to a publisher that lacks the streams it needs.
++    """
++    if config.driver != "realsense":
++        return None
++    serial = (config.fingerprint or {}).get("serial")
++    return f"physicalai/camera/RealSenseRGBDCamera/{serial}-{config.payload.output_type}/frame"
++
++
+ def is_migrated(driver: str) -> bool:
+     """Return True if *driver* is supported by physicalai.capture."""
+     return driver in MIGRATED_DRIVERS
+@@ -122,11 +185,12 @@ def build_shared_camera(
+         # A replugged UVC camera may report a 1/0 frame interval, which fails the open.
+         fix_zero_frame_intervals()
+ 
+-    camera_config = build_camera_config(config)
++    camera_config = build_capture_config(config)
+     logger.debug(f"camera config for {config.name}: {camera_config}")
+ 
+     return SharedCamera(
+         camera=camera_config,
++        service_name=capture_service_name(config),
+         color_mode=ColorMode.RGB,
+         validate_on_connect=validate_on_connect,
+         overwrite_settings=overwrite_settings,
+diff --git a/application/backend/src/utils/depth_colormap.py b/application/backend/src/utils/depth_colormap.py
+new file mode 100644
+index 0000000..1eb6ed2
+--- /dev/null
++++ b/application/backend/src/utils/depth_colormap.py
+@@ -0,0 +1,31 @@
++"""Turn depth maps into color images people can look at; recordings keep the millimetres."""
++
++from __future__ import annotations
++
++import cv2
++import numpy as np
++
++_SAMPLE_STEP = 4
++"""Every 4th pixel each way sets the color range; enough, and 16x cheaper than all of them."""
++_MIN_SPAN_MM = 100.0
++
++
++def colorize_depth(depth: np.ndarray, near_mm: float | None = None, far_mm: float | None = None) -> np.ndarray:
++    """An ``(H, W, 3)`` RGB image of an ``(H, W)`` or ``(H, W, 1)`` depth map in millimetres.
++
++    Near is red, far is blue, and no depth (0) is black. Without ``near_mm``/``far_mm`` the range
++    spans the 2nd to the 98th percentile of the frame's valid depth.
++    """
++    depth = depth.reshape(depth.shape[:2]).astype(np.float32, copy=False)
++    valid = depth > 0
++    if near_mm is None or far_mm is None:
++        sample = depth[::_SAMPLE_STEP, ::_SAMPLE_STEP]
++        sample = sample[sample > 0]
++        low, high = np.percentile(sample, (2, 98)) if sample.size else (0.0, 1.0)
++        near_mm = float(low) if near_mm is None else near_mm
++        far_mm = float(high) if far_mm is None else far_mm
++    span = max(far_mm - near_mm, _MIN_SPAN_MM)
++    scaled = np.clip((far_mm - depth) * (255.0 / span), 0, 255).astype(np.uint8)
++    bgr = cv2.applyColorMap(scaled, cv2.COLORMAP_TURBO)
++    bgr[~valid] = 0
++    return np.ascontiguousarray(bgr[:, :, ::-1])
+diff --git a/application/backend/src/utils/jpeg.py b/application/backend/src/utils/jpeg.py
+index 31bcfd1..813f172 100644
+--- a/application/backend/src/utils/jpeg.py
++++ b/application/backend/src/utils/jpeg.py
+@@ -23,3 +23,36 @@ def encode_jpeg_rgb(image: np.ndarray, quality: int = 80) -> bytes:
+         msg = "JPEG encoding failed"
+         raise RuntimeError(msg)
+     return buf.tobytes()
++
++
++def encode_jpeg_frame(image: np.ndarray, quality: int = 80) -> bytes:
++    """Encode a store frame to JPEG bytes: an RGB image as is, a ``uint16`` depth map colorized.
++
++    Returns:
++        JPEG-encoded bytes.
++    """
++    if image.dtype == np.uint16:
++        from utils.depth_colormap import colorize_depth
++
++        image = colorize_depth(image)
++    return encode_jpeg_rgb(image, quality)
++
++
++def encode_jpeg_camera_frame(data: np.ndarray, quality: int = 80) -> bytes:
++    """Encode a camera publisher's frame for a preview: its color image, else its colorized depth.
++
++    A RealSense publisher packs color and depth into one frame (see :mod:`utils.realsense_rgbd`);
++    any other camera's frame is an RGB image.
++
++    Returns:
++        JPEG-encoded bytes.
++    """
++    if data.dtype == np.uint8 and data.ndim == 3 and data.shape[2] != 3:
++        from utils.realsense_rgbd import unpack_rgbd
++
++        color, depth = unpack_rgbd(data)
++        shown = color if color is not None else depth
++        if shown is None:
++            raise ValueError("The frame holds neither color nor depth")
++        data = shown
++    return encode_jpeg_frame(data, quality)
+diff --git a/application/backend/src/utils/realsense_rgbd.py b/application/backend/src/utils/realsense_rgbd.py
+new file mode 100644
+index 0000000..5e6fe13
+--- /dev/null
++++ b/application/backend/src/utils/realsense_rgbd.py
+@@ -0,0 +1,443 @@
++"""Intel RealSense capture that delivers color, depth aligned to color, or both.
++
++``physicalai.capture.RealSenseCamera`` always streams depth at the color
++resolution (which fails for color modes the depth sensor lacks, such as
++1920x1080) and its shared-memory publisher only forwards color. Studio
++records depth too, so it captures RealSense devices with this camera instead
++and keeps the hardware-agnostic transport: color and depth of one frameset
++travel together in a single ``uint8`` frame, so they always share a timestamp.
++
++Packed frame layouts, by channel count:
++
++- 3: color only, ``RGB`` (unchanged from a plain color camera).
++- 2: depth only, the little-endian bytes of ``uint16`` millimetres.
++- 5: color and depth aligned to color: ``R, G, B, depth low byte, depth high byte``.
++
++:func:`unpack_rgbd` splits a packed frame back into ``(color, depth)``.
++
++``pyrealsense2`` is imported on connect only, so the packing helpers and mode
++selection stay importable (and testable) without the SDK.
++"""
++
++from __future__ import annotations
++
++import time
++from dataclasses import dataclass
++from typing import TYPE_CHECKING, Any, Literal, cast
++
++import numpy as np
++from loguru import logger
++from physicalai.capture.camera import Camera, ColorMode
++from physicalai.capture.errors import CaptureError, CaptureTimeoutError, NotConnectedError
++from physicalai.capture.frame import Frame
++
++if TYPE_CHECKING:
++    from collections.abc import Iterable
++
++RealSenseOutput = Literal["color", "depth", "both"]
++OUTPUT_TYPES: tuple[RealSenseOutput, ...] = ("color", "depth", "both")
++
++COLOR_CHANNELS = 3
++DEPTH_CHANNELS = 2
++RGBD_CHANNELS = COLOR_CHANNELS + DEPTH_CHANNELS
++
++Mode = tuple[int, int, int]
++"""``(width, height, fps)``."""
++
++
++class RealSenseModeError(CaptureError):
++    """The requested streams are not available on this device and connection."""
++
++
++def output_has_color(output_type: str) -> bool:
++    """Whether a camera with ``output_type`` delivers a color image."""
++    return output_type in {"color", "both"}
++
++
++def output_has_depth(output_type: str) -> bool:
++    """Whether a camera with ``output_type`` delivers a depth map."""
++    return output_type in {"depth", "both"}
++
++
++def packed_channels(output_type: str) -> int:
++    """Channels of the packed frame a camera with ``output_type`` delivers."""
++    return {"color": COLOR_CHANNELS, "depth": DEPTH_CHANNELS, "both": RGBD_CHANNELS}[output_type]
++
++
++def pack_rgbd(color: np.ndarray | None, depth: np.ndarray | None) -> np.ndarray:
++    """Pack an ``(H, W, 3)`` uint8 color image and/or an ``(H, W)`` uint16 depth map into one uint8 frame.
++
++    Raises:
++        ValueError: Neither image is given, or their shapes or dtypes do not fit.
++    """
++    if depth is None:
++        if color is None:
++            raise ValueError("Nothing to pack: neither color nor depth was given")
++        return color
++    if depth.dtype != np.uint16 or depth.ndim != 2:
++        raise ValueError(f"Depth must be a 2-D uint16 array, got {depth.dtype} {depth.shape}")
++    depth_bytes = np.ascontiguousarray(depth, dtype="<u2").view(np.uint8).reshape(*depth.shape, DEPTH_CHANNELS)
++    if color is None:
++        return depth_bytes
++    if color.shape[:2] != depth.shape or color.dtype != np.uint8 or color.shape[2:] != (COLOR_CHANNELS,):
++        raise ValueError(f"Color {color.dtype} {color.shape} does not match depth {depth.shape}")
++    packed = np.empty((*depth.shape, RGBD_CHANNELS), dtype=np.uint8)
++    packed[..., :COLOR_CHANNELS] = color
++    packed[..., COLOR_CHANNELS:] = depth_bytes
++    return packed
++
++
++def unpack_rgbd(data: np.ndarray) -> tuple[np.ndarray | None, np.ndarray | None]:
++    """Split a packed frame into ``(color, depth)``: ``(H, W, 3)`` uint8 and ``(H, W, 1)`` uint16, or ``None``.
++
++    Raises:
++        ValueError: ``data`` is not a packed RealSense frame.
++    """
++    if data.dtype != np.uint8 or data.ndim != 3:
++        raise ValueError(f"Not a packed RealSense frame: {data.dtype} {data.shape}")
++    channels = data.shape[2]
++    if channels == COLOR_CHANNELS:
++        return data, None
++    if channels == DEPTH_CHANNELS:
++        return None, _depth_from_bytes(data)
++    if channels == RGBD_CHANNELS:
++        return data[..., :COLOR_CHANNELS], _depth_from_bytes(data[..., COLOR_CHANNELS:])
++    raise ValueError(f"Not a packed RealSense frame: {channels} channels")
++
++
++def _depth_from_bytes(data: np.ndarray) -> np.ndarray:
++    return np.ascontiguousarray(data).view("<u2").astype(np.uint16, copy=False)
++
++
++@dataclass(frozen=True, slots=True)
++class StreamPlan:
++    color: Mode | None
++    depth: Mode | None
++
++    def describe(self) -> str:
++        parts = []
++        if self.color is not None:
++            parts.append(f"color {_mode(self.color)}")
++        if self.depth is not None:
++            parts.append(f"depth {_mode(self.depth)}")
++        return " + ".join(parts)
++
++
++def _mode(mode: Mode) -> str:
++    return f"{mode[0]}x{mode[1]}@{mode[2]}fps"
++
++
++def _list_modes(modes: Iterable[Mode]) -> str:
++    listed = sorted(set(modes))
++    return ", ".join(_mode(mode) for mode in listed) if listed else "none"
++
++
++def _usb_hint(usb_type: str | None) -> str:
++    if usb_type and usb_type.startswith("2"):
++        return (
++            f" The camera is connected over USB {usb_type}, which only offers low-bandwidth modes;"
++            " plug it into a USB 3 port with a USB 3 cable for 1280x720 at 30 fps."
++        )
++    return ""
++
++
++def select_streams(  # noqa: PLR0913
++    color_modes: Iterable[Mode],
++    depth_modes: Iterable[Mode],
++    *,
++    width: int,
++    height: int,
++    fps: int,
++    output_type: str,
++    depth_size: tuple[int, int] | None = None,
++    usb_type: str | None = None,
++    device: str = "RealSense",
++) -> StreamPlan:
++    """Choose the color and depth streams to enable, or explain why the request cannot be met.
++
++    Color is the requested mode exactly. Depth-only streams depth at the requested mode.
++    With both, depth is aligned to color, so its own resolution only sets the detail
++    behind the aligned map: ``depth_size`` if given, else the color resolution when the
++    depth sensor has it, else the largest depth mode with the same fps and aspect ratio.
++
++    Raises:
++        RealSenseModeError: The device does not offer what is asked at this connection.
++        ValueError: ``output_type`` is unknown.
++    """
++    if output_type not in OUTPUT_TYPES:
++        raise ValueError(f"Unknown RealSense output type {output_type!r}; expected one of {OUTPUT_TYPES}")
++    colors, depths = set(color_modes), set(depth_modes)
++    requested = (width, height, fps)
++    hint = _usb_hint(usb_type)
++
++    if output_type == "depth":
++        if requested not in depths:
++            raise RealSenseModeError(
++                f"{device} has no depth mode {_mode(requested)}. Depth modes on this connection: "
++                f"{_list_modes(depths)}.{hint}"
++            )
++        return StreamPlan(color=None, depth=requested)
++
++    if requested not in colors:
++        raise RealSenseModeError(
++            f"{device} has no color mode {_mode(requested)}. Color modes on this connection: "
++            f"{_list_modes(colors)}.{hint}"
++        )
++    if output_type == "color":
++        return StreamPlan(color=requested, depth=None)
++
++    same_fps = [mode for mode in depths if mode[2] == fps]
++    if depth_size is not None:
++        depth = (*depth_size, fps)
++        if depth not in depths:
++            raise RealSenseModeError(
++                f"{device} has no depth mode {_mode(depth)}. Depth modes at {fps} fps on this connection: "
++                f"{_list_modes(same_fps)}.{hint}"
++            )
++        return StreamPlan(color=requested, depth=depth)
++    if requested in depths:
++        return StreamPlan(color=requested, depth=requested)
++    if not same_fps:
++        raise RealSenseModeError(
++            f"{device} has no depth mode at {fps} fps to align to color {_mode(requested)}. "
++            f"Depth modes on this connection: {_list_modes(depths)}.{hint}"
++        )
++    aspect = width / height
++    same_aspect = [mode for mode in same_fps if abs(mode[0] / mode[1] - aspect) < 0.02]
++    depth = max(same_aspect or same_fps, key=lambda mode: mode[0] * mode[1])
++    return StreamPlan(color=requested, depth=depth)
++
++
++class RealSenseRGBDCamera(Camera):
++    """RealSense camera that streams color, depth aligned to color, or both, as packed frames.
++
++    Args:
++        serial_number: The device's serial number.
++        width: Color width; also the depth width for depth-only output.
++        height: Color height; also the depth height for depth-only output.
++        fps: Frame rate of every enabled stream.
++        output_type: ``"color"``, ``"depth"`` or ``"both"``; only those streams are enabled.
++        color_mode: Channel order of the color image (``rgb`` or ``bgr``).
++        depth_width: Depth sensor width with ``"both"``; chosen automatically when omitted.
++        depth_height: Depth sensor height with ``"both"``; chosen automatically when omitted.
++    """
++
++    def __init__(  # noqa: PLR0913
++        self,
++        *,
++        serial_number: str,
++        width: int = 1280,
++        height: int = 720,
++        fps: int = 30,
++        output_type: RealSenseOutput = "both",
++        color_mode: ColorMode = ColorMode.RGB,
++        depth_width: int | None = None,
++        depth_height: int | None = None,
++    ) -> None:
++        super().__init__(color_mode=color_mode)
++        if output_type not in OUTPUT_TYPES:
++            raise ValueError(f"Unknown RealSense output type {output_type!r}; expected one of {OUTPUT_TYPES}")
++        if self._color_mode == ColorMode.GRAY:
++            raise ValueError("RealSenseRGBDCamera delivers rgb or bgr color, not gray")
++        if (depth_width is None) != (depth_height is None):
++            raise ValueError("Give both depth_width and depth_height, or neither")
++        self._serial_number = serial_number
++        self._width = width
++        self._height = height
++        self._fps = fps
++        self._output_type: RealSenseOutput = output_type
++        self._depth_size = None if depth_width is None or depth_height is None else (depth_width, depth_height)
++        self._pipeline: Any | None = None
++        self._align: Any | None = None
++        self._latest: Frame | None = None
++        self._sequence = 0
++        self.plan: StreamPlan | None = None
++
++    @property
++    def output_type(self) -> RealSenseOutput:
++        return self._output_type
++
++    @property
++    def is_connected(self) -> bool:
++        return self._pipeline is not None
++
++    @property
++    def device_id(self) -> str:
++        return f"realsense:{self._serial_number}"
++
++    def connect(self, timeout: float = 5.0) -> None:
++        """Check the requested mode against the device, start the streams and wait for a first frameset.
++
++        Raises:
++            CaptureError: The device is missing or busy.
++            RealSenseModeError: The device does not offer the requested mode on this connection.
++            CaptureTimeoutError: No frameset arrived within ``timeout``.
++        """
++        import pyrealsense2 as rs_module
++
++        rs = cast("Any", rs_module)
++        device = _find_device(rs, self._serial_number)
++        name = _info(rs, device, "name") or "RealSense"
++        usb_type = _info(rs, device, "usb_type_descriptor")
++        color_modes, depth_modes = _stream_modes(rs, device)
++        label = f"{name} {self._serial_number}" + (f" (USB {usb_type})" if usb_type else "")
++        plan = select_streams(
++            color_modes,
++            depth_modes,
++            width=self._width,
++            height=self._height,
++            fps=self._fps,
++            output_type=self._output_type,
++            depth_size=self._depth_size,
++            usb_type=usb_type,
++            device=label,
++        )
++
++        config = rs.config()
++        config.enable_device(self._serial_number)
++        if plan.color is not None:
++            fmt = rs.format.bgr8 if self._color_mode == ColorMode.BGR else rs.format.rgb8
++            config.enable_stream(rs.stream.color, plan.color[0], plan.color[1], fmt, plan.color[2])
++        if plan.depth is not None:
++            config.enable_stream(rs.stream.depth, plan.depth[0], plan.depth[1], rs.format.z16, plan.depth[2])
++        pipeline = rs.pipeline()
++        try:
++            pipeline.start(config)
++        except RuntimeError as error:
++            raise CaptureError(
++                f"Could not start {label} with {plan.describe()}: {error}. "
++                "Is another program using the camera?" + _usb_hint(usb_type)
++            ) from error
++        self._pipeline = pipeline
++        self._align = rs.align(rs.stream.color) if plan.color is not None and plan.depth is not None else None
++        self.plan = plan
++        self._sequence = 0
++        try:
++            self._latest = self._process(self._wait(timeout))
++        except Exception:
++            self._do_disconnect()
++            raise
++        logger.info("{} streaming {} as {!r}", label, plan.describe(), self._output_type)
++
++    def read(self, timeout: float = 2.0) -> Frame:
++        """The next frameset, packed.
++
++        Raises:
++            NotConnectedError: The camera is not connected.
++            CaptureTimeoutError: No frameset arrived within ``timeout``.
++        """
++        self._latest = self._process(self._wait(timeout))
++        return self._latest
++
++    def read_latest(self) -> Frame:
++        """The newest frameset, packed, without blocking; the previous one if nothing new arrived.
++
++        Raises:
++            NotConnectedError: The camera is not connected.
++            CaptureError: No frameset has arrived yet.
++        """
++        pipeline = self._require_pipeline()
++        newest = None
++        while frameset := pipeline.poll_for_frames():
++            newest = frameset
++        if newest is not None:
++            self._latest = self._process(newest)
++        if self._latest is None:
++            raise CaptureError("No frame available")
++        return self._latest
++
++    def _require_pipeline(self) -> Any:
++        if self._pipeline is None:
++            raise NotConnectedError
++        return self._pipeline
++
++    def _wait(self, timeout: float) -> Any:
++        pipeline = self._require_pipeline()
++        try:
++            return pipeline.wait_for_frames(int(timeout * 1000))
++        except RuntimeError as error:
++            raise CaptureTimeoutError(f"No RealSense frameset within {timeout}s") from error
++
++    def _process(self, frameset: Any) -> Frame:
++        timestamp = time.monotonic()
++        if self._align is not None:
++            frameset = self._align.process(frameset)
++        color = depth = None
++        if output_has_color(self._output_type):
++            color_frame = frameset.get_color_frame()
++            if not color_frame:
++                raise CaptureError("The frameset has no color frame")
++            color = np.asanyarray(color_frame.get_data())
++        if output_has_depth(self._output_type):
++            depth_frame = frameset.get_depth_frame()
++            if not depth_frame:
++                raise CaptureError("The frameset has no depth frame")
++            depth = np.asanyarray(depth_frame.get_data())
++        self._sequence += 1
++        # The SDK reuses its buffers: copy out of them, which packing already does for depth.
++        data = pack_rgbd(None if color is None else (color.copy() if depth is None else color), depth)
++        return Frame(data=data, timestamp=timestamp, sequence=self._sequence)
++
++    def _do_disconnect(self) -> None:
++        pipeline, self._pipeline = self._pipeline, None
++        self._align = None
++        self._latest = None
++        if pipeline is not None:
++            try:
++                pipeline.stop()
++            except RuntimeError:
++                logger.debug("Stopping RealSense {} failed", self._serial_number)
++
++    @classmethod
++    def query_formats(cls, device_id: str | dict, output_type: str = "color") -> list[Mode]:
++        """The ``(width, height, fps)`` modes this device offers for ``output_type`` on its current connection.
++
++        For ``"both"``, color modes with a depth mode at the same fps to align.
++        """
++        import pyrealsense2 as rs_module
++
++        rs = cast("Any", rs_module)
++        serial = str(device_id.get("serial", "")) if isinstance(device_id, dict) else str(device_id)
++        try:
++            device = _find_device(rs, serial)
++        except CaptureError:
++            return []
++        color_modes, depth_modes = _stream_modes(rs, device)
++        if output_type == "depth":
++            return sorted(depth_modes)
++        if output_type == "both":
++            depth_fps = {mode[2] for mode in depth_modes}
++            return sorted(mode for mode in color_modes if mode[2] in depth_fps)
++        return sorted(color_modes)
++
++
++def _find_device(rs: Any, serial: str) -> Any:
++    devices = list(rs.context().query_devices())
++    for device in devices:
++        if _info(rs, device, "serial_number") == serial:
++            return device
++    found = ", ".join(filter(None, (_info(rs, device, "serial_number") for device in devices))) or "none"
++    raise CaptureError(f"RealSense {serial} is not connected (connected RealSense devices: {found})")
++
++
++def _info(rs: Any, device: Any, field: str) -> str | None:
++    key = getattr(rs.camera_info, field)
++    return str(device.get_info(key)) if device.supports(key) else None
++
++
++def _stream_modes(rs: Any, device: Any) -> tuple[set[Mode], set[Mode]]:
++    """The device's ``rgb8`` color and ``z16`` depth modes on its current connection."""
++    color: set[Mode] = set()
++    depth: set[Mode] = set()
++    for sensor in device.query_sensors():
++        for profile in sensor.get_stream_profiles():
++            stream, fmt = profile.stream_type(), profile.format()
++            if stream == rs.stream.color and fmt == rs.format.rgb8:
++                target = color
++            elif stream == rs.stream.depth and fmt == rs.format.z16:
++                target = depth
++            else:
++                continue
++            video = profile.as_video_stream_profile()
++            target.add((video.width(), video.height(), profile.fps()))
++    return color, depth
+diff --git a/application/backend/tests/api/test_camera_stream.py b/application/backend/tests/api/test_camera_stream.py
+index 281aba0..6fc54f2 100644
+--- a/application/backend/tests/api/test_camera_stream.py
++++ b/application/backend/tests/api/test_camera_stream.py
+@@ -71,3 +71,44 @@ def test_stream_endpoint_overwrites_settings_of_an_unclaimed_camera() -> None:
+             assert build.call_args.kwargs["overwrite_settings"] is True
+     finally:
+         app.dependency_overrides.clear()
++
++
++def test_supported_formats_of_a_realsense_follow_its_output_type() -> None:
++    client = _client(CameraClaimRegistry())
++    try:
++        with patch(
++            "utils.realsense_rgbd.RealSenseRGBDCamera.query_formats", return_value=[(1280, 720, 15), (1280, 720, 30)]
++        ) as query:
++            fingerprint = quote(json.dumps({"serial": "243622062352"}))
++            response = client.get(
++                f"/api/cameras/supported_formats/realsense?fingerprint={fingerprint}&output_type=both"
++            )
++            again = client.get(f"/api/cameras/supported_formats/realsense?fingerprint={fingerprint}")
++        assert response.status_code == 200
++        assert response.json() == [{"width": 1280, "height": 720, "fps": [15, 30]}]
++        # Not cached: replugging into another USB port changes what the camera offers.
++        assert [call.args for call in query.call_args_list] == [
++            ({"serial": "243622062352"}, "both"),
++            ({"serial": "243622062352"}, "color"),
++        ]
++        assert again.status_code == 200
++    finally:
++        app.dependency_overrides.clear()
++
++
++def test_a_realsense_preview_shows_color_or_else_colorized_depth() -> None:
++    import numpy as np
++
++    from utils.jpeg import encode_jpeg_camera_frame
++    from utils.realsense_rgbd import pack_rgbd
++
++    color = np.zeros((4, 6, 3), np.uint8)
++    depth = np.full((4, 6), 1000, np.uint16)
++    with patch("utils.jpeg.encode_jpeg_rgb", return_value=b"jpeg") as encode:
++        encode_jpeg_camera_frame(pack_rgbd(color, depth))
++        assert encode.call_args.args[0].shape == (4, 6, 3)
++        assert encode.call_args.args[0] is not None
++        encode_jpeg_camera_frame(pack_rgbd(None, depth))
++        shown = encode.call_args.args[0]
++        assert shown.shape == (4, 6, 3)
++        assert shown.dtype == np.uint8
+diff --git a/application/backend/tests/unit/test_camera_factory.py b/application/backend/tests/unit/test_camera_factory.py
+new file mode 100644
+index 0000000..4b134f5
+--- /dev/null
++++ b/application/backend/tests/unit/test_camera_factory.py
+@@ -0,0 +1,99 @@
++"""What Studio captures a camera with, and what it exports for the runtime."""
++
++from __future__ import annotations
++
++import pytest
++from pydantic import ValidationError
++
++from schemas.project_camera import CameraAdapter
++from utils.camera_factory import build_camera_config, build_capture_config, build_shared_camera, capture_service_name
++
++
++def _realsense(output_type: str = "both", width: int = 1280, height: int = 720, fps: int = 30, **payload):
++    return CameraAdapter.validate_python(
++        {
++            "driver": "realsense",
++            "name": "top realsense",
++            "fingerprint": {"serial": "243622062352"},
++            "hardware_name": "Intel RealSense D415",
++            "payload": {"width": width, "height": height, "fps": fps, "output_type": output_type, **payload},
++        }
++    )
++
++
++def _usb():
++    return CameraAdapter.validate_python(
++        {
++            "driver": "usb_camera",
++            "name": "arm",
++            "fingerprint": {"path": "/dev/video4"},
++            "hardware_name": None,
++            "payload": {"width": 1920, "height": 1080, "fps": 30},
++        }
++    )
++
++
++@pytest.mark.parametrize("output_type", ["color", "depth", "both"])
++def test_realsense_is_captured_with_studio_rgbd_camera_and_its_output_type(output_type):
++    config = build_capture_config(_realsense(output_type))
++    assert config.class_path == "utils.realsense_rgbd.RealSenseRGBDCamera"
++    assert config.init_args == {
++        "serial_number": "243622062352",
++        "width": 1280,
++        "height": 720,
++        "fps": 30,
++        "output_type": output_type,
++    }
++
++
++def test_each_realsense_output_type_has_its_own_publisher_service():
++    names = {capture_service_name(_realsense(output_type)) for output_type in ("color", "depth", "both")}
++    assert len(names) == 3
++    assert capture_service_name(_realsense("both")) == "physicalai/camera/RealSenseRGBDCamera/243622062352-both/frame"
++    shared = build_shared_camera(_realsense("both"))
++    assert shared.service_name == capture_service_name(_realsense("both"))
++    assert shared.device_id == "243622062352-both"
++
++
++def test_other_drivers_keep_their_portable_recipe_and_derived_service():
++    camera = _usb()
++    assert build_capture_config(camera) == build_camera_config(camera)
++    assert capture_service_name(camera) is None
++
++
++@pytest.mark.parametrize(
++    ("width", "height", "depth"),
++    [((1920, 1080, (1280, 720))), ((1280, 720, (1280, 720))), ((960, 540, (848, 480))), ((640, 480, (640, 480)))],
++)
++def test_runtime_export_gives_physicalai_realsense_a_depth_mode_it_has(width, height, depth):
++    # physicalai's RealSenseCamera also streams depth, by default at the color resolution.
++    config = build_camera_config(_realsense("color", width, height, 15))
++    assert config.class_path == "physicalai.capture.RealSenseCamera"
++    assert (config.init_args["depth_width"], config.init_args["depth_height"]) == depth
++    assert "output_type" not in config.init_args
++
++
++def test_realsense_without_a_serial_must_be_reselected():
++    camera = _realsense()
++    camera.fingerprint = None
++    with pytest.raises(ValueError, match="reselected"):
++        build_capture_config(camera)
++
++
++def test_depth_range_must_keep_some_depth():
++    with pytest.raises(ValidationError, match="depth_range_min"):
++        _realsense(depth_range_min=3.0, depth_range_max=2.0)
++
++
++def test_realsense_payload_defaults_stay_color_only():
++    camera = CameraAdapter.validate_python(
++        {
++            "driver": "realsense",
++            "name": "top",
++            "fingerprint": {"serial": "1"},
++            "hardware_name": None,
++            "payload": {"width": 1280, "height": 720, "fps": 30},
++        }
++    )
++    assert camera.payload.output_type == "color"
++    assert (camera.payload.depth_range_min, camera.payload.depth_range_max) == (0.3, 3.0)
+diff --git a/application/backend/tests/unit/test_realsense_rgbd.py b/application/backend/tests/unit/test_realsense_rgbd.py
+new file mode 100644
+index 0000000..1a2360e
+--- /dev/null
++++ b/application/backend/tests/unit/test_realsense_rgbd.py
+@@ -0,0 +1,267 @@
++"""RealSense RGB-D capture: frame packing, mode selection and the pipeline it starts, without hardware."""
++
++from __future__ import annotations
++
++import sys
++from types import SimpleNamespace
++
++import numpy as np
++import pytest
++from physicalai.capture.errors import CaptureError
++
++from utils.realsense_rgbd import (
++    RealSenseModeError,
++    RealSenseRGBDCamera,
++    StreamPlan,
++    pack_rgbd,
++    packed_channels,
++    select_streams,
++    unpack_rgbd,
++)
++
++# What a D415 offers on USB 3 and on USB 2.1 (rgb8 color, z16 depth), as pyrealsense2 lists it.
++USB3_COLOR = {(1920, 1080, 30), (1920, 1080, 15), (1280, 720, 30), (1280, 720, 15), (640, 480, 30), (960, 540, 60)}
++USB3_DEPTH = {(1280, 720, 30), (1280, 720, 15), (848, 480, 30), (848, 480, 60), (640, 480, 30), (640, 360, 30)}
++USB2_COLOR = {(1280, 720, 6), (1280, 720, 15), (640, 480, 30), (1920, 1080, 8)}
++USB2_DEPTH = {(1280, 720, 6), (640, 480, 30), (848, 480, 10)}
++
++
++class TestPacking:
++    def test_color_only_is_the_color_image_itself(self):
++        color = np.random.default_rng(0).integers(0, 255, (4, 6, 3), dtype=np.uint8)
++        packed = pack_rgbd(color, None)
++        assert packed is color
++        assert unpack_rgbd(packed) == (color, None)
++
++    @pytest.mark.parametrize("with_color", [True, False])
++    def test_depth_survives_packing_bit_exact(self, with_color):
++        rng = np.random.default_rng(1)
++        color = rng.integers(0, 255, (4, 6, 3), dtype=np.uint8) if with_color else None
++        depth = rng.integers(0, 65535, (4, 6), dtype=np.uint16)
++        packed = pack_rgbd(color, depth)
++        assert packed.dtype == np.uint8
++        assert packed.shape == (4, 6, 5 if with_color else 2)
++        unpacked_color, unpacked_depth = unpack_rgbd(packed)
++        assert unpacked_depth.dtype == np.uint16
++        assert unpacked_depth.shape == (4, 6, 1)
++        np.testing.assert_array_equal(unpacked_depth[..., 0], depth)
++        if with_color:
++            np.testing.assert_array_equal(unpacked_color, color)
++        else:
++            assert unpacked_color is None
++
++    def test_packed_channels_by_output_type(self):
++        assert [packed_channels(output) for output in ("color", "depth", "both")] == [3, 2, 5]
++
++    def test_mismatched_color_and_depth_are_refused(self):
++        with pytest.raises(ValueError, match="does not match depth"):
++            pack_rgbd(np.zeros((4, 6, 3), np.uint8), np.zeros((4, 5), np.uint16))
++
++    def test_other_frames_are_not_unpacked(self):
++        with pytest.raises(ValueError, match="Not a packed RealSense frame"):
++            unpack_rgbd(np.zeros((4, 6, 4), np.uint8))
++        with pytest.raises(ValueError, match="Not a packed RealSense frame"):
++            unpack_rgbd(np.zeros((4, 6), np.uint16))
++
++
++class TestSelectStreams:
++    def _select(self, output_type, width=1280, height=720, fps=30, *, usb2=False, depth_size=None):
++        return select_streams(
++            USB2_COLOR if usb2 else USB3_COLOR,
++            USB2_DEPTH if usb2 else USB3_DEPTH,
++            width=width,
++            height=height,
++            fps=fps,
++            output_type=output_type,
++            depth_size=depth_size,
++            usb_type="2.1" if usb2 else "3.2",
++            device="RealSense D415 123",
++        )
++
++    def test_color_streams_color_only(self):
++        assert self._select("color", 1920, 1080, 15) == StreamPlan(color=(1920, 1080, 15), depth=None)
++
++    def test_depth_streams_depth_only_at_the_requested_mode(self):
++        assert self._select("depth") == StreamPlan(color=None, depth=(1280, 720, 30))
++
++    def test_both_at_1280x720_30_streams_depth_at_the_color_resolution(self):
++        assert self._select("both") == StreamPlan(color=(1280, 720, 30), depth=(1280, 720, 30))
++
++    def test_both_with_a_color_mode_the_depth_sensor_lacks_aligns_its_best_depth_mode(self):
++        # Depth is aligned to color, so a 1920x1080 color image gets 1280x720 depth upsampled to it.
++        assert self._select("both", 1920, 1080, 30).depth == (1280, 720, 30)
++        assert self._select("both", 960, 540, 60).depth == (848, 480, 60)
++
++    def test_explicit_depth_size(self):
++        assert self._select("both", depth_size=(848, 480)).depth == (848, 480, 30)
++        with pytest.raises(RealSenseModeError, match="no depth mode 640x360@15fps"):
++            self._select("both", 1920, 1080, 15, depth_size=(640, 360))
++
++    def test_usb2_refuses_1280x720_30_and_says_why(self):
++        with pytest.raises(RealSenseModeError) as error:
++            self._select("both", usb2=True)
++        message = str(error.value)
++        assert "no color mode 1280x720@30fps" in message
++        assert "1280x720@15fps" in message  # what it can do instead
++        assert "USB 2.1" in message
++        assert "USB 3" in message
++
++    def test_usb2_has_no_depth_at_15fps_to_align(self):
++        with pytest.raises(RealSenseModeError, match="no depth mode at 15 fps"):
++            self._select("both", 1280, 720, 15, usb2=True)
++
++    def test_unknown_output_type(self):
++        with pytest.raises(ValueError, match="Unknown RealSense output type"):
++            self._select("infrared")
++
++
++class _FakeFrame:
++    def __init__(self, data):
++        self._data = data
++
++    def get_data(self):
++        return self._data
++
++    def __bool__(self):
++        return True
++
++
++class _FakeFrameset:
++    def __init__(self, color, depth):
++        self.color, self.depth = color, depth
++
++    def get_color_frame(self):
++        return None if self.color is None else _FakeFrame(self.color)
++
++    def get_depth_frame(self):
++        return None if self.depth is None else _FakeFrame(self.depth)
++
++
++class _FakeRealSense:
++    """Just enough of pyrealsense2 for one D415 at 1280x720@30 on USB 3."""
++
++    def __init__(self, usb_type="3.2"):
++        self.enabled: list[tuple] = []
++        self.started = self.stopped = False
++        self.aligned = 0
++        self.usb_type = usb_type
++        self.stream = SimpleNamespace(color="color", depth="depth")
++        self.format = SimpleNamespace(rgb8="rgb8", bgr8="bgr8", z16="z16")
++        self.camera_info = SimpleNamespace(name="name", serial_number="serial", usb_type_descriptor="usb")
++        fake = self
++
++        class Device:
++            def supports(self, key):
++                return True
++
++            def get_info(self, key):
++                return {"name": "Intel RealSense D415", "serial": "123", "usb": fake.usb_type}[key]
++
++            def query_sensors(self):
++                profiles = [_profile("color", "rgb8", *mode) for mode in USB3_COLOR]
++                profiles += [_profile("depth", "z16", *mode) for mode in USB3_DEPTH]
++                profiles.append(_profile("color", "yuyv", 1920, 1080, 60))  # not rgb8: ignored
++                return [SimpleNamespace(get_stream_profiles=lambda: profiles)]
++
++        class Config:
++            def enable_device(self, serial):
++                assert serial == "123"
++
++            def enable_stream(self, *args):
++                fake.enabled.append(args)
++
++        class Pipeline:
++            def start(self, config):
++                fake.started = True
++
++            def stop(self):
++                fake.stopped = True
++
++            def wait_for_frames(self, timeout_ms):
++                return fake.frameset()
++
++            def poll_for_frames(self):
++                return None
++
++        class Align:
++            def __init__(self, stream):
++                assert stream == "color"
++
++            def process(self, frameset):
++                fake.aligned += 1
++                return frameset
++
++        self.context = lambda: SimpleNamespace(query_devices=lambda: [Device()])
++        self.config, self.pipeline, self.align = Config, Pipeline, Align
++
++    def frameset(self):
++        color = np.full((720, 1280, 3), 7, np.uint8)
++        depth = np.full((720, 1280), 1234, np.uint16)
++        return _FakeFrameset(color, depth)
++
++
++def _profile(stream, fmt, width, height, fps):
++    video = SimpleNamespace(width=lambda: width, height=lambda: height)
++    return SimpleNamespace(
++        stream_type=lambda: stream, format=lambda: fmt, fps=lambda: fps, as_video_stream_profile=lambda: video
++    )
++
++
++@pytest.fixture
++def fake_rs(monkeypatch: pytest.MonkeyPatch):
++    # Only this entry: restoring all of sys.modules would drop modules first imported meanwhile.
++    fake = _FakeRealSense()
++    monkeypatch.setitem(sys.modules, "pyrealsense2", fake)
++    return fake
++
++
++class TestRealSenseRGBDCamera:
++    def test_both_streams_color_and_aligned_depth_in_one_frame(self, fake_rs):
++        camera = RealSenseRGBDCamera(serial_number="123", width=1280, height=720, fps=30, output_type="both")
++        camera.connect()
++        assert fake_rs.enabled == [("color", 1280, 720, "rgb8", 30), ("depth", 1280, 720, "z16", 30)]
++        frame = camera.read()
++        color, depth = unpack_rgbd(frame.data)
++        assert np.all(color == 7)
++        assert np.all(depth == 1234)
++        assert fake_rs.aligned == 2  # the first frameset on connect, then this one
++        assert camera.read_latest() is frame  # nothing newer arrived
++        camera.disconnect()
++        assert fake_rs.stopped
++
++    def test_color_only_streams_no_depth_so_1920x1080_works(self, fake_rs):
++        fake_rs.frameset = lambda: _FakeFrameset(np.zeros((1080, 1920, 3), np.uint8), None)
++        camera = RealSenseRGBDCamera(serial_number="123", width=1920, height=1080, fps=15, output_type="color")
++        camera.connect()
++        assert fake_rs.enabled == [("color", 1920, 1080, "rgb8", 15)]
++        assert camera.read().data.shape == (1080, 1920, 3)
++        assert fake_rs.aligned == 0
++
++    def test_an_unavailable_mode_fails_before_starting_the_pipeline(self, fake_rs):
++        camera = RealSenseRGBDCamera(serial_number="123", width=1280, height=720, fps=60, output_type="both")
++        with pytest.raises(RealSenseModeError, match="no color mode 1280x720@60fps"):
++            camera.connect()
++        assert not fake_rs.started
++        assert not camera.is_connected
++
++    def test_a_missing_device_names_the_connected_ones(self, fake_rs):
++        with pytest.raises(CaptureError, match=r"RealSense 999 is not connected .*123"):
++            RealSenseRGBDCamera(serial_number="999").connect()
++
++    def test_query_formats_by_output_type(self, fake_rs):
++        assert RealSenseRGBDCamera.query_formats({"serial": "123"}, "depth") == sorted(USB3_DEPTH)
++        assert RealSenseRGBDCamera.query_formats("123", "color") == sorted(USB3_COLOR)
++        # Color modes that have a depth mode at their fps to align; every fps has one on USB 3.
++        assert RealSenseRGBDCamera.query_formats("123", "both") == sorted(USB3_COLOR)
++        assert RealSenseRGBDCamera.query_formats("999", "both") == []
++
++    def test_is_built_from_a_config_like_the_publisher_does(self, fake_rs):
++        from physicalai.capture.camera import Camera
++        from physicalai.config import Config
++
++        camera = Config(
++            "utils.realsense_rgbd.RealSenseRGBDCamera",
++            {"serial_number": "123", "width": 1280, "height": 720, "fps": 30, "output_type": "depth"},
++        ).instantiate(expected_type=Camera)
++        assert isinstance(camera, RealSenseRGBDCamera)
++        assert camera.output_type == "depth"
+-- 
+2.53.0
+

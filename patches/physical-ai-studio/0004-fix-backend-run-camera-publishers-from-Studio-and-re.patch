@@ -1,0 +1,1052 @@
+From 66ba76208e180bc38085593fc809988bcba675c3 Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Fri, 13 Nov 2026 16:56:41 -0800
+Subject: [PATCH 04/13] fix(backend): run camera publishers from Studio and
+ recover dead ones
+
+Changing a camera's resolution in the camera form asked the running
+publisher to reconfigure itself in place, which races its capture loop and
+killed it. Its service then outlived it (subscribers in the backend kept it
+open), so SharedCamera.connect found it "served", never started a publisher,
+and every later connect timed out until Studio was restarted.
+
+Studio now starts its publishers itself (utils.camera_publishers), one per
+camera device, with exactly the requested settings: other settings stop the
+running publisher and wait for it to release the camera before the new one
+starts (or are refused when the camera must keep its settings), a dead
+publisher is replaced, one that delivers nothing is restarted, and recording
+validates the publisher's settings instead of silently using others.
+Publishers are recorded on disk and stopped on shutdown; at startup,
+publishers a killed backend left behind are stopped.
+
+SIGTERM looked ignored because uvicorn waits forever for open connections'
+tasks: a camera preview whose camera sent nothing never noticed its socket
+closing. Previews now watch their socket and report a stalled camera, the
+server has a graceful-shutdown timeout, and camera errors such as an
+unavailable RealSense mode reach the preview as a message.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ application/backend/src/api/camera.py         |  77 +++-
+ application/backend/src/cli/serve.py          |   9 +-
+ application/backend/src/core/lifecycle.py     |   5 +
+ .../backend/src/utils/camera_factory.py       |  67 +++-
+ .../backend/src/utils/camera_publishers.py    | 349 ++++++++++++++++++
+ .../backend/src/workers/camera_worker.py      |   3 +-
+ .../backend/tests/api/test_camera_stream.py   |  63 ++++
+ application/backend/tests/cli/test_serve.py   |  15 +
+ application/backend/tests/conftest.py         |   6 +
+ .../backend/tests/workers/fake_camera.py      |  61 +++
+ .../tests/workers/test_camera_publishers.py   | 144 ++++++++
+ .../tests/workers/test_camera_worker.py       |   4 +-
+ 12 files changed, 777 insertions(+), 26 deletions(-)
+ create mode 100644 application/backend/src/utils/camera_publishers.py
+ create mode 100644 application/backend/tests/workers/fake_camera.py
+ create mode 100644 application/backend/tests/workers/test_camera_publishers.py
+
+diff --git a/application/backend/src/api/camera.py b/application/backend/src/api/camera.py
+index 37eecfb..e00d278 100644
+--- a/application/backend/src/api/camera.py
++++ b/application/backend/src/api/camera.py
+@@ -1,13 +1,18 @@
+ import asyncio
++import contextlib
+ import json
++import time
+ from collections import defaultdict
++from collections.abc import Coroutine
+ from functools import cache
+-from typing import Annotated, Literal
++from typing import Annotated, Any, Literal
+ 
+ import anyio
+ from fastapi import APIRouter, Depends, Query, WebSocket, status
+ from fastapi.responses import Response
+ from fastapi.websockets import WebSocketDisconnect
++from physicalai.capture import SharedCamera
++from physicalai.capture.errors import CaptureError
+ 
+ from api.dependencies import CameraClaimRegistryDep
+ from exceptions import DeviceInUseError
+@@ -133,8 +138,6 @@ async def camera_websocket(
+         Server sends jpeg encoded bytes, or one JSON error before closing:
+             {"event": "error", "message": str, "error_code": str}
+     """
+-    from utils.jpeg import encode_jpeg_camera_frame
+-
+     await websocket.accept()
+ 
+     try:
+@@ -145,17 +148,11 @@ async def camera_websocket(
+                 device=f"Camera {camera.name!r}", holder=f"a runtime session in project {claim.project_name!r}"
+             )
+         # SharedCamera already captures in its own publisher process; a preview needs no worker.
++        # Another resolution than the running publisher's replaces it: the preview follows the form.
+         shared_camera = build_shared_camera(config=camera, validate_on_connect=False, overwrite_settings=True)
+         await asyncio.to_thread(shared_camera.connect)
+         try:
+-            rate = Rate(camera.payload.fps, name=f"camera-preview-{camera.name}")
+-            sent: int | None = None
+-            while True:
+-                frame = await asyncio.to_thread(shared_camera.read_latest)
+-                if frame.sequence != sent:
+-                    await websocket.send_bytes(await asyncio.to_thread(encode_jpeg_camera_frame, frame.data))
+-                    sent = frame.sequence
+-                await rate.sleep()
++            await _until_closed_or_failed(websocket, _stream_preview(websocket, shared_camera, camera))
+         finally:
+             # Shielded: a cancelled socket task must still detach from the publisher.
+             with anyio.CancelScope(shield=True):
+@@ -165,3 +162,61 @@ async def camera_websocket(
+     except DeviceInUseError as error:
+         await websocket.send_json(ErrorEvent(message=error.message, error_code=error.error_code).model_dump())
+         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
++    except (CaptureError, ValueError) as error:
++        # Such as a RealSense mode its USB connection does not offer: say so, rather than just drop the socket.
++        with contextlib.suppress(WebSocketDisconnect, RuntimeError):
++            await websocket.send_json(ErrorEvent(message=str(error), error_code="camera_unavailable").model_dump())
++            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
++
++
++_PREVIEW_STALL_S = 5.0
++"""How long a preview waits for a new frame before it reports the camera stalled and closes."""
++
++
++async def _stream_preview(websocket: WebSocket, shared_camera: SharedCamera, camera: ProjectCamera) -> None:
++    """Send every new frame as JPEG at the camera's rate.
++
++    Raises:
++        CaptureError: The camera sent nothing new for ``_PREVIEW_STALL_S``; reconnecting starts a fresh publisher.
++    """
++    from utils.jpeg import encode_jpeg_camera_frame
++
++    rate = Rate(camera.payload.fps, name=f"camera-preview-{camera.name}")
++    sent: int | None = None
++    last_new_frame = time.monotonic()
++    while True:
++        frame = await asyncio.to_thread(shared_camera.read_latest)
++        if frame.sequence != sent:
++            await websocket.send_bytes(await asyncio.to_thread(encode_jpeg_camera_frame, frame.data))
++            sent, last_new_frame = frame.sequence, time.monotonic()
++        elif time.monotonic() - last_new_frame > _PREVIEW_STALL_S:
++            raise CaptureError(f"Camera {camera.name!r} stopped sending frames")
++        await rate.sleep()
++
++
++async def _until_closed_or_failed(websocket: WebSocket, stream: Coroutine[Any, Any, None]) -> None:
++    """Run ``stream`` until it ends or the socket closes, whichever is first.
++
++    The stream only sends, so without watching the socket a preview whose camera sends nothing
++    new would outlive its socket, keep its subscriber attached, and hold up the server's
++    graceful shutdown (uvicorn waits for every connection's task) forever.
++
++    Raises:
++        Exception: What ``stream`` raised.
++    """
++    streaming = asyncio.ensure_future(stream)
++    watching = asyncio.ensure_future(_until_disconnect(websocket))
++    try:
++        done, _pending = await asyncio.wait({streaming, watching}, return_when=asyncio.FIRST_COMPLETED)
++    finally:
++        for task in (streaming, watching):
++            task.cancel()
++        await asyncio.gather(streaming, watching, return_exceptions=True)
++    if streaming in done:
++        streaming.result()
++
++
++async def _until_disconnect(websocket: WebSocket) -> None:
++    """Return once the client disconnects; anything it sends is ignored."""
++    while (await websocket.receive())["type"] != "websocket.disconnect":
++        pass
+diff --git a/application/backend/src/cli/serve.py b/application/backend/src/cli/serve.py
+index 6fe916d..59b5fe0 100644
+--- a/application/backend/src/cli/serve.py
++++ b/application/backend/src/cli/serve.py
+@@ -9,6 +9,9 @@ from cli.database import _run_migrations
+ from core.security import get_ssh_feature_availability
+ from settings import get_settings
+ 
++GRACEFUL_SHUTDOWN_S = 10
++"""How long open connections get to finish when the server is asked to stop."""
++
+ 
+ def _package_root() -> Path:
+     return Path(__file__).resolve().parent.parent
+@@ -44,7 +47,11 @@ def start_server(host: str, port: int) -> None:
+     from utils.multiprocessing import ensure_spawn_start_method
+ 
+     ensure_spawn_start_method()
+-    uvicorn.run("main:app", host=host, port=port)
++    # Without a timeout uvicorn waits for every open connection's task on SIGTERM, forever if one
++    # never ends, and only a second Ctrl+C forces it: SIGTERM looked ignored, and a SIGKILL then
++    # left camera publishers behind. After the timeout the tasks are cancelled and the
++    # application still shuts down: sessions close and camera publishers are stopped.
++    uvicorn.run("main:app", host=host, port=port, timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_S)
+ 
+ 
+ @click.command()
+diff --git a/application/backend/src/core/lifecycle.py b/application/backend/src/core/lifecycle.py
+index 06a34a3..726400b 100644
+--- a/application/backend/src/core/lifecycle.py
++++ b/application/backend/src/core/lifecycle.py
+@@ -19,6 +19,7 @@ from services.event_processor import EventProcessor
+ from services.health_service import HealthService
+ from services.remote_trainer_service import RemoteTrainerService
+ from settings import get_settings
++from utils.camera_publishers import camera_publishers
+ from utils.multiprocessing import ensure_spawn_start_method
+ from utils.serial_robot_tools import RobotConnectionManager
+ 
+@@ -103,6 +104,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+     ensure_spawn_start_method()
+     # No session is live yet, so any session block in shared memory is left over from a crash.
+     sweep_stale_blocks()
++    # Likewise camera publishers: a killed backend leaves them holding their cameras.
++    await asyncio.to_thread(camera_publishers().sweep_orphans)
+     app_scheduler = Scheduler()
+     app_scheduler.start_workers()
+ 
+@@ -132,6 +135,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+     # For now, we assume active workers unregistering will trigger releases.
+ 
+     await app.state.runtime_session_registry.close_all()
++    # Release the cameras now, rather than leave publishers to notice they have no subscribers.
++    await asyncio.to_thread(camera_publishers().stop_all)
+     # Keep draining worker events while shutdown waits for child processes to exit.
+     await asyncio.to_thread(app_scheduler.shutdown)
+     app.state.event_processor.shutdown()
+diff --git a/application/backend/src/utils/camera_factory.py b/application/backend/src/utils/camera_factory.py
+index aa77633..406d21a 100644
+--- a/application/backend/src/utils/camera_factory.py
++++ b/application/backend/src/utils/camera_factory.py
+@@ -6,12 +6,15 @@ filters per-driver kwargs so that only constructor-safe parameters reach the cam
+ 
+ from __future__ import annotations
+ 
+-from typing import TYPE_CHECKING, Any
++import json
++from typing import TYPE_CHECKING, Any, cast
+ 
+ from loguru import logger
+ from physicalai.capture import CameraType, ColorMode, SharedCamera
++from physicalai.capture.errors import CaptureTimeoutError
+ from physicalai.config import Config
+ 
++from utils.camera_publishers import CameraPublishers, camera_publishers
+ from utils.v4l2_frame_interval import fix_zero_frame_intervals
+ 
+ if TYPE_CHECKING:
+@@ -149,30 +152,68 @@ def driver_to_camera_type(driver: str) -> CameraType:
+         raise ValueError(msg) from None
+ 
+ 
++def camera_device_key(config: Camera) -> str:
++    """What identifies a camera's physical device, whatever settings it is captured with."""
++    return f"{config.driver}:{json.dumps(config.fingerprint, sort_keys=True)}"
++
++
++class StudioSharedCamera(SharedCamera):
++    """A ``SharedCamera`` whose publisher Studio runs, with exactly the requested settings.
++
++    :meth:`connect` first has :class:`~utils.camera_publishers.CameraPublishers` make sure a
++    live publisher with this camera's recipe serves it: one with other settings is stopped
++    first (or refused, when ``replace_settings`` is off), and a dead one is replaced. A
++    publisher that is alive but delivers nothing within the timeout is replaced once.
++    """
++
++    device: str = ""
++    replace_settings: bool = True
++    publishers: CameraPublishers | None = None
++
++    def connect(self, timeout: float = 5.0) -> None:
++        if self.is_connected:
++            return
++        publishers = self.publishers or camera_publishers()
++        recipe = cast("Config", self._camera)
++        idle_timeout = self._idle_timeout
++        publishers.ensure(
++            self.device, self.service_name, recipe, idle_timeout=idle_timeout, replace=self.replace_settings
++        )
++        try:
++            super().connect(timeout)
++        except CaptureTimeoutError:
++            publishers.restart(self.device, self.service_name, recipe, idle_timeout=idle_timeout)
++            super().connect(timeout)
++
++
+ def build_shared_camera(
+     config: Camera,
+     *,
+     validate_on_connect: bool = False,
+     overwrite_settings: bool = False,
+     idle_timeout: float = 5.0,
++    publishers: CameraPublishers | None = None,
+ ) -> SharedCamera:
+     """Build a SharedCamera from a backend Camera schema.
+ 
++    Studio runs the camera's publisher itself (see :class:`StudioSharedCamera`), so the
++    publisher's in-place reconfigure is never used: it races the capture loop and can kill it.
++
+     Args:
+         config: Backend camera configuration (discriminated union).
+         validate_on_connect: If ``True``, :meth:`~SharedCamera.connect` raises
+-            :class:`~physicalai.capture.errors.CaptureError` when an
+-            existing publisher's resolution does not match the requested
+-            ``width``/``height``. Use ``False`` for preview streams
+-            (tolerates mismatch) and ``True`` for recording / inference
+-            when the initial attachment must match the requested config.
+-        overwrite_settings: If ``True``, attempt to reconfigure the publisher
+-            to match requested settings when a config mismatch is detected.
+-            Requires a publisher that supports the control channel (v2+).
++            :class:`~physicalai.capture.errors.CaptureError` when the
++            publisher's frames do not have the requested ``width``/``height``/``fps``
++            (a publisher Studio did not start). Use ``False`` for preview streams
++            (tolerates mismatch) and ``True`` for recording / inference.
++        overwrite_settings: If ``True``, a publisher Studio runs for this camera with other
++            settings is stopped and replaced by one with these. If ``False``, connecting
++            fails instead.
+         idle_timeout: Seconds with zero subscribers before the publisher
+             self-exits.  Preview-class callers should use a short value
+             (e.g. 0.5) for fast turnover on resolution changes;
+             record-class callers should use a longer value (e.g. 5.0).
++        publishers: The publishers to run it with; this backend's by default.
+ 
+     Returns:
+         A configured (but not yet connected) SharedCamera instance.
+@@ -188,11 +229,15 @@ def build_shared_camera(
+     camera_config = build_capture_config(config)
+     logger.debug(f"camera config for {config.name}: {camera_config}")
+ 
+-    return SharedCamera(
++    camera = StudioSharedCamera(
+         camera=camera_config,
+         service_name=capture_service_name(config),
+         color_mode=ColorMode.RGB,
+         validate_on_connect=validate_on_connect,
+-        overwrite_settings=overwrite_settings,
++        overwrite_settings=False,
+         idle_timeout=idle_timeout,
+     )
++    camera.device = camera_device_key(config)
++    camera.replace_settings = overwrite_settings
++    camera.publishers = publishers
++    return camera
+diff --git a/application/backend/src/utils/camera_publishers.py b/application/backend/src/utils/camera_publishers.py
+new file mode 100644
+index 0000000..1e274e0
+--- /dev/null
++++ b/application/backend/src/utils/camera_publishers.py
+@@ -0,0 +1,349 @@
++"""The camera publishers Studio runs: started, replaced and stopped by Studio, never left behind.
++
++A camera is captured by a publisher process that shares its frames over iceoryx2
++(``physicalai.capture.SharedCamera``). On its own, ``SharedCamera.connect`` starts a
++publisher only when it finds none serving the camera's service, and otherwise asks the
++running one to reconfigure itself in place. Studio cannot rely on either:
++
++- The service outlives a publisher that died while subscribers in this process were
++  attached (a reconfigure that crashed it, a camera that fell off USB). It then looks
++  served, so no publisher is started and every connect times out, until a restart.
++- An in-place reconfigure races the publisher's capture loop and can kill it, and a
++  subscriber that is not allowed to reconfigure silently gets the old settings.
++- A publisher runs in its own session, so a backend that is killed leaves it behind
++  holding the device; its dead subscribers still count as subscribers, so it never goes
++  idle and never exits.
++
++So this backend starts every publisher itself, one per camera device, with exactly the
++settings asked for: a request with other settings stops the running publisher and waits
++for it to release the device before starting the new one; a publisher that died, or does
++not deliver, is replaced; and every publisher is stopped when the backend shuts down.
++Each one is recorded on disk, so a backend that starts after one was killed stops what
++it left behind.
++"""
++
++from __future__ import annotations
++
++import contextlib
++import ctypes
++import json
++import os
++import signal
++import threading
++import time
++from dataclasses import dataclass, field
++from importlib import import_module
++from typing import TYPE_CHECKING, Any, cast
++
++from loguru import logger
++from physicalai.capture.errors import CaptureError
++
++if TYPE_CHECKING:
++    from pathlib import Path
++
++    from physicalai.capture.transport._publisher import CameraPublisher
++    from physicalai.config import Config
++
++PUBLISHER_MODULE = "physicalai.capture.transport._publisher_worker"
++"""What a publisher process runs, as its command line shows it."""
++
++_STOP_TIMEOUT_S = 5.0
++"""How long a publisher has to release its camera after SIGTERM before it is killed."""
++
++
++class CameraBusyError(CaptureError):
++    """The camera is captured with other settings, or by a publisher Studio does not own."""
++
++
++@dataclass
++class _Publisher:
++    process: CameraPublisher
++    service_name: str
++    recipe: dict[str, Any]
++
++    @property
++    def pid(self) -> int | None:
++        popen = self.process._process  # the handle CameraPublisher keeps
++        return None if popen is None else popen.pid
++
++    @property
++    def alive(self) -> bool:
++        return self.process.is_alive
++
++
++@dataclass
++class CameraPublishers:
++    """The publishers this backend runs, by camera device.
++
++    Args:
++        records_dir: Where each running publisher is recorded, for a later backend to stop
++            what a killed one left behind; ``None`` records nothing.
++    """
++
++    records_dir: Path | None = None
++    _running: dict[str, _Publisher] = field(default_factory=dict)
++    _locks: dict[str, threading.Lock] = field(default_factory=dict)
++    _guard: threading.Lock = field(default_factory=threading.Lock)
++
++    def _lock(self, device: str) -> threading.Lock:
++        with self._guard:
++            return self._locks.setdefault(device, threading.Lock())
++
++    def ensure(
++        self, device: str, service_name: str, camera: Config, *, idle_timeout: float, replace: bool = True
++    ) -> None:
++        """Make sure a live publisher of ``device`` serves ``service_name`` with exactly ``camera``.
++
++        Args:
++            device: What identifies the physical camera; one publisher per device at a time.
++            service_name: The iceoryx2 service the publisher serves.
++            camera: The camera recipe the publisher captures with.
++            idle_timeout: Seconds without subscribers after which the publisher exits.
++            replace: Whether a running publisher with other settings may be replaced.
++
++        Raises:
++            CameraBusyError: The camera runs with other settings and ``replace`` is off, or a
++                publisher this backend did not start serves it.
++            CaptureError: The publisher could not open the camera.
++        """
++        recipe = camera.to_dict()
++        with self._lock(device):
++            running = self._running.get(device)
++            if running is not None and running.alive:
++                if running.service_name == service_name and running.recipe == recipe:
++                    return
++                if not replace:
++                    raise CameraBusyError(
++                        f"Camera {device} is captured with other settings ({_describe(running.recipe)}); "
++                        f"it cannot switch to {_describe(recipe)} while it is in use."
++                    )
++                logger.info(
++                    "Camera {}: stopping its publisher ({}) to start one with {}",
++                    device,
++                    _describe(running.recipe),
++                    _describe(recipe),
++                )
++            if running is not None:
++                self._stop(device)
++            self._clear_foreign_publishers(service_name)
++            self._start(device, service_name, camera, recipe, idle_timeout)
++
++    def restart(self, device: str, service_name: str, camera: Config, *, idle_timeout: float) -> None:
++        """Replace the publisher of ``device`` with a fresh one, for one that is alive but does not deliver."""
++        with self._lock(device):
++            logger.warning("Camera {}: its publisher delivers no frames; starting a fresh one", device)
++            self._stop(device)
++            self._clear_foreign_publishers(service_name)
++            self._start(device, service_name, camera, camera.to_dict(), idle_timeout)
++
++    def stop_all(self) -> None:
++        """Stop every publisher this backend started, releasing the cameras."""
++        for device in list(self._running):
++            with self._lock(device):
++                self._stop(device)
++
++    def sweep_orphans(self) -> list[int]:
++        """Stop the publishers that programs which are gone left behind. Returns their pids.
++
++        Those this backend's predecessors recorded, and any other publisher process that outlived
++        the program that started it: it holds its camera, and its dead subscribers keep it from
++        ever going idle. Publishers of live programs are left alone.
++        """
++        stopped = _orphan_publisher_pids()
++        for pid in stopped:
++            _terminate(pid)
++        if self.records_dir is not None and self.records_dir.is_dir():
++            stopped += self._sweep_records()
++        if stopped:
++            logger.warning("Stopped camera publishers left behind by a backend that is gone: {}", stopped)
++            _cleanup_dead_nodes()
++        return stopped
++
++    def _sweep_records(self) -> list[int]:
++        stopped: list[int] = []
++        for record_path in cast("Path", self.records_dir).glob("*.json"):
++            try:
++                record = json.loads(record_path.read_text())
++                pid, owner = int(record["pid"]), int(record["owner"])
++            except (OSError, ValueError, KeyError, TypeError):
++                record_path.unlink(missing_ok=True)
++                continue
++            if owner != os.getpid() and _process_alive(owner):
++                continue  # another live backend's publisher
++            if _is_publisher_process(pid):
++                _terminate(pid)
++                stopped.append(pid)
++            record_path.unlink(missing_ok=True)
++        return stopped
++
++    def _start(self, device: str, service_name: str, camera: Config, recipe: dict, idle_timeout: float) -> None:
++        from physicalai.capture.transport._publisher import CameraPublisher
++        from physicalai.capture.transport._spec import CameraPublisherConfig
++
++        publisher = CameraPublisher(CameraPublisherConfig(camera=camera), service_name, idle_timeout=idle_timeout)
++        publisher.start()  # waits until the camera delivers, or raises with why it cannot
++        running = _Publisher(publisher, service_name, recipe)
++        self._running[device] = running
++        self._record(running)
++        logger.info("Camera {}: publisher {} started with {}", device, running.pid, _describe(recipe))
++
++    def _stop(self, device: str) -> None:
++        running = self._running.pop(device, None)
++        if running is None:
++            return
++        pid = running.pid
++        running.process.stop(timeout=_STOP_TIMEOUT_S)  # SIGTERM, then SIGKILL; reaps it either way
++        if pid is not None and self.records_dir is not None:
++            (self.records_dir / f"{pid}.json").unlink(missing_ok=True)
++
++    def _clear_foreign_publishers(self, service_name: str) -> None:
++        """Stop publishers of ``service_name`` that a backend which is gone left behind.
++
++        Raises:
++            CameraBusyError: A publisher that a live process started serves it.
++        """
++        for pid in _publisher_pids(service_name):
++            if _is_orphan(pid):
++                logger.warning(
++                    "Stopping camera publisher {} of {}, left behind by a backend that is gone", pid, service_name
++                )
++                _terminate(pid)
++            else:
++                raise CameraBusyError(
++                    f"Camera service {service_name} is served by publisher process {pid}, which this Studio "
++                    f"backend did not start. Stop the program using the camera (or `kill {pid}`) and retry."
++                )
++
++    def _record(self, running: _Publisher) -> None:
++        if self.records_dir is None or running.pid is None:
++            return
++        self.records_dir.mkdir(parents=True, exist_ok=True)
++        record = {"pid": running.pid, "owner": os.getpid(), "service": running.service_name}
++        (self.records_dir / f"{running.pid}.json").write_text(json.dumps(record))
++
++
++def _describe(recipe: dict[str, Any]) -> str:
++    init_args = recipe.get("init_args") or {}
++    mode = f"{init_args.get('width')}x{init_args.get('height')}@{init_args.get('fps')}fps"
++    output = init_args.get("output_type")
++    return f"{mode} {output}" if output else mode
++
++
++def _process_alive(pid: int) -> bool:
++    try:
++        os.kill(pid, 0)
++    except ProcessLookupError:
++        return False
++    except PermissionError:
++        return True
++    return True
++
++
++def _cmdline(pid: int) -> list[str]:
++    import psutil
++
++    try:
++        return psutil.Process(pid).cmdline()
++    except (psutil.Error, OSError):
++        return []
++
++
++def _is_publisher_process(pid: int) -> bool:
++    return PUBLISHER_MODULE in _cmdline(pid)
++
++
++def _is_orphan(pid: int) -> bool:
++    """Whether the publisher process ``pid`` outlived the program that started it.
++
++    A publisher runs in its own session, so when its program exits it is adopted by init or a
++    session manager, which is not a Python program like the ones that start publishers.
++    """
++    import psutil
++
++    try:
++        parent = psutil.Process(pid).parent()
++    except (psutil.Error, OSError):
++        return False
++    if parent is None:
++        return True
++    try:
++        return "python" not in os.path.basename(parent.exe() or parent.name()).lower()
++    except (psutil.Error, OSError):
++        return "python" not in parent.name().lower()
++
++
++def _terminate(pid: int, timeout: float = _STOP_TIMEOUT_S) -> bool:
++    """SIGTERM the publisher ``pid``, and SIGKILL it if it has not exited within ``timeout``.
++
++    Returns:
++        Whether it had to be killed (``False``: it stopped on SIGTERM, or was gone).
++    """
++    with contextlib.suppress(ProcessLookupError):
++        os.kill(pid, signal.SIGTERM)
++    deadline = time.monotonic() + timeout
++    while _is_publisher_process(pid) and time.monotonic() < deadline:
++        time.sleep(0.05)
++    if not _is_publisher_process(pid):
++        return False
++    logger.warning("Camera publisher {} did not stop on SIGTERM within {}s; killing it", pid, timeout)
++    with contextlib.suppress(ProcessLookupError):
++        os.kill(pid, signal.SIGKILL)
++    return True
++
++
++def _orphan_publisher_pids() -> list[int]:
++    """Publisher processes of this user that outlived the program that started them."""
++    import psutil
++
++    pids = []
++    for process in psutil.process_iter(["pid", "cmdline", "uids"]):
++        try:
++            mine = process.info["uids"].real == os.getuid()
++            if mine and PUBLISHER_MODULE in (process.info["cmdline"] or []) and _is_orphan(process.pid):
++                pids.append(process.pid)
++        except (psutil.Error, OSError, AttributeError):
++            continue
++    return pids
++
++
++def _publisher_pids(service_name: str) -> set[int]:
++    """The live publisher processes attached to ``service_name``; empty when there is no such service."""
++    try:
++        iox2 = cast("Any", import_module("iceoryx2"))
++        node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
++        try:
++            service = (
++                node.service_builder(iox2.ServiceName.new(service_name))
++                .publish_subscribe(iox2.Slice[ctypes.c_uint8])
++                .open()
++            )
++        except Exception:  # no such service
++            return set()
++        pids = {state[0].id.pid for state in service.nodes if isinstance(state, iox2.NodeState.Alive)}
++        del service
++    except Exception:
++        logger.opt(exception=True).debug("Could not list the nodes of {}", service_name)
++        return set()
++    return {pid for pid in pids if pid != os.getpid() and _is_publisher_process(pid)}
++
++
++def _cleanup_dead_nodes() -> None:
++    """Release what killed iceoryx2 nodes left registered, such as a killed publisher's port."""
++    try:
++        iox2 = cast("Any", import_module("iceoryx2"))
++        iox2.Node.try_cleanup_dead_nodes(iox2.ServiceType.Ipc, iox2.config.global_config())
++    except Exception:
++        logger.opt(exception=True).debug("iceoryx2 dead node cleanup failed")
++
++
++_publishers: CameraPublishers | None = None
++
++
++def camera_publishers() -> CameraPublishers:
++    """This backend's publishers, recorded under the storage directory."""
++    global _publishers  # noqa: PLW0603
++    if _publishers is None:
++        from settings import get_settings
++
++        _publishers = CameraPublishers(records_dir=get_settings().storage_dir / "run" / "camera-publishers")
++    return _publishers
+diff --git a/application/backend/src/workers/camera_worker.py b/application/backend/src/workers/camera_worker.py
+index 0802b6d..20b07ee 100644
+--- a/application/backend/src/workers/camera_worker.py
++++ b/application/backend/src/workers/camera_worker.py
+@@ -113,7 +113,8 @@ class CameraWorker(ThreadWorker[SharedCamera]):
+     def _open(self) -> SharedCamera:
+         camera = build_shared_camera(
+             config=self.config,
+-            validate_on_connect=False,
++            # Recorded frames must have the configured settings: never attach to a publisher with others.
++            validate_on_connect=True,
+             overwrite_settings=not self.is_locked,
+         )
+         camera.connect()
+diff --git a/application/backend/tests/api/test_camera_stream.py b/application/backend/tests/api/test_camera_stream.py
+index 6fc54f2..82c1340 100644
+--- a/application/backend/tests/api/test_camera_stream.py
++++ b/application/backend/tests/api/test_camera_stream.py
+@@ -112,3 +112,66 @@ def test_a_realsense_preview_shows_color_or_else_colorized_depth() -> None:
+         shown = encode.call_args.args[0]
+         assert shown.shape == (4, 6, 3)
+         assert shown.dtype == np.uint8
++
++
++def _frozen_camera() -> MagicMock:
++    """A camera whose publisher stopped delivering: ``read_latest`` keeps returning one frame."""
++    import numpy as np
++
++    frame = MagicMock()
++    frame.data = np.zeros((4, 4, 3), np.uint8)
++    frame.sequence = 1
++    camera = MagicMock()
++    camera.read_latest.return_value = frame
++    return camera
++
++
++def test_a_preview_ends_when_its_socket_closes_even_if_the_camera_sends_nothing() -> None:
++    client = _client(CameraClaimRegistry())
++    try:
++        with (
++            patch("api.camera.build_shared_camera") as build,
++            patch("api.camera._PREVIEW_STALL_S", 60.0),
++            patch("utils.jpeg.encode_jpeg_rgb", return_value=b"jpeg"),
++        ):
++            build.return_value = _frozen_camera()
++            with client.websocket_connect(f"/api/cameras/ws?camera={quote(_camera_query())}") as websocket:
++                assert websocket.receive_bytes() == b"jpeg"
++            # Leaving the block closes the socket; the test client waits for the handler to end.
++            build.return_value.disconnect.assert_called_once()
++    finally:
++        app.dependency_overrides.clear()
++
++
++def test_a_stalled_camera_is_reported_so_the_preview_reconnects() -> None:
++    client = _client(CameraClaimRegistry())
++    try:
++        with (
++            patch("api.camera.build_shared_camera") as build,
++            patch("api.camera._PREVIEW_STALL_S", 0.1),
++            patch("utils.jpeg.encode_jpeg_rgb", return_value=b"jpeg"),
++        ):
++            build.return_value = _frozen_camera()
++            with client.websocket_connect(f"/api/cameras/ws?camera={quote(_camera_query())}") as websocket:
++                assert websocket.receive_bytes() == b"jpeg"
++                error = websocket.receive_json()
++            assert error["error_code"] == "camera_unavailable"
++            assert "stopped sending frames" in error["message"]
++            build.return_value.disconnect.assert_called_once()
++    finally:
++        app.dependency_overrides.clear()
++
++
++def test_a_camera_that_cannot_open_says_why() -> None:
++    from utils.realsense_rgbd import RealSenseModeError
++
++    client = _client(CameraClaimRegistry())
++    try:
++        with patch("api.camera.build_shared_camera") as build:
++            build.return_value.connect.side_effect = RealSenseModeError("no color mode 1280x720@30fps. ... USB 2.1")
++            with client.websocket_connect(f"/api/cameras/ws?camera={quote(_camera_query())}") as websocket:
++                error = websocket.receive_json()
++        assert error["error_code"] == "camera_unavailable"
++        assert "USB 2.1" in error["message"]
++    finally:
++        app.dependency_overrides.clear()
+diff --git a/application/backend/tests/cli/test_serve.py b/application/backend/tests/cli/test_serve.py
+index b0c6d48..451e586 100644
+--- a/application/backend/tests/cli/test_serve.py
++++ b/application/backend/tests/cli/test_serve.py
+@@ -74,3 +74,18 @@ def test_start_server_reconciles_settings_host_with_the_actual_bind_argument(mon
+ 
+     assert settings_module.get_settings().host == "0.0.0.0"
+     assert settings_module.get_settings().port == 9999
++
++
++def test_sigterm_cannot_wait_forever_on_a_connection(monkeypatch) -> None:
++    """uvicorn waits for every connection's task on SIGTERM; without a timeout one that never ends blocks it."""
++    monkeypatch.setattr(serve_module, "_configure_packaged_runtime", lambda: None)
++    monkeypatch.setattr(serve_module, "_run_migrations", lambda: None)
++
++    import uvicorn
++
++    calls = []
++    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: calls.append(kwargs))
++
++    serve_module.start_server("127.0.0.1", 7860)
++
++    assert calls[0]["timeout_graceful_shutdown"] == serve_module.GRACEFUL_SHUTDOWN_S
+diff --git a/application/backend/tests/conftest.py b/application/backend/tests/conftest.py
+index e5eee8c..b0e21b5 100644
+--- a/application/backend/tests/conftest.py
++++ b/application/backend/tests/conftest.py
+@@ -143,3 +143,9 @@ def test_dataset():
+ 
+ # Loaded after this module, so after STORAGE_DIR is set above.
+ pytest_plugins = ["tests.runtime_session.fixtures"]
++
++
++@pytest.fixture(autouse=True)
++def _no_camera_publisher_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
++    """The app's startup stops orphaned camera publishers: never this machine's real ones in tests."""
++    monkeypatch.setattr("utils.camera_publishers._orphan_publisher_pids", list)
+diff --git a/application/backend/tests/workers/fake_camera.py b/application/backend/tests/workers/fake_camera.py
+new file mode 100644
+index 0000000..efd228a
+--- /dev/null
++++ b/application/backend/tests/workers/fake_camera.py
+@@ -0,0 +1,61 @@
++"""A camera without hardware, for real publisher processes in tests.
++
++A publisher imports it by class path, so it must stay importable as ``tests.workers.fake_camera``
++from the backend directory, where tests run.
++"""
++
++from __future__ import annotations
++
++import time
++
++import numpy as np
++from physicalai.capture.camera import Camera
++from physicalai.capture.errors import NotConnectedError
++from physicalai.capture.frame import Frame
++
++CLASS_PATH = "tests.workers.fake_camera.FakeCamera"
++
++
++class FakeCamera(Camera):
++    """Frames of ``height`` x ``width`` at ``fps``, each filled with its sequence number."""
++
++    def __init__(self, *, serial_number: str, width: int = 64, height: int = 48, fps: int = 30) -> None:
++        super().__init__()
++        self._serial_number = serial_number
++        self._shape = (height, width, 3)
++        self._fps = fps
++        self._sequence = 0
++        self._connected = False
++        self._latest: Frame | None = None
++
++    def connect(self, timeout: float = 5.0) -> None:
++        self._connected = True
++        self._latest = self._frame()
++
++    def _do_disconnect(self) -> None:
++        self._connected = False
++
++    @property
++    def is_connected(self) -> bool:
++        return self._connected
++
++    @property
++    def device_id(self) -> str:
++        return f"fake:{self._serial_number}"
++
++    def _frame(self) -> Frame:
++        self._sequence += 1
++        data = np.full(self._shape, self._sequence % 256, dtype=np.uint8)
++        return Frame(data=data, timestamp=time.monotonic(), sequence=self._sequence)
++
++    def read(self, timeout: float = 2.0) -> Frame:
++        if not self._connected:
++            raise NotConnectedError
++        time.sleep(1 / self._fps)
++        self._latest = self._frame()
++        return self._latest
++
++    def read_latest(self) -> Frame:
++        if not self._connected or self._latest is None:
++            raise NotConnectedError
++        return self._latest
+diff --git a/application/backend/tests/workers/test_camera_publishers.py b/application/backend/tests/workers/test_camera_publishers.py
+new file mode 100644
+index 0000000..cb9e702
+--- /dev/null
++++ b/application/backend/tests/workers/test_camera_publishers.py
+@@ -0,0 +1,144 @@
++"""Studio runs its camera publishers: real publisher processes, with a camera that needs no hardware.
++
++Regression for the camera form's preview: changing the resolution reconfigured the running
++publisher in place, which killed it, and every later connect then waited on a service nobody
++published to, until Studio was restarted.
++"""
++
++from __future__ import annotations
++
++import json
++import os
++import signal
++import time
++import uuid
++from typing import TYPE_CHECKING
++
++import pytest
++from physicalai.capture import ColorMode
++from physicalai.config import Config
++
++from tests.workers.fake_camera import CLASS_PATH
++from utils.camera_factory import StudioSharedCamera
++from utils.camera_publishers import CameraBusyError, CameraPublishers, _is_publisher_process
++
++if TYPE_CHECKING:
++    from collections.abc import Iterator
++    from pathlib import Path
++
++pytest.importorskip("iceoryx2")
++
++
++@pytest.fixture
++def publishers(tmp_path: Path) -> Iterator[CameraPublishers]:
++    publishers = CameraPublishers(records_dir=tmp_path / "publishers")
++    yield publishers
++    publishers.stop_all()
++
++
++@pytest.fixture
++def device() -> str:
++    # A service of its own, so nothing else on this machine is touched.
++    return f"studio-test-{uuid.uuid4().hex[:12]}"
++
++
++def _camera(publishers: CameraPublishers, device: str, width: int, *, replace: bool = True) -> StudioSharedCamera:
++    camera = StudioSharedCamera(
++        camera=Config(CLASS_PATH, {"serial_number": device, "width": width, "height": 48, "fps": 30}),
++        service_name=f"physicalai/camera/FakeCamera/{device}/frame",
++        color_mode=ColorMode.RGB,
++        validate_on_connect=True,
++        idle_timeout=5.0,
++    )
++    camera.device, camera.replace_settings, camera.publishers = device, replace, publishers
++    return camera
++
++
++def _pid(publishers: CameraPublishers, device: str) -> int:
++    pid = publishers._running[device].pid
++    assert pid is not None
++    return pid
++
++
++def test_changing_settings_stops_the_old_publisher_before_starting_one_with_the_new(publishers, device) -> None:
++    old = _camera(publishers, device, 64)
++    old.connect()
++    assert old.read(timeout=2).data.shape == (48, 64, 3)
++    old_pid = _pid(publishers, device)
++
++    # The form's preview asks for another resolution while the old preview is still attached.
++    new = _camera(publishers, device, 80)
++    new.connect()
++    try:
++        assert not _is_publisher_process(old_pid)
++        assert _pid(publishers, device) != old_pid
++        assert new.read(timeout=2).data.shape == (48, 80, 3)
++        # The same settings again reuse the running publisher.
++        again = _camera(publishers, device, 80)
++        again.connect()
++        assert _pid(publishers, device) == publishers._running[device].pid
++        again.disconnect()
++    finally:
++        old.disconnect()
++        new.disconnect()
++
++
++def test_a_camera_in_use_is_not_switched_to_other_settings_unless_allowed(publishers, device) -> None:
++    recording = _camera(publishers, device, 64)
++    recording.connect()
++    try:
++        with pytest.raises(CameraBusyError, match="other settings"):
++            _camera(publishers, device, 80, replace=False).connect()
++        assert recording.read(timeout=2).data.shape == (48, 64, 3)
++    finally:
++        recording.disconnect()
++
++
++def test_a_dead_publisher_is_replaced_although_its_service_lives_on(publishers, device) -> None:
++    attached = _camera(publishers, device, 64)
++    attached.connect()
++    dead_pid = _pid(publishers, device)
++    os.kill(dead_pid, signal.SIGKILL)
++    deadline = time.monotonic() + 5
++    while _is_publisher_process(dead_pid) and time.monotonic() < deadline:
++        time.sleep(0.05)
++
++    # ``attached`` keeps the service open: it looks served, but nobody publishes to it.
++    camera = _camera(publishers, device, 64)
++    camera.connect(timeout=3)
++    try:
++        assert _pid(publishers, device) != dead_pid
++        assert camera.read(timeout=2).data.shape == (48, 64, 3)
++        assert attached.read(timeout=2).data.shape == (48, 64, 3)  # old subscribers recover too
++    finally:
++        camera.disconnect()
++        attached.disconnect()
++
++
++def test_publishers_are_recorded_and_stopped_with_the_backend(publishers, device, tmp_path) -> None:
++    camera = _camera(publishers, device, 64)
++    camera.connect()
++    pid = _pid(publishers, device)
++    record = json.loads((tmp_path / "publishers" / f"{pid}.json").read_text())
++    assert record == {"pid": pid, "owner": os.getpid(), "service": camera.service_name}
++
++    camera.disconnect()
++    publishers.stop_all()
++    assert not _is_publisher_process(pid)
++    assert not list((tmp_path / "publishers").glob("*.json"))
++
++
++def test_a_new_backend_stops_the_publishers_a_killed_one_left_behind(publishers, device, tmp_path) -> None:
++    camera = _camera(publishers, device, 64)
++    camera.connect()
++    pid = _pid(publishers, device)
++    camera.disconnect()
++    # As a killed backend leaves it: running, recorded, owned by a process that is gone.
++    publishers._running.clear()
++    record = tmp_path / "publishers" / f"{pid}.json"
++    record.write_text(json.dumps({"pid": pid, "owner": 2**22 + 1, "service": camera.service_name}))
++
++    restarted = CameraPublishers(records_dir=tmp_path / "publishers")
++    assert restarted.sweep_orphans() == [pid]
++    assert not _is_publisher_process(pid)
++    assert not record.exists()
+diff --git a/application/backend/tests/workers/test_camera_worker.py b/application/backend/tests/workers/test_camera_worker.py
+index 8ff3c44..b02f796 100644
+--- a/application/backend/tests/workers/test_camera_worker.py
++++ b/application/backend/tests/workers/test_camera_worker.py
+@@ -63,14 +63,14 @@ class TestCameraWorker:
+                 mock_cam.disconnect.assert_not_called()
+ 
+             _enter_and_leave(worker, check)
+-            mock_build.assert_called_once_with(config=config, validate_on_connect=False, overwrite_settings=True)
++            mock_build.assert_called_once_with(config=config, validate_on_connect=True, overwrite_settings=True)
+             mock_cam.disconnect.assert_called_once()
+ 
+     def test_a_locked_camera_keeps_its_settings(self, store):
+         config = _make_config()
+         with patch("workers.camera_worker.build_shared_camera") as mock_build:
+             _enter_and_leave(CameraWorker(config, store, "cam", is_locked=True))
+-            mock_build.assert_called_once_with(config=config, validate_on_connect=False, overwrite_settings=False)
++            mock_build.assert_called_once_with(config=config, validate_on_connect=True, overwrite_settings=False)
+ 
+     def test_lifecycle_skips_disconnect_if_not_connected(self, store):
+         with patch("workers.camera_worker.build_shared_camera") as mock_build:
+-- 
+2.53.0
+

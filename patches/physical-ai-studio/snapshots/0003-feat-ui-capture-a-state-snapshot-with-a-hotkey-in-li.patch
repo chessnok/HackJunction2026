@@ -1,0 +1,400 @@
+From 280b82099c5d76a582e29171c90b218b630393d2 Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Fri, 13 Nov 2026 17:26:02 -0800
+Subject: [PATCH 3/3] feat(ui): capture a state snapshot with a hotkey in live
+ sessions
+
+A new hotkey action, "Capture state snapshot" (Live session; Space by
+default, rebindable in the settings), saves a snapshot of the live session
+wherever one has an environment: the environment view, recording and
+inference. The session provider mounts it for its own session, so the
+snapshot is of what that page shows. A toast says where it was saved and
+what it holds (cameras with color/depth, follower/leader joints, what could
+not be captured), or why nothing was saved.
+
+Space is left to a focused button, switch, checkbox or similar control that
+Space activates, as typing in text fields already was; other hotkeys are
+unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../ui/src/features/hotkeys/hotkey-actions.ts |   9 +-
+ .../ui/src/features/hotkeys/use-hotkey.ts     |  17 +-
+ .../runtime-session-provider.tsx              |  11 +-
+ .../state-snapshot-hotkey.test.tsx            | 200 ++++++++++++++++++
+ .../runtime-session/state-snapshot-hotkey.tsx |  65 ++++++
+ 5 files changed, 298 insertions(+), 4 deletions(-)
+ create mode 100644 application/ui/src/features/runtime-session/state-snapshot-hotkey.test.tsx
+ create mode 100644 application/ui/src/features/runtime-session/state-snapshot-hotkey.tsx
+
+diff --git a/application/ui/src/features/hotkeys/hotkey-actions.ts b/application/ui/src/features/hotkeys/hotkey-actions.ts
+index 2d52ca6..fcfc82b 100644
+--- a/application/ui/src/features/hotkeys/hotkey-actions.ts
++++ b/application/ui/src/features/hotkeys/hotkey-actions.ts
+@@ -1,4 +1,5 @@
+-export type HotkeyActionId = 'recording.start_episode' | 'recording.accept_episode' | 'recording.discard_episode';
++export type HotkeyActionId =
++    'recording.start_episode' | 'recording.accept_episode' | 'recording.discard_episode' | 'session.capture_snapshot';
+ 
+ type HotkeyActionDefinition = {
+     label: string;
+@@ -22,6 +23,12 @@ export const HOTKEY_ACTIONS: Record<HotkeyActionId, HotkeyActionDefinition> = {
+         scope: 'Recording',
+         defaultCombo: 'ArrowLeft',
+     },
++    // Read-only, so it may fire anywhere a session is live, recording or not.
++    'session.capture_snapshot': {
++        label: 'Capture state snapshot',
++        scope: 'Live session',
++        defaultCombo: ' ',
++    },
+ };
+ 
+ export const HOTKEY_ACTION_IDS = Object.keys(HOTKEY_ACTIONS) as HotkeyActionId[];
+diff --git a/application/ui/src/features/hotkeys/use-hotkey.ts b/application/ui/src/features/hotkeys/use-hotkey.ts
+index 0dfeea2..3271060 100644
+--- a/application/ui/src/features/hotkeys/use-hotkey.ts
++++ b/application/ui/src/features/hotkeys/use-hotkey.ts
+@@ -15,10 +15,23 @@ const isTypingTarget = (target: EventTarget | null): boolean => {
+     );
+ };
+ 
++// Space activates the focused button, switch, checkbox or option; leave it to that control.
++const SPACE_ACTIVATED_ROLES = new Set(['button', 'checkbox', 'switch', 'radio', 'option', 'menuitem', 'tab', 'slider']);
++
++const isSpaceActivatedTarget = (target: EventTarget | null): boolean => {
++    if (!(target instanceof HTMLElement)) {
++        return false;
++    }
++
++    const role = target.getAttribute('role');
++    return target instanceof HTMLButtonElement || (role !== null && SPACE_ACTIVATED_ROLES.has(role));
++};
++
+ /**
+  * Fires `handler` when `combo` (a canonical string from `keyboardEventToCombo`) is
+  * pressed anywhere in the document, while `enabled`. Ignores keystrokes into text
+- * inputs/content-editable elements and key-repeat events.
++ * inputs/content-editable elements, key-repeat events, and Space on a focused
++ * control that Space activates.
+  */
+ export const useHotkey = (combo: string, handler: () => void, enabled = true): void => {
+     useEffect(() => {
+@@ -27,7 +40,7 @@ export const useHotkey = (combo: string, handler: () => void, enabled = true): v
+         }
+ 
+         const onKeyDown = (e: KeyboardEvent) => {
+-            if (e.repeat || isTypingTarget(e.target)) {
++            if (e.repeat || isTypingTarget(e.target) || (e.key === ' ' && isSpaceActivatedTarget(e.target))) {
+                 return;
+             }
+ 
+diff --git a/application/ui/src/features/runtime-session/runtime-session-provider.tsx b/application/ui/src/features/runtime-session/runtime-session-provider.tsx
+index 29fbef9..6c3c8ab 100644
+--- a/application/ui/src/features/runtime-session/runtime-session-provider.tsx
++++ b/application/ui/src/features/runtime-session/runtime-session-provider.tsx
+@@ -37,6 +37,7 @@ import {
+     SchemaUnloadModelCommand,
+ } from '../../api/openapi-spec';
+ import { JointsState } from '../robots/use-robot-observations';
++import { StateSnapshotHotkey } from './state-snapshot-hotkey';
+ 
+ /** Session errors go away by themselves; the parts panel keeps showing what is still failed. */
+ export const ERROR_TOAST = { timeout: 10_000 };
+@@ -325,7 +326,15 @@ export const RuntimeSessionProvider = ({
+         [state, error, statuses, loading, observations, frame, send, retry]
+     );
+ 
+-    return <RuntimeSessionContext.Provider value={value}>{children}</RuntimeSessionContext.Provider>;
++    return (
++        <RuntimeSessionContext.Provider value={value}>
++            {children}
++            {/* Wherever a session has an environment, its hotkey saves a state snapshot. */}
++            {state?.environment != null && (
++                <StateSnapshotHotkey project_id={project_id} session_id={state.session_id} />
++            )}
++        </RuntimeSessionContext.Provider>
++    );
+ };
+ 
+ export const useRuntimeSession = () => {
+diff --git a/application/ui/src/features/runtime-session/state-snapshot-hotkey.test.tsx b/application/ui/src/features/runtime-session/state-snapshot-hotkey.test.tsx
+new file mode 100644
+index 0000000..1a44f7c
+--- /dev/null
++++ b/application/ui/src/features/runtime-session/state-snapshot-hotkey.test.tsx
+@@ -0,0 +1,200 @@
++import { toast } from '@geti-ui/ui';
++import { afterEach, describe, expect, it, rs } from '@rstest/core';
++import { act, fireEvent, screen, waitFor } from '@testing-library/react';
++import { HttpResponse } from 'msw';
++import useWebSocket from 'react-use-websocket';
++
++import { SchemaStateSnapshot } from '../../api/openapi-spec';
++import { http } from '../../api/utils';
++import { server } from '../../msw-node-setup';
++import { render } from '../../test-utils/render';
++import { RuntimeSessionProvider } from './runtime-session-provider';
++import { describeSnapshot, StateSnapshotHotkey } from './state-snapshot-hotkey';
++
++rs.mock('react-use-websocket', () => ({
++    default: rs.fn(() => ({ sendJsonMessage: rs.fn() })),
++}));
++
++const SNAPSHOT: SchemaStateSnapshot = {
++    snapshot_id: '20261113-171500-123',
++    path: '/storage/state_snapshots/project-1/20261113-171500-123',
++    captured_at: '2026-11-13T17:15:00.123+01:00',
++    session_id: 'session-1',
++    environment_name: 'Bench',
++    cameras: [
++        { name: 'Top', key: 'top', files: ['top.color.png', 'top.depth.png'], color: true, depth: true },
++        { name: 'Arm', key: 'arm', files: ['arm.color.png'], color: true, depth: false },
++    ],
++    follower: true,
++    leader: true,
++    warnings: [],
++};
++
++const mockSettings = (bindings: Record<string, string> = {}) =>
++    server.use(
++        http.get('/api/settings', () =>
++            HttpResponse.json({
++                video_recording: { preset: null },
++                trainer: {
++                    request_timeout_s: 30,
++                    download_read_timeout_s: 120,
++                    stream_reconnect_max_s: 900,
++                    stream_reconnect_backoff_max_s: 30,
++                },
++                huggingface: { hf_token: null },
++                ssh: {
++                    connect_timeout_s: 10,
++                    command_timeout_s: 15,
++                    preflight_timeout_s: 30,
++                    image_pull_timeout_s: 1800,
++                    trainer_shm_size_gb: 32,
++                },
++                hotkeys: { bindings },
++            })
++        )
++    );
++
++const mockCapture = (respond: () => Response) => {
++    const requests: URL[] = [];
++    server.use(
++        http.post('/api/projects/{project_id}/state_snapshots', ({ request }) => {
++            requests.push(new URL(request.url));
++            return respond() as never;
++        })
++    );
++    return requests;
++};
++
++const pressSpace = (target: Element | Window = window) => fireEvent.keyDown(target, { key: ' ' });
++
++afterEach(() => {
++    rs.restoreAllMocks();
++});
++
++describe('StateSnapshotHotkey', () => {
++    it('saves a snapshot of the live session on Space and says what it saved', async () => {
++        mockSettings();
++        const requests = mockCapture(() => HttpResponse.json(SNAPSHOT, { status: 201 }));
++        const notify = rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
++        render(<StateSnapshotHotkey project_id='project-1' session_id='session-1' />);
++
++        pressSpace();
++
++        await waitFor(() => expect(notify).toHaveBeenCalled());
++        expect(requests).toHaveLength(1);
++        expect(requests[0].pathname).toBe('/api/projects/project-1/state_snapshots');
++        expect(requests[0].searchParams.get('session_id')).toBe('session-1');
++        const message = notify.mock.calls[0][0] as string;
++        expect(message).toContain(SNAPSHOT.path);
++        expect(message).toContain('Top (color, depth)');
++        expect(message).toContain('follower and leader joints');
++    });
++
++    it('says clearly why no snapshot was saved', async () => {
++        mockSettings();
++        mockCapture(() =>
++            HttpResponse.json(
++                {
++                    message: 'No live session with an environment to snapshot.',
++                    error_code: 'no_live_session',
++                },
++                { status: 409 }
++            )
++        );
++        const notify = rs.spyOn(toast, 'negative').mockReturnValue(rs.fn());
++        render(<StateSnapshotHotkey project_id='project-1' session_id='session-1' />);
++
++        pressSpace();
++
++        await waitFor(() => expect(notify).toHaveBeenCalled());
++        expect(notify.mock.calls[0][0]).toContain('No live session with an environment to snapshot.');
++    });
++
++    it('leaves Space to a focused button and to text fields', async () => {
++        mockSettings();
++        const requests = mockCapture(() => HttpResponse.json(SNAPSHOT, { status: 201 }));
++        render(
++            <>
++                <StateSnapshotHotkey project_id='project-1' session_id='session-1' />
++                <button type='button'>Teleoperate</button>
++                <input aria-label='Task' />
++            </>
++        );
++
++        pressSpace(screen.getByRole('button', { name: 'Teleoperate' }));
++        pressSpace(screen.getByRole('textbox', { name: 'Task' }));
++        await new Promise((resolve) => setTimeout(resolve, 50));
++
++        expect(requests).toHaveLength(0);
++    });
++
++    it('follows a rebinding from the settings', async () => {
++        mockSettings({ 'session.capture_snapshot': 'S' });
++        const requests = mockCapture(() => HttpResponse.json(SNAPSHOT, { status: 201 }));
++        rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
++        render(<StateSnapshotHotkey project_id='project-1' session_id='session-1' />);
++        await new Promise((resolve) => setTimeout(resolve, 100)); // the settings load
++
++        fireEvent.keyDown(window, { key: 's' });
++        await waitFor(() => expect(requests).toHaveLength(1));
++        pressSpace();
++        await new Promise((resolve) => setTimeout(resolve, 50));
++
++        expect(requests).toHaveLength(1);
++    });
++});
++
++describe('describeSnapshot', () => {
++    it('reports what could not be captured', () => {
++        const message = describeSnapshot({
++            ...SNAPSHOT,
++            cameras: [],
++            leader: false,
++            warnings: ["The leader's joints are known only while teleoperation runs"],
++        });
++
++        expect(message).toContain('no camera frames; follower joints.');
++        expect(message).toContain('known only while teleoperation runs');
++    });
++});
++
++describe('in a live session', () => {
++    it('is on once the session has an environment, for that session', async () => {
++        mockSettings();
++        const requests = mockCapture(() => HttpResponse.json(SNAPSHOT, { status: 201 }));
++        rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
++        render(
++            <RuntimeSessionProvider project_id='project-1' environment={null}>
++                {null}
++            </RuntimeSessionProvider>
++        );
++        const onMessage = rs.mocked(useWebSocket).mock.calls.at(-1)?.[1]?.onMessage;
++        const state = (environment: object | null) =>
++            act(() => {
++                onMessage?.(
++                    new MessageEvent('message', {
++                        data: JSON.stringify({ type: 'state', data: { session_id: 'session-9', environment } }),
++                    })
++                );
++            });
++
++        state(null);
++        pressSpace();
++        await new Promise((resolve) => setTimeout(resolve, 50));
++        expect(requests).toHaveLength(0);
++
++        state({
++            environment_id: null,
++            name: 'Bench',
++            robot_id: 'robot-1',
++            leader_id: null,
++            joint_names: ['gripper.pos'],
++            cameras: [],
++        });
++        await new Promise((resolve) => setTimeout(resolve, 100)); // the settings load
++        pressSpace();
++
++        await waitFor(() => expect(requests).toHaveLength(1));
++        expect(requests[0].searchParams.get('session_id')).toBe('session-9');
++    });
++});
+diff --git a/application/ui/src/features/runtime-session/state-snapshot-hotkey.tsx b/application/ui/src/features/runtime-session/state-snapshot-hotkey.tsx
+new file mode 100644
+index 0000000..acdddf1
+--- /dev/null
++++ b/application/ui/src/features/runtime-session/state-snapshot-hotkey.tsx
+@@ -0,0 +1,65 @@
++import { useCallback } from 'react';
++
++import { toast } from '@geti-ui/ui';
++
++import { $api } from '../../api/client';
++import { getApiErrorMessage } from '../../api/errors';
++import { SchemaStateSnapshot } from '../../api/openapi-spec';
++import { getEffectiveBindings } from '../hotkeys/key-combo';
++import { useHotkey } from '../hotkeys/use-hotkey';
++
++const SNAPSHOT_TOAST = { timeout: 8_000 };
++const SNAPSHOT_ERROR_TOAST = { timeout: 10_000 };
++
++/** "Saved to …: top (color, depth), arm (color); follower and leader joints." */
++export const describeSnapshot = (snapshot: SchemaStateSnapshot): string => {
++    const cameras = snapshot.cameras
++        .filter((camera) => camera.color || camera.depth)
++        .map(
++            (camera) =>
++                `${camera.name} (${[camera.color && 'color', camera.depth && 'depth'].filter(Boolean).join(', ')})`
++        );
++    const robots = [snapshot.follower && 'follower', snapshot.leader && 'leader'].filter(Boolean).join(' and ');
++    const parts = [
++        cameras.length > 0 ? cameras.join(', ') : 'no camera frames',
++        robots !== '' ? `${robots} joints` : 'no joints',
++    ];
++    const warnings = (snapshot.warnings ?? []).length > 0 ? ` ${(snapshot.warnings ?? []).join(' ')}` : '';
++    return `Snapshot saved to ${snapshot.path}: ${parts.join('; ')}.${warnings}`;
++};
++
++/**
++ * Saves a state snapshot of the live session ``session_id`` when its hotkey (Space by default) is pressed.
++ *
++ * The session provider mounts it while its session has an environment, so it works wherever one is
++ * live: the environment view, recording, inference. Snapshots are read-only on the backend.
++ */
++export const StateSnapshotHotkey = ({ project_id, session_id }: { project_id: string; session_id: string }) => {
++    const { data: settings } = $api.useQuery('get', '/api/settings');
++    const combo = getEffectiveBindings(settings?.hotkeys.bindings)['session.capture_snapshot'];
++    const { mutate, isPending } = $api.useMutation('post', '/api/projects/{project_id}/state_snapshots');
++
++    const takeSnapshot = useCallback(() => {
++        if (isPending) {
++            return;
++        }
++        mutate(
++            { params: { path: { project_id }, query: { session_id } } },
++            {
++                onSuccess: (snapshot) => {
++                    toast.positive(describeSnapshot(snapshot), SNAPSHOT_TOAST);
++                },
++                onError: (error) => {
++                    toast.negative(
++                        `Could not save a snapshot: ${getApiErrorMessage(error) ?? 'the backend did not answer.'}`,
++                        SNAPSHOT_ERROR_TOAST
++                    );
++                },
++            }
++        );
++    }, [isPending, mutate, project_id, session_id]);
++
++    useHotkey(combo, takeSnapshot);
++
++    return null;
++};
+-- 
+2.53.0
+

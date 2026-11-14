@@ -1,0 +1,332 @@
+From fd5b24ccfcc0b6334d0acf18212082c95fca08ed Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Fri, 13 Nov 2026 18:28:33 -0800
+Subject: [PATCH 13/13] fix(backend): RGB-D edge cases
+
+- The runtime export leaves out a depth-only RealSense: the runtime reads
+  color, and Studio's policies train without depth.
+- The session view hides a camera's depth map only when the slot is a depth
+  map, so a color camera named "x_depth" next to "x" stays visible.
+- A depth range that keeps no depth is refused when a camera is saved, not
+  when one is read: a stored row stays readable, and records unfiltered depth.
+- Depth previews drop older versions of the same video and the least recently
+  used beyond 2 GB.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ application/backend/src/api/project_camera.py |  8 +++++
+ application/backend/src/api/runtime_ws.py     | 10 +++----
+ .../internal_datasets/lerobot/depth_video.py  | 30 +++++++++++++++++--
+ .../backend/src/schemas/project_camera.py     | 14 +++++----
+ .../backend/src/services/runtime_export.py    |  4 +++
+ .../backend/src/workers/camera_worker.py      |  5 ++++
+ .../internal_datasets/test_depth_recording.py | 21 +++++++++++++
+ .../tests/runtime_session/test_environment.py |  5 +++-
+ .../tests/services/test_runtime_export.py     | 21 +++++++++++++
+ .../backend/tests/unit/test_camera_factory.py | 22 +++++++++++---
+ 10 files changed, 121 insertions(+), 19 deletions(-)
+
+diff --git a/application/backend/src/api/project_camera.py b/application/backend/src/api/project_camera.py
+index dc365a3..189cabd 100644
+--- a/application/backend/src/api/project_camera.py
++++ b/application/backend/src/api/project_camera.py
+@@ -14,6 +14,12 @@ router = APIRouter(prefix="/api/projects/{project_id}/cameras", tags=["Project C
+ ProjectID = UUID
+ 
+ 
++def _require_valid_payload(camera: Camera) -> None:
++    problem = getattr(camera.payload, "depth_range_problem", lambda: None)()
++    if problem is not None:
++        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=problem)
++
++
+ def _require_fingerprint(fingerprint: dict[str, Any] | None) -> dict[str, Any]:
+     if not fingerprint:
+         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Camera must be reselected")
+@@ -45,6 +51,7 @@ async def create_project_camera(
+ ) -> Camera:
+     """Create a new camera."""
+     _require_fingerprint(camera.fingerprint)
++    _require_valid_payload(camera)
+     return await camera_service.create_camera(project_id, camera)
+ 
+ 
+@@ -70,6 +77,7 @@ async def update_project_camera(
+     existing = await camera_service.get_camera_by_id(project_id, camera_id)
+     _ensure_not_claimed(existing.fingerprint, claims)
+     _ensure_not_claimed(_require_fingerprint(camera.fingerprint), claims)
++    _require_valid_payload(camera)
+     camera_with_id = camera.model_copy(update={"id": camera_id})
+ 
+     return await camera_service.update_camera(
+diff --git a/application/backend/src/api/runtime_ws.py b/application/backend/src/api/runtime_ws.py
+index 4e3ea66..638806d 100644
+--- a/application/backend/src/api/runtime_ws.py
++++ b/application/backend/src/api/runtime_ws.py
+@@ -10,7 +10,7 @@ and the store is sampled at ``hz`` into one binary observation per tick. See
+ """
+ 
+ import asyncio
+-from collections.abc import Collection
++from collections.abc import Mapping
+ from typing import Annotated, Any
+ from uuid import UUID
+ 
+@@ -35,7 +35,7 @@ from runtime_session import session as runtime_session
+ from runtime_session.bus import STATUSES, Bus, BusRequestError, NoResponderError, Subscription, command_key
+ from runtime_session.resolve import project_resolvers
+ from runtime_session.session import RuntimeSession
+-from runtime_session.store import ACTION, DEPTH_SUFFIX, STATE, Sample
++from runtime_session.store import ACTION, DEPTH_SUFFIX, STATE, ImageSpec, Sample
+ from schemas.runtime_session import (
+     AckMessage,
+     ObservationFrame,
+@@ -216,12 +216,12 @@ async def _sample_store(websocket: WebSocket, session: RuntimeSession, hz: float
+         await rate.sleep()
+ 
+ 
+-def _shown_frames(observations: Collection[str]) -> list[str]:
++def _shown_frames(observations: Mapping[str, ImageSpec]) -> list[str]:
+     """The frames a session shows: every camera's, but not the depth map of a camera that has color too."""
+     return [
+         key
+-        for key in observations
+-        if not (key.endswith(DEPTH_SUFFIX) and key.removesuffix(DEPTH_SUFFIX) in observations)
++        for key, image in observations.items()
++        if not (image.is_depth and key.endswith(DEPTH_SUFFIX) and key.removesuffix(DEPTH_SUFFIX) in observations)
+     ]
+ 
+ 
+diff --git a/application/backend/src/internal_datasets/lerobot/depth_video.py b/application/backend/src/internal_datasets/lerobot/depth_video.py
+index 563fc6f..2d2d121 100644
+--- a/application/backend/src/internal_datasets/lerobot/depth_video.py
++++ b/application/backend/src/internal_datasets/lerobot/depth_video.py
+@@ -58,11 +58,34 @@ def decode_depth_frame_mm(
+     return _to_millimetres(np.asarray(codes[0]), depth_quantization(info))
+ 
+ 
++PREVIEW_CACHE_BYTES = 2 * 1024**3
++"""How much the cached previews may take; the least recently used go first."""
++
++
+ def depth_preview_path(video_path: Path, cache_dir: Path) -> Path:
+-    """Where the preview of ``video_path`` is cached; a new one when the video changes, as recording appends to it."""
++    """Where the preview of ``video_path`` is cached; a new one when the video changes, as recording appends to it.
++
++    ``<video>-<version>.mp4``: the video's part names every version of it, so older ones can be dropped.
++    """
+     stat = video_path.stat()
+-    key = hashlib.sha256(f"{video_path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}".encode()).hexdigest()[:32]
+-    return cache_dir / "depth_previews" / f"{key}.mp4"
++    source = hashlib.sha256(str(video_path.resolve()).encode()).hexdigest()[:16]
++    version = hashlib.sha256(f"{stat.st_mtime_ns}:{stat.st_size}".encode()).hexdigest()[:16]
++    return cache_dir / "depth_previews" / f"{source}-{version}.mp4"
++
++
++def _evict(preview: Path) -> None:
++    """Drop the previews of older versions of the same video, then the least recently used beyond the cap."""
++    source = preview.name.split("-", 1)[0]
++    others = [path for path in preview.parent.glob("*.mp4") if path != preview and ".part." not in path.name]
++    for path in others:
++        if path.name.startswith(f"{source}-"):
++            path.unlink(missing_ok=True)
++    kept = sorted((path for path in others if path.exists()), key=lambda path: path.stat().st_atime, reverse=True)
++    total = preview.stat().st_size
++    for path in kept:
++        total += path.stat().st_size
++        if total > PREVIEW_CACHE_BYTES:
++            path.unlink(missing_ok=True)
+ 
+ 
+ def ensure_depth_preview(video_path: Path, cache_dir: Path, info: Mapping[str, Any] | None) -> Path:
+@@ -83,6 +106,7 @@ def ensure_depth_preview(video_path: Path, cache_dir: Path, info: Mapping[str, A
+                 partial.replace(preview)
+             finally:
+                 partial.unlink(missing_ok=True)
++            _evict(preview)
+     return preview
+ 
+ 
+diff --git a/application/backend/src/schemas/project_camera.py b/application/backend/src/schemas/project_camera.py
+index 18fa04b..37c9978 100644
+--- a/application/backend/src/schemas/project_camera.py
++++ b/application/backend/src/schemas/project_camera.py
+@@ -1,7 +1,7 @@
+ from abc import ABC
+ from typing import Annotated, Any, Literal
+ 
+-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
++from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+ 
+ from schemas.base import BaseIDModel, UTCDatetime
+ 
+@@ -88,14 +88,16 @@ class RealsenseCameraPayload(BaseModel):
+         ),
+     )
+ 
+-    @model_validator(mode="after")
+-    def check_depth_range(self) -> "RealsenseCameraPayload":
+-        """Reject a depth range that keeps no depth at all."""
++    def depth_range_problem(self) -> str | None:
++        """Why the depth range keeps no depth at all, or ``None``.
++
++        Checked when a camera is saved, not when one is read: a stored row must stay readable.
++        """
+         if self.depth_range_min >= self.depth_range_max:
+-            raise ValueError(
++            return (
+                 f"depth_range_min ({self.depth_range_min} m) must be below depth_range_max ({self.depth_range_max} m)"
+             )
+-        return self
++        return None
+ 
+ 
+ class GenicamCameraPayload(BaseModel):
+diff --git a/application/backend/src/services/runtime_export.py b/application/backend/src/services/runtime_export.py
+index ee3027e..be51bc5 100644
+--- a/application/backend/src/services/runtime_export.py
++++ b/application/backend/src/services/runtime_export.py
+@@ -173,6 +173,10 @@ async def build_runtime_config(
+ 
+     camera_configs: dict[str, dict[str, Any]] = {}
+     for camera in cameras:
++        if camera.driver == "realsense" and camera.payload.output_type == "depth":
++            # The runtime reads color frames, and Studio's policies train without depth maps.
++            logger.info("Leaving depth-only camera {!r} out of the runtime export", camera.name)
++            continue
+         key = sanitize_camera_name(camera.name)
+         if key in camera_configs:
+             raise ValueError(f"Camera names collide after sanitizing: {camera.name!r}")
+diff --git a/application/backend/src/workers/camera_worker.py b/application/backend/src/workers/camera_worker.py
+index f89e5f6..b4006cc 100644
+--- a/application/backend/src/workers/camera_worker.py
++++ b/application/backend/src/workers/camera_worker.py
+@@ -59,6 +59,11 @@ def depth_range_mm(config: Camera) -> tuple[int, int] | None:
+     """The depth a RealSense camera keeps, in millimetres; ``None`` for a camera without depth."""
+     if config.driver != "realsense" or not output_has_depth(config.payload.output_type):
+         return None
++    if config.payload.depth_range_problem() is not None:  # a stored row from before ranges were checked
++        logger.warning(
++            "Camera {!r}: {}; recording its depth unfiltered", config.name, config.payload.depth_range_problem()
++        )
++        return None
+     return round(config.payload.depth_range_min * 1000), round(config.payload.depth_range_max * 1000)
+ 
+ 
+diff --git a/application/backend/tests/internal_datasets/test_depth_recording.py b/application/backend/tests/internal_datasets/test_depth_recording.py
+index 42aabc7..e462d65 100644
+--- a/application/backend/tests/internal_datasets/test_depth_recording.py
++++ b/application/backend/tests/internal_datasets/test_depth_recording.py
+@@ -221,3 +221,24 @@ def test_a_depth_encoder_that_falls_behind_is_caught(tmp_path: Path, monkeypatch
+     assert any(problem.startswith("top_depth:") and "for 20 rows" in problem for problem in problems)
+     assert not any(problem.startswith("top:") for problem in problems)
+     dataset.finalize()
++
++
++def test_a_depth_preview_keeps_only_the_latest_version_of_a_video(tmp_path: Path) -> None:
++    from internal_datasets.lerobot import depth_video
++
++    video = tmp_path / "video.mp4"
++    video.write_bytes(b"v1")
++    old_preview = depth_video.depth_preview_path(video, tmp_path)
++    old_preview.parent.mkdir(parents=True)
++    old_preview.write_bytes(b"old")
++    other = old_preview.parent / "0123456789abcdef-0123456789abcdef.mp4"
++    other.write_bytes(b"other video")
++    video.write_bytes(b"v2, appended")  # recording appended an episode
++
++    new_preview = depth_video.depth_preview_path(video, tmp_path)
++    new_preview.write_bytes(b"new")
++    depth_video._evict(new_preview)
++
++    assert new_preview != old_preview
++    assert not old_preview.exists()
++    assert other.exists()  # another video's preview stays, within the cache size
+diff --git a/application/backend/tests/runtime_session/test_environment.py b/application/backend/tests/runtime_session/test_environment.py
+index 744e401..ab3d205 100644
+--- a/application/backend/tests/runtime_session/test_environment.py
++++ b/application/backend/tests/runtime_session/test_environment.py
+@@ -118,7 +118,10 @@ async def test_a_camera_named_like_another_ones_depth_is_refused(test_environmen
+ def test_a_session_shows_a_cameras_color_and_a_depth_only_cameras_depth() -> None:
+     from api.runtime_ws import _shown_frames
+ 
+-    assert _shown_frames(["top", "top_depth", "floor_depth", "arm"]) == ["top", "floor_depth", "arm"]
++    color, depth = ImageSpec(2, 2), ImageSpec.depth(2, 2)
++    shown = _shown_frames({"top": color, "top_depth": depth, "floor_depth": depth, "arm": color, "arm_depth": color})
++    # A color camera that happens to be named like another one's depth stays shown.
++    assert shown == ["top", "floor_depth", "arm", "arm_depth"]
+ 
+ 
+ async def test_one_camera_twice_in_an_environment_is_refused(test_environment, factory) -> None:
+diff --git a/application/backend/tests/services/test_runtime_export.py b/application/backend/tests/services/test_runtime_export.py
+index 6db5ebc..9960be4 100644
+--- a/application/backend/tests/services/test_runtime_export.py
++++ b/application/backend/tests/services/test_runtime_export.py
+@@ -260,3 +260,24 @@ async def test_inference_export_document_validates_with_a_policy_source(mocker:
+     )
+     validate_config(document)
+     assert document["init_args"]["action_source"]["class_path"] == "physicalai.runtime.PolicySource"
++
++
++async def test_a_depth_only_realsense_is_left_out_of_the_export(mocker: Any) -> None:
++    _stub_device_paths(mocker)
++    depth_only = CameraAdapter.validate_python(
++        {
++            "driver": "realsense",
++            "name": "Top depth",
++            "fingerprint": {"serial": "243622062352"},
++            "hardware_name": "Intel RealSense D415",
++            "payload": {"width": 640, "height": 480, "fps": 30, "output_type": "depth"},
++        }
++    )
++    document = await build_runtime_config(
++        follower=_robot("follower"),
++        leader=None,
++        cameras=[_camera(), depth_only],
++        fps=30,
++        robot_factory=_robot_factory(),
++    )
++    assert document["init_args"]["cameras"].keys() == {"overhead camera"}
+diff --git a/application/backend/tests/unit/test_camera_factory.py b/application/backend/tests/unit/test_camera_factory.py
+index 4b134f5..ad5cdd8 100644
+--- a/application/backend/tests/unit/test_camera_factory.py
++++ b/application/backend/tests/unit/test_camera_factory.py
+@@ -3,7 +3,6 @@
+ from __future__ import annotations
+ 
+ import pytest
+-from pydantic import ValidationError
+ 
+ from schemas.project_camera import CameraAdapter
+ from utils.camera_factory import build_camera_config, build_capture_config, build_shared_camera, capture_service_name
+@@ -80,9 +79,24 @@ def test_realsense_without_a_serial_must_be_reselected():
+         build_capture_config(camera)
+ 
+ 
+-def test_depth_range_must_keep_some_depth():
+-    with pytest.raises(ValidationError, match="depth_range_min"):
+-        _realsense(depth_range_min=3.0, depth_range_max=2.0)
++def test_a_depth_range_that_keeps_no_depth_is_reported_but_stays_readable():
++    from workers.camera_worker import depth_range_mm
++
++    stored = _realsense(depth_range_min=3.0, depth_range_max=2.0)  # a row saved before ranges were checked
++    assert "depth_range_min" in (stored.payload.depth_range_problem() or "")
++    assert depth_range_mm(stored) is None  # recorded unfiltered rather than all zeros
++    assert _realsense().payload.depth_range_problem() is None
++    assert depth_range_mm(_realsense()) == (300, 3000)
++
++
++def test_saving_a_depth_range_that_keeps_no_depth_is_refused():
++    from fastapi import HTTPException
++
++    from api.project_camera import _require_valid_payload
++
++    with pytest.raises(HTTPException, match="depth_range_min"):
++        _require_valid_payload(_realsense(depth_range_min=3.0, depth_range_max=2.0))
++    _require_valid_payload(_realsense())
+ 
+ 
+ def test_realsense_payload_defaults_stay_color_only():
+-- 
+2.53.0
+
