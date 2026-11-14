@@ -13,6 +13,18 @@ Template:
 - Refs: ADRs, log entries, upstream issues
 ```
 
+## T-012. Studio backend ignores SIGTERM; orphaned camera workers keep cameras busy
+
+- Date: 2026-11-13 · Status: Workaround
+- Symptom: stopping the backend (`kill <pid>`) leaves it running for more than 15 s, so it needs
+  SIGKILL (happened at 13:30 and 16:15). After that, `python -m physicalai.capture.transport._publisher_worker`
+  processes survive as orphans (parent = init), ignore SIGTERM too and keep `/dev/videoN` open, so the
+  camera is busy for the next Studio start.
+- Cause: upstream Studio / physicalai worker shutdown (not investigated further).
+- Workaround: `scripts/studio_stop.sh` (SIGTERM, wait 15 s, SIGKILL, including orphaned workers from
+  Studio's venv). `scripts/studio_backend.sh` refuses to start a second backend and kills leftover
+  workers before starting.
+
 ## T-011. Studio datasets contain no depth; RealSense quality is low
 
 - Date: 2026-11-13 · Status: Open (Studio patch in progress, see ADR 0004 when written)
