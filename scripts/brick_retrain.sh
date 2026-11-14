@@ -4,7 +4,7 @@
 #   scripts/brick_retrain.sh bricks_v2 patchcore -- --dataset 431a71f7 --dataset <new id> --snapshots 0fd76ff2
 #   scripts/brick_retrain.sh inspect_v1 padim -- --dataset <inspection dataset id> --pose inspect --snapshots 0fd76ff2
 # model: patchcore (default) or padim. CPU only, niced, 4 threads (T-015: XPU training hung the GPU).
-# Needs: the project env with the anomalib extra (uv sync --extra capture --extra anomalib),
+# Needs: anomalib-env/ (anomalib 2.7.0; UV_PROJECT_ENVIRONMENT=$PWD/anomalib-env for any uv command),
 # Studio's backend env (reads videos: av, pyarrow), AI_STUDIO_API_KEY in .env (crops only are sent).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,7 +16,7 @@ if [[ $# -ge 1 && "$1" != "--" ]]; then MODEL="$1"; shift; fi
 [[ "${1:-}" == "--" ]] && shift
 
 STUDIO_PY=third_party/physical-ai-studio/application/backend/.venv/bin/python
-PY=.venv/bin/python
+PY=anomalib-env/bin/python   # separate Anomalib env (never uv sync it into .venv)
 export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 PYTHONPATH="$ROOT/src"
 GPU_DRV=/usr/lib/x86_64-linux-gnu/libze_intel_gpu.so.1
 NPU_DRV=/snap/intel-npu-driver/current/usr/lib/x86_64-linux-gnu/libze_intel_npu.so.1

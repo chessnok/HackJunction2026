@@ -13,6 +13,20 @@ Template:
 - Refs: ADRs, log entries, upstream issues
 ```
 
+## T-018. Gemini API returns 404 for `gemini-pro-latest` and `gemini-3.1-pro-preview`
+
+- Date: 2026-11-14 · Status: Fixed
+- Symptom: `scripts/label_crops_gemini.py` (google-genai 1.x, default client) → `HTTP 404: 404 NOT_FOUND.
+  models/gemini-3.1-pro-preview is not found for API version v1, or is not supported for
+  generateContent`; same for `gemini-pro-latest`. `gemini-2.5-pro` → `404 ... This model
+  models/gemini-2.5-pro is no longer available to new users. Please update your code to use
+  models/gemini-3.1-pro-preview`. `client.models.list()` does not list either Pro alias.
+- Cause: the client called the `v1` API; preview and `-latest` models are served on `v1beta` only.
+- Fix: `genai.Client(api_key=..., http_options=types.HttpOptions(api_version="v1beta"))`.
+  `gemini-pro-latest` then resolves to `gemini-3.1-pro-preview` (`response.model_version`), about 4-9 s
+  per crop. Never put the key in a URL; it is read from `.env` and sent by the SDK as a header.
+- Refs: ADR 0006, `scripts/label_crops_gemini.py`.
+
 ## T-017. `so101_goto.py goto "-9.5,..."` fails: a target vector starting with a minus sign
 
 - Date: 2026-11-14 · Status: Workaround (found offline; the argparse behaviour was reproduced with a copy of the
