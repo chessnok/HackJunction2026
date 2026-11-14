@@ -89,20 +89,17 @@ One cycle: brick in the L-shape → SPACE (`top_pre` + `side_FR`) → turn the b
 
 ### Moving the follower to saved poses (`scripts/so101_goto.py`)
 
-Joint-space route without a kinematic model: hard limits from the calibration, soft limits and
-floor points measured on the real arm, route "up to `transit` → rotate → down → slow approach",
-stop-and-hold when the arm cannot follow (blocked) or on Ctrl+C. Dry run by default; `--go` moves.
+Simplest possible move: `delta = target - current`, every joint moves linearly so all arrive
+together. Checks: target inside the calibrated range; stop-and-hold if the arm cannot follow
+(blocked) or does not reach the target, or on Ctrl+C. Dry run by default; `--go` moves.
 Close the environment in Studio first (the arm's port must be free). Run with Studio's Python:
 
 ```bash
 PY=third_party/physical-ai-studio/application/backend/.venv/bin/python
-$PY scripts/so101_goto.py where                        # both arms' poses, read-only
-$PY scripts/so101_goto.py save transit --from leader    # leader by hand to a raised pose, then save
-$PY scripts/so101_goto.py measure-limits --seconds 30   # sweep the leader through the safe workspace
-$PY scripts/so101_goto.py measure-floor                 # follower relaxed, touch the table, Enter each time
-$PY scripts/so101_goto.py save pick_1 --from leader     # any target pose
-$PY scripts/so101_goto.py goto pick_1                   # plan + checks only
-$PY scripts/so101_goto.py goto pick_1 --go              # move (asks to confirm)
+$PY scripts/so101_goto.py where                      # both arms' poses, read-only
+$PY scripts/so101_goto.py save pick_1 --from leader  # move the leader by hand, save its pose
+$PY scripts/so101_goto.py goto pick_1                # show from / to / delta / time
+$PY scripts/so101_goto.py goto pick_1 --go           # move (asks to confirm), default 20 units/s
 ```
 
 ## Status
