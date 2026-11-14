@@ -84,6 +84,13 @@ mechanical end), relaxes to 2875 when torque is released.
 | 5 | wrist_roll | 162 | 3992 | 1115 |
 | 6 | gripper | 2047 | 2941 | 1559 |
 
+Kinematic zero of this calibration (from dataset 431a71f7, 2026-11-14, offline; details in
+[perception/B-arm-kinematics.md](perception/B-arm-kinematics.md)): the homing pose reads tick 2047 on
+every servo and equals the zero pose of Studio's follower URDF (upper arm vertical, forearm and gripper
+horizontal), to about ±3–5°. The calibrated range midpoints are **not** the URDF zero (elbow 8.2°,
+pan 6.0° off). The empty gripper closes (jaws touch) at normalized 2.6 = tick 2070, not at 0. All
+joints rotate in the URDF's positive direction (drive_mode 0).
+
 ## Cameras
 
 | Camera | ID | Node (changes on replug) | Placement / role |
