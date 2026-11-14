@@ -38,9 +38,13 @@ Update this list when a step is done or blocked; link log / troubleshooting entr
 
 ### Step 4: Anomaly detection (Anomalib, separate venv, trains on the iGPU)
 
-- [ ] `uv venv anomalib-env && uv pip install "anomalib[openvino,xpu]"`
-- [ ] Good-image dataset captured
-- [ ] Model chosen (PaDiM / PatchCore / ...) and exported to OpenVINO
+- [x] `uv venv anomalib-env && uv pip install "anomalib[openvino,xpu]"`: `anomalib-env/` (anomalib 2.7.0,
+  torch 2.15.0+xpu, openvino 2026.4.1); use `UV_PROJECT_ENVIRONMENT=$PWD/anomalib-env` (README), 2026-11-14
+- [x] Good-image dataset captured: brick crops from dataset `431a71f7` + good state snapshots, real
+  defects from 49 defective snapshots, per-crop Gemini labels (ADR 0006), 2026-11-14
+- [x] Model chosen (PaDiM / PatchCore / ...) and exported to OpenVINO: PatchCore on 1.4x crops, FP16 IR,
+  NPU 71 ms / crop, brick AUROC 0.98 on the real defects (ADR 0006). Training runs on the CPU, not the
+  iGPU (T-015, T-021). Pending: gemini-4-argon relabelling and the `bricks_z14t` run.
 
 ### Step 5: Demonstrations and policy (ACT / SmolVLA / Pi0.5)
 
