@@ -47,10 +47,10 @@ talks only to the shared local OpenVINO Model Server (`localhost:8000/v3`), one 
 ## Scene and cameras (what the data shows)
 
 - Two RealSense D415 (848×480 colour, factory intrinsics from Studio's state snapshots, zero
-  distortion) stand **low** (about 10-13 cm) on opposite sides of the table and look across it at
-  each other. "top" (serial 243622062352) is not overhead; it sees the paper at a grazing angle
-  (optical axis 58° from the table normal; the floor camera's 65-68°). "floor" (243622062278) faces it from beyond the
-  far sheet edge. The wrist camera (1024×768) looks down past the purple jaws.
+  distortion) stand **low** (8-13 cm) on opposite sides of the table and look across it at each
+  other. "top" (serial 243622062352) is not overhead; it sees the paper at a grazing angle (optical
+  axis 58° from the table normal; the floor camera's 65-68°). "floor" (243622062278) faces it from
+  beyond the far sheet edge. The wrist camera (1024×768) looks down past the purple jaws.
 - Two overlapping white sheets cover the table; both are larger than the views, so **no camera sees
   all four sheet corners**. The top camera sees the lower sheet's far edge, its left edge and the
   seam where the upper sheet lies on it.
@@ -59,8 +59,8 @@ talks only to the shared local OpenVINO Model Server (`localhost:8000/v3`), one 
   | Change | Episodes | How detected |
   | --- | --- | --- |
   | Top camera re-aimed | 0-5 vs 6-66 | wood edge behind the table shifts 21 px; fixed for 6-66 (shift ≤ 1 px; agrees with agent B's arm-based fit) |
-  | Floor camera moved | 0-46 / 47-61 / 62-66 | sheet edges in the floor image jump 9-15 px (ep 47) and 14 px + 64 px (ep 62) |
-  | Lower sheet moved | 0-5 / 6-30 / 31-66 | its left edge in the top image moves 30-100 px; does not affect the camera-fixed frame |
+  | Floor camera moved | 0-46 / 47-61 / 62-66 | in the floor image the far sheet edge moves 9 px and the right edge 35 px (ep 47), 13 px and 64 px (ep 62) |
+  | Lower sheet moved | 0-5 / 6-30 / 31-66 | its left edge in the top image moves 33-64 px (ep 6) and 5 px (ep 31); does not affect the camera-fixed frame |
 
 ## Table frame
 
@@ -95,8 +95,7 @@ runs, background shifts, per-setup reprojection errors, top-vs-floor brick agree
 
 Checks: brick footprint centres from the top and from the floor camera agree to **7.1 mm median**,
 17 mm p90 (67 first frames; on the hand-annotated frames 6.8 mm median, 26 mm p90 because of the
-footprint model, see below);
-the 2×4 Duplo front edges (63.5 mm) measure 60-64 mm after the scale fix; registration to B's FK
+footprint model, see below); the 2×4 Duplo front edges (63.5 mm) measure 60-64 mm after the scale fix; registration to B's FK
 6.2 mm median.
 
 Use: `hackjunction2026.perception.scene.Frame.load(path)`, then `to_table(cam, episode, pixels)`,
@@ -289,8 +288,8 @@ from the floor camera), `x_mm`, `y_mm`, `radius_mm` (rim nearest to the camera +
 (`scripts/perception_map_preview.py`): camera frames with detections next to the map, a check tool.
 
 Annotation statistics: the brick is seen by both cameras in 99.5 % of frames, one camera 0.4 %,
-held 0.1 %; lifted in 0.8 % of frames (14 episodes; recordings end around the grasp; the brick is never carried to a bowl). Start position jitter over the first 30 frames: 1.4 mm median, 6.4 mm
-max. Single-camera estimates of the same brick differ by 7.5 mm median / 18.4 mm p90 (the fused mean
+held 0.1 %; lifted in 0.8 % of frames (14 episodes; recordings end around the grasp, the brick is
+never carried to a bowl). Start position jitter over the first 30 frames: 1.4 mm median, 6.4 mm max. Single-camera estimates of the same brick differ by 7.5 mm median / 18.4 mm p90 (the fused mean
 cancels most of it).
 
 ### Task names vs actual brick colour
@@ -339,7 +338,7 @@ Modal GPU: not used (local-only rule; nothing heavy to offload).
   white, black, purple) would be missed or confused with the gripper.
 - Episodes 0-5 use a separately fitted top-camera rotation from only 6 bricks (reprojection 10.6 px):
   less accurate than the rest.
-- Wrist camera: detection evaluated (43/48), no table positions (needs the arm pose).
+- Wrist camera: detection evaluated (CV 43/48, VLM 48/48), no table positions (needs the arm pose).
 - The policy-side map renderer is agent C's; `perception_map_preview.py` only checks the data.
 - Not verified on live cameras: the live path is measured on recorded frames.
 
