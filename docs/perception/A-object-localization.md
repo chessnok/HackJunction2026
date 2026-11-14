@@ -105,8 +105,8 @@ Use: `hackjunction2026.perception.scene.Frame.load(path)`, then `to_table(cam, e
 
 | Method | What it does | Code |
 | --- | --- | --- |
-| **CV** (classic baseline, recommended) | per camera: sheet ROI from the episode's first frame, minus static distractors (robot body, both bowls); HSV colour masks (red 0-7/170-180, yellow 8-25, green 26-48, blue 88-107; S ≥ 85, blue S ≥ 100; dark pixels allowed when S ≥ 120; the gripper's dark indigo is excluded); connected components, touching parts of different colours merge into one two-colour brick | `color_cv.py`, `scene.py` |
-| **CV v1** | first version: blue up to hue 111, S ≥ 85, V ≥ 40 for all colours | git history |
+| **CV v2** (classic baseline, recommended) | per camera: sheet ROI from the episode's first frame, minus static distractors (robot body, both bowls); HSV colour masks (red 0-7/170-180, yellow 8-25, green 26-48, blue 88-107; S ≥ 85, blue S ≥ 100; dark pixels allowed when S ≥ 120; the gripper's dark indigo is excluded); connected components, touching parts of different colours merge into one two-colour brick | `color_cv.py`, `scene.py` |
+| **CV v1** | first version: blue up to hue 111, S ≥ 85, V ≥ 40 for all colours, no gripper exclusion | `color_cv.py` profile `v1` |
 | **VLM per camera** | local VLM, one image, JSON-schema output `{objects: [{color, second_color, bbox_2d}]}` | `vlm.py` |
 | **VLM multi-view** | top + floor + wrist images in one request, one entry per physical brick with a box per image | `vlm.py` |
 | **Hybrid** | VLM decides which bricks exist and their colour, the overlapping CV blob gives the box | `vlm.py:hybrid_merge` |
@@ -138,8 +138,8 @@ prediction's footprint point vs the GT box's footprint point through the same ca
 (detection error in mm); fused: mean of the available camera estimates vs the mean of the GT
 estimates. Lifted frames are excluded from mm errors.
 
-`scripts/perception_eval.py` → `eval/metrics.json`, cached predictions `eval/pred_<method>.json`,
-failure images `eval/fail_<method>/`.
+`scripts/perception_eval.py` → `evaluation/metrics.json`, cached predictions `evaluation/pred_<method>.json`,
+failure images `evaluation/fail_<method>/`.
 
 ### Results (48 frames; top and floor: 48 GT boxes each)
 
@@ -164,7 +164,7 @@ thresholds were set from colour statistics of the **51 episodes outside the eval
 bricks: H 89-106, S ≥ 110 at the 5th percentile; jaws: H 101-119 at V < 70; green faces down to V ≈ 20),
 but they were motivated by evaluation failures, so v2 numbers are slightly optimistic.
 
-Remaining CV failures (`eval/fail_cv/`): ep 49 top (a bluish reflection under a turquoise brick
+Remaining CV failures (`evaluation/fail_cv/`): ep 49 top (a bluish reflection under a turquoise brick
 extends the box 18 px down), ep 19 late top (lifted brick).
 
 Which cameras matter: the floor camera is the most precise for bricks (1.9 px, its view of the brick

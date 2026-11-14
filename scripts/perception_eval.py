@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Evaluate brick localizers against the hand-annotated ground truth (gt_431a71f7.py).
 
-Methods: cv (HSV colour blobs), vlm (local VLM per camera), vlm_mv (local VLM, three views in one
-request), hybrid (VLM objects + CV boxes). Predictions are cached in <out>/eval/pred_<method>.json,
-so a VLM run can be resumed. Metrics go to <out>/eval/metrics.json and failure images to
-<out>/eval/fail_<method>/.
+Methods: cv (HSV colour blobs, profile v2), cv_v1 (first thresholds), vlm (local VLM per camera),
+vlm_mv (local VLM, three views in one request), hybrid (VLM objects + CV boxes), gripper. Predictions
+are cached in <out>/evaluation/pred_<method>.json, so a VLM run can be resumed. Metrics go to
+<out>/evaluation/metrics.json and failure images to <out>/evaluation/fail_<method>/.
 
   PYTHONPATH=src python scripts/perception_eval.py --methods cv
   PYTHONPATH=src python scripts/perception_eval.py --methods vlm,vlm_mv,hybrid --vlm-url http://localhost:8000/v3
@@ -27,6 +27,7 @@ from hackjunction2026.perception.scene import Frame, detect_bricks_cv, exclusion
 from hackjunction2026.perception.vlm import VLMClient, VLMDet, hybrid_merge, iou
 
 OUT = Path("/home/intel/dev/captures/perception/A")
+RESULTS = OUT / "evaluation"
 EVAL = OUT / "eval_frames"
 DATASET = "431a71f7-50c6-4e38-9e38-d85984dde78b"
 CAMS = ("top", "floor", "arm")
@@ -55,8 +56,9 @@ def arm_roi(rgb):
 
 
 class CVMethod:
-    def __init__(self):
+    def __init__(self, profile="v2"):
         self.ctx = {}
+        self.profile = profile
 
     def context(self, ep, cam):
         if (ep, cam) not in self.ctx:
@@ -72,19 +74,19 @@ class CVMethod:
         roi, ex = self.context(ep, cam)
         if cam == "arm":
             r = arm_roi(rgb)
-            blobs = [b for b in detect_blobs(rgb, r, min_area=400)]
+            blobs = [b for b in detect_blobs(rgb, r, min_area=400, profile=self.profile)]
             ex = exclusion_mask(rgb)
             h, w = rgb.shape[:2]
             blobs = [b for b in blobs if not ex[min(h - 1, int(b.bottom_center[1])), min(w - 1, int(b.bottom_center[0]))]]
             return blobs
-        return detect_bricks_cv(rgb, roi, ex)
+        return detect_bricks_cv(rgb, roi, ex, profile=self.profile)
 
 
 def as_dict(d):
     return {"bbox": [float(v) for v in d.bbox], "colors": list(d.colors)}
 
 
-def run_method(method, client, cvm, cache_path):
+def run_method(method, client, cvm, cache_path, src_path=None):
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
     for ep, f, phase in frames():
         key = f"{ep}:{f}"
@@ -92,14 +94,14 @@ def run_method(method, client, cvm, cache_path):
             continue
         imgs = {c: load(ep, f, c) for c in CAMS}
         rec = {"time_s": {}}
-        if method == "cv":
+        if method in ("cv", "cv_v1"):
             for c in CAMS:
                 t = time.perf_counter()
                 dets = cvm(ep, f, c, imgs[c])
                 rec["time_s"][c] = time.perf_counter() - t
                 rec[c] = [as_dict(d) for d in dets]
         elif method in ("vlm", "hybrid"):
-            src = json.loads((cache_path.parent / "pred_vlm.json").read_text()) if method == "hybrid" else None
+            src = json.loads(src_path.read_text()) if method == "hybrid" else None
             for c in CAMS:
                 if method == "vlm":
                     dets = client.detect(imgs[c], c)
@@ -276,31 +278,27 @@ def main():
     ap.add_argument("--tag", default="", help="suffix for the VLM cache files (e.g. the model name)")
     args = ap.parse_args()
     frame = Frame.load(OUT / f"table_frame_{DATASET}.json")
-    ev = OUT / "eval"
+    ev = RESULTS
     ev.mkdir(parents=True, exist_ok=True)
     metrics_path = ev / "metrics.json"
     metrics = json.loads(metrics_path.read_text()) if metrics_path.exists() else {}
-    cvm = CVMethod()
     client = None
     for m in args.methods.split(","):
         if m == "gripper":
             metrics["gripper_cv"] = eval_gripper()
             print(json.dumps(metrics["gripper_cv"], indent=1))
             continue
-        if m != "cv" and client is None:
+        if not m.startswith("cv") and client is None:
             client = VLMClient(args.vlm_url, args.vlm_model, coord_mode=args.coord_mode)
             print("VLM model:", client.model)
-        name = m if m == "cv" else f"{m}{args.tag}"
+        name = m if m.startswith("cv") else f"{m}{args.tag}"
         cache_path = ev / f"pred_{name}.json"
-        if m == "hybrid":
-            # hybrid reads the per-camera VLM predictions of the same tag
-            src = ev / f"pred_vlm{args.tag}.json"
-            if not src.exists():
-                raise SystemExit(f"run vlm{args.tag} first")
-            (ev / "pred_vlm.json").write_text(src.read_text()) if args.tag else None
-        cache = run_method(m, client, cvm, cache_path)
+        src = ev / f"pred_vlm{args.tag}.json"  # hybrid reads the per-camera VLM predictions of the same tag
+        if m == "hybrid" and not src.exists():
+            raise SystemExit(f"run vlm{args.tag} first")
+        cache = run_method(m, client, CVMethod("v1" if m == "cv_v1" else "v2"), cache_path, src)
         res = evaluate(name, cache, frame)
-        if client is not None and m != "cv":
+        if client is not None and not m.startswith("cv"):
             res["model"] = client.model
         metrics[name] = res
         draw_failures(name, cache, res["failures"], ev / f"fail_{name}")

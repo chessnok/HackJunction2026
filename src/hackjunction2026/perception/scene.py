@@ -94,10 +94,10 @@ def exclusion_mask(rgb: np.ndarray, roi: np.ndarray | None = None) -> np.ndarray
 
 
 def detect_bricks_cv(rgb: np.ndarray, roi: np.ndarray, exclude: np.ndarray | None = None,
-                     min_area: int = 250) -> list[Blob]:
+                     min_area: int = 250, profile: str = "v2") -> list[Blob]:
     out = []
     h, w = rgb.shape[:2]
-    for b in detect_blobs(rgb, roi):
+    for b in detect_blobs(rgb, roi, profile=profile):
         x0, y0, x1, y1 = b.bbox
         if b.area < min_area or (x1 - x0) < 8 or (y1 - y0) < 8:
             continue
