@@ -80,7 +80,7 @@ class TableFrame:
     scale_mm: float = 1.0  # camera height above the table in mm
 
     @classmethod
-    def from_lines(cls, K, n, far, left, scale_mm=1.0) -> "TableFrame":
+    def from_lines(cls, K, n, far, left, scale_mm=1.0) -> TableFrame:
         e1 = line_dir_on_plane(K, n, far)
         # +x = left -> right in the image: project a step along e1 and check
         if e1[0] < 0:

@@ -119,7 +119,7 @@ class Frame:
     data: dict
 
     @classmethod
-    def load(cls, path: str | Path) -> "Frame":
+    def load(cls, path: str | Path) -> Frame:
         return cls(json.loads(Path(path).read_text()))
 
     def setup_of(self, cam: str, episode: int) -> str:

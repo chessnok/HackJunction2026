@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import cv2
@@ -258,7 +258,7 @@ def main() -> None:
         "format": "hackjunction2026/table-frame/v1",
         "dataset": ds.id,
         "episodes_seen": [eps[0], eps[-1]],
-        "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "created_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "created_by": "scripts/perception_table_frame.py (agent A)",
         "units": "mm; absolute scale from the top-camera height 131.5 mm, checked against the arm FK (+-3 %); u, v normalised to the canvas",
         "convention": {

@@ -14,7 +14,7 @@ import time
 import cv2
 import numpy as np
 
-from hackjunction2026.perception.annotate import merge_close, triangulate, projection
+from hackjunction2026.perception.annotate import merge_close, projection, triangulate
 from hackjunction2026.perception.dataset import Dataset
 from hackjunction2026.perception.gripper import detect_gripper, static_robot_mask
 from hackjunction2026.perception.scene import Frame, detect_bricks_cv, exclusion_mask, sheet_roi
