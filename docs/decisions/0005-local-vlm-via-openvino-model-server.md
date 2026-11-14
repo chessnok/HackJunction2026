@@ -51,7 +51,7 @@ CPU (load average 10–14); expect lower numbers on an idle laptop. Reproduce: `
 | **Qwen3-VL-8B int8** | **explicit** | **1 crop × 3** | **per crop, OR (ADR 0008)** | **2.0 s per crop, 6.4 s per brick** | **3/58** | **43/50** | **20/20** |
 | Qwen3-VL-8B int8 | explicit | 3 full frames | one request | 11.9 s | 0/58 | 24/50 | 9/20 |
 | Qwen3-VL-8B int8 | explicit | 3 frames + 3 crops | one request | 14.3 s | 0/19 | 12/17 (crops alone on these 36: 13/17, 2.5 s) | – |
-| gemma-4-26b-a4b int4 | explicit | 1 crop × 3 | per crop, OR | (running) | | | |
+| gemma-4-26b-a4b int4 | explicit | 1 crop × 3 | per crop, OR (3 crops in parallel) | 3.3 s per brick | 0/58 | 14/50 (per crop 17/99; + PatchCore 40/50) | not run (time) |
 | gemma-4-31B int4 / int8 | | | | not evaluated (time: venue Wi-Fi 1–5 MB/s, download stopped) | | | |
 
 - Latency vs images (Qwen, one request): 1 crop 2.0 s, 3 crops 2.4 s, 3 full frames 11.9 s, 3 frames +
@@ -82,8 +82,8 @@ Serve the VLM with OVMS 2026.4.1 natively (`scripts/vlm_server.sh`, one model, R
 127.0.0.1:8000) on the iGPU, with **Qwen3-VL-8B-Instruct-int8-ov**. Judge each brick with
 `scripts/brick_judge.py --prompt-file configs/brick_judge_prompt_explicit.txt --mode per-image`
 (colour crops, one request per camera crop, OR, ADR 0008): 43/50 defective found, 3/58 false positives,
-about 6.4 s per brick (2.0 s per crop; `--parallel` sends the three at once). Qwen also gives the best
-boxes for localization. The team's verbatim prompt stays the script's default only because it was asked
+about 6.4 s per brick (2.0 s per crop; `--parallel` sends the three at once). gemma-4-26b-a4b in the
+same mode found only 14/50. Qwen also gives accurate boxes for localization. The team's verbatim prompt stays the script's default only because it was asked
 for; it finds 15/50.
 
 ## Alternatives considered
