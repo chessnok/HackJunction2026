@@ -25,12 +25,12 @@ talks only to the shared local OpenVINO Model Server (`localhost:8000/v3`), one 
   normalised to that canvas.
 - **Layout in that frame** (mm): top D415 at (143, 593), 131.5 mm high, looking toward -y; floor
   D415 at (140, -77) / (133, -78) / (166, -51), 79-109 mm high, looking toward +y; robot base origin
-  at (528, 273), its +x points toward table -x (rotation 177.9°, plus a mirror because robot z is
+  at (528, 271), its +x points toward table -x (rotation 177.6°, plus a mirror because robot z is
   up); green bowl ≈ (499, 85), lavender bowl ≈ (498, 528), radius ≈ 86-96; bricks start at
   x 195-362, y 123-407.
 - **Robot ↔ table**: `robot_to_table_<dataset>.json` maps agent B's FK frame to this one:
-  `table_xy = s·R(θ)·(x_robot, -y_robot) + t`, s = 1.008, θ = 177.9°, t = (528.1, 273.1) mm;
-  49 of 55 grasps fit with **6.1 mm median / 10.8 mm p90** residual. `table_z = -(z_robot + 2.4)`.
+  `table_xy = s·R(θ)·(x_robot, -y_robot) + t`, s = 1.004, θ = 177.6°, t = (527.8, 271.4) mm;
+  50 of 55 grasps fit with **6.2 mm median / 10.8 mm p90** residual. `table_z = -(z_robot + 2.4)`.
 - **Accuracy** of a brick position (vs hand-annotated ground truth): fused top+floor estimate
   **2.0 mm median, 6.3 mm p90** relative to the same frame; the frame itself agrees with the arm FK
   to ~6 mm (above). Scale uncertainty ±3 %. Gripper tip: right on 16/16 (top) and 15/16 (floor)
@@ -82,7 +82,7 @@ Method:
 4. **Scale**: the homography fixes everything up to the top camera's height h. h = **131.5 mm**:
    Duplo edges read by eye gave 126 mm (103-143), agent B's metric camera fit from the arm gives
    129.6 mm, and registering B's FK gripper tip at 55 grasps to our brick positions (with h = 126)
-   gave scale 0.958 → 131.5 mm. After the change the same registration gives s = 1.008. ±3 %.
+   gave scale 0.958 → 131.5 mm. After the change the same registration gives s = 1.004. ±3 %.
 
 JSON contents (`format: hackjunction2026/table-frame/v1`): `convention` (text above), `canvas`,
 `cameras.<setup>` for `top_ep000-005`, `top_ep006-066`, `floor_ep000-046`, `floor_ep047-061`,
@@ -96,7 +96,7 @@ Checks: brick footprint centres from the top and from the floor camera agree to 
 17 mm p90 (67 first frames; on the hand-annotated frames 6.8 mm median, 26 mm p90 because of the
 footprint model, see below);
 the 2×4 Duplo front edges (63.5 mm) measure 60-64 mm after the scale fix; registration to B's FK
-6.1 mm median.
+6.2 mm median.
 
 Use: `hackjunction2026.perception.scene.Frame.load(path)`, then `to_table(cam, episode, pixels)`,
 `footprint_center(cam, episode, bottom_centre_px)`, `to_uv(xy_mm)`, `setup_of(cam, episode)`.
@@ -201,7 +201,7 @@ PENDING: the shared OpenVINO Model Server was still downloading Qwen3-VL-8B-Inst
 ## Dataset annotation (outputs)
 
 `scripts/perception_annotate.py` ran over **every frame** of all 67 episodes (no interpolation):
-19228 frames in 179 s with 4 niced worker processes (decode + CV, single-threaded OpenCV per worker).
+19228 frames in 180-260 s with 4 niced worker processes (decode + CV, single-threaded OpenCV per worker).
 
 `objects_<dataset>.parquet`: one row per frame and brick (19228 rows, one brick per episode).
 
@@ -235,8 +235,8 @@ from the floor camera), `x_mm`, `y_mm`, `radius_mm` (rim nearest to the camera +
 `robot_to_table_<dataset>.json`: see the C section. `preview/ep<NNN>.mp4|png`
 (`scripts/perception_map_preview.py`): camera frames with detections next to the map, a check tool.
 
-Annotation statistics: the brick is seen by both cameras in 99.3 % of frames, one camera 0.4 %,
-held 0.2 %; lifted in 0.8 % of frames (13 episodes; recordings end around the grasp; the brick is never carried to a bowl). Start position jitter over the first 30 frames: 1.4 mm median, 6.4 mm
+Annotation statistics: the brick is seen by both cameras in 99.5 % of frames, one camera 0.4 %,
+held 0.1 %; lifted in 0.8 % of frames (14 episodes; recordings end around the grasp; the brick is never carried to a bowl). Start position jitter over the first 30 frames: 1.4 mm median, 6.4 mm
 max. Single-camera estimates of the same brick differ by 7.5 mm median / 18.4 mm p90 (the fused mean
 cancels most of it).
 
@@ -260,7 +260,7 @@ cancels most of it).
 | Gripper top + floor | same | 7.3 ms median |
 | Full live step (both) | same | 15 ms median, 17 ms p90 → **67 Hz** |
 | Per-episode setup (sheet ROI, masks from the first frame) | same | 110-140 ms once |
-| Whole dataset (decode + CV), 19228 frames | 4 processes, nice 19 | 179 s |
+| Whole dataset (decode + CV), 19228 frames | 4 processes, nice 19 | 180-260 s |
 
 `scripts/perception_benchmark.py` reproduces the first rows (827 frames of episodes 20, 41, 63).
 Modal GPU: not used (local-only rule; nothing heavy to offload).
