@@ -10,6 +10,7 @@ Numbers are never reused. To change a decision, write a new ADR and mark the old
 | [0002](0002-no-ros2-stationary-arm-blueprint-on-host.md) | Do not base the project on the ROS 2 Stationary Arm blueprint | Accepted |
 | [0003](0003-run-studio-natively-from-upstream-lockfiles.md) | Run Studio natively from upstream lockfiles, not Docker or PyPI | Accepted |
 | [0004](0004-patch-studio-for-realsense-rgbd-recording.md) | Patch Studio to record RealSense color + depth (`hj/realsense-rgbd`) | Proposed |
+| [0005](0005-local-vlm-via-openvino-model-server.md) | Serve a local VLM with OpenVINO Model Server on the iGPU (Qwen3-VL-8B for now) | Accepted |
 | [0007](0007-observe-pose-homography-ik.md) | Locate bricks with a fixed-pose homography and hover above them with numeric IK | Proposed |
 | [0008](0008-defect-decision-any-vote-on-zoomed-crops.md) | Defective if any camera or any detector says so, on zoomed brick crops | Accepted |
 | [0009](0009-anomalib-as-uv-extra-in-project-env.md) | Install Anomalib as a uv extra of this project, not a separate venv | Accepted |

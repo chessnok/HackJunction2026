@@ -247,6 +247,77 @@ $PY scripts/perception_register_robot.py 431a71f7                         # robo
 $PY scripts/perception_eval.py --methods cv,gripper                        # accuracy vs hand-made GT
 ```
 
+## Local VLM: OpenVINO Model Server on the iGPU (brick judge, localization)
+
+A local vision-language model behind an OpenAI-compatible API: OVMS 2026.4.1, native (no Docker), on
+the Arc iGPU. Why, which model, measurements: [ADR 0005](docs/decisions/0005-local-vlm-via-openvino-model-server.md).
+Nothing of it is in git: OVMS lives in `~/opt/ovms`, models in `~/models/ovms/OpenVINO/<model>`.
+
+One-time install (user space, no sudo):
+
+```bash
+mkdir -p ~/opt/ovms/dl ~/opt/ovms/2026.4.1 ~/opt/ovms/compat && cd ~/opt/ovms/dl
+U=https://github.com/openvinotoolkit/model_server/releases/download/v2026.4.1/ovms_ubuntu24_2026.4.1_python_off.tar.gz
+curl -L -o ovms_python_off.tar.gz "$U" && curl -sL "$U.sha256" && sha256sum ovms_python_off.tar.gz  # compare
+tar -xzf ovms_python_off.tar.gz -C ~/opt/ovms/2026.4.1 && ln -sfn 2026.4.1/ovms ~/opt/ovms/current
+ln -sfn /usr/lib/x86_64-linux-gnu/libxml2.so.16 ~/opt/ovms/compat/libxml2.so.2   # Ubuntu 26.04 shim, T-016
+cd ~/dev && scripts/vlm_fetch_model.sh Qwen3-VL-8B-Instruct-int8-ov            # resumable, sha256-checked
+```
+
+Run (one server, one model, REST on 127.0.0.1:8000):
+
+```bash
+scripts/vlm_server.sh start Qwen3-VL-8B-Instruct-int8-ov   # refuses a 2nd instance, busy port, too little RAM
+scripts/vlm_server.sh status                               # pid, RSS + GPU buffers, watchdog
+scripts/vlm_server.sh stop
+```
+
+OVMS runs at nice 19 on 4 E-cores (`VLM_CPUS=8-11`) with `oom_score_adj` 1000. A watchdog kills it when
+`MemAvailable` drops below 4 GB (`VLM_MIN_AVAIL_MB`), so it cannot push Studio into an OOM kill.
+Compiled models are cached in `~/models/ovms/.ov_cache`. Logs: `~/.local/state/hj-vlm/`.
+
+### Is the brick broken? (`scripts/brick_judge.py`)
+
+Finds the brick by colour on the white sheet in each camera frame, cuts a 2.4× crop from the full
+frame, upscales it to 448 px and sends the crops in one request (ADR 0008). The answer is forced to
+`{"is_broken": boolean}` by the server (JSON schema, constrained decoding), temperature 0.
+
+```bash
+P=configs/brick_judge_prompt_explicit.txt   # recommended prompt, see ADR 0005; default = the team's verbatim prompt
+uv run scripts/brick_judge.py --snapshot 20261114-051059-914 --prompt-file $P   # one Studio snapshot
+uv run scripts/brick_judge.py top.png floor.png arm.png --prompt-file $P        # any photos = one scene
+uv run scripts/brick_judge.py --csv --eval --prompt-file $P                     # all snapshots vs their label
+uv run scripts/brick_judge.py --all --eval --mode per-image --prompt-file $P    # one request per crop, OR (votes per camera)
+uv run scripts/brick_judge.py --all --view frames                               # full frames instead of crops
+uv run scripts/brick_judge.py --all --no-vlm --save-crops captures/vlm/crops    # only the colour crops
+```
+
+### API for other tools (e.g. object localization)
+
+`POST http://127.0.0.1:8000/v3/chat/completions`, OpenAI chat format. The served model name is the
+model's directory name; `GET http://127.0.0.1:8000/v3/models` lists it. Send images as base64 data URLs.
+A `response_format` JSON schema is enforced by constrained decoding. `usage.prompt_tokens` counts text
+tokens only. Qwen3-VL answers boxes as `bbox_2d` = [x1, y1, x2, y2] normalized to 0-1000 (its training
+format; the accuracy check on our frames is still running, ADR 0005).
+
+```python
+import base64, json, urllib.request
+img = base64.b64encode(open("top.color.png", "rb").read()).decode()
+schema = {"type": "object", "required": ["found", "bbox_2d"], "additionalProperties": False,
+          "properties": {"found": {"type": "boolean"},
+                         "bbox_2d": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4}}}
+req = {"model": "Qwen3-VL-8B-Instruct-int8-ov", "temperature": 0, "max_tokens": 64,
+       "messages": [{"role": "user", "content": [
+           {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img}"}},
+           {"type": "text", "text": "Find the toy brick on the white sheet. Give bbox_2d = [x1, y1, x2, y2] "
+                                    "normalized to 0-1000. If there is none, set found to false."}]}],
+       "response_format": {"type": "json_schema", "json_schema": {"name": "box", "schema": schema, "strict": True}}}
+r = urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8000/v3/chat/completions",
+                           json.dumps(req).encode(), {"Content-Type": "application/json"}))
+box = json.loads(json.load(r)["choices"][0]["message"]["content"])  # {"found": true, "bbox_2d": [...]}
+# pixels: x = bbox_2d[0] / 1000 * width, y = bbox_2d[1] / 1000 * height, ...
+```
+
 ## Status
 
 See [docs/challenge.md](docs/challenge.md) and the latest file in [docs/log/](docs/log/).
