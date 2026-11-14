@@ -32,7 +32,12 @@ def main() -> None:
     ap.add_argument("--deadband", type=int, default=25, help="ticks (4096 per turn) before the goal follows")
     ap.add_argument("--scale", type=float, default=1.0, help="multiply the default torque limits")
     ap.add_argument("--hz", type=float, default=50.0)
+    ap.add_argument("--limit", action="append", default=[], metavar="ID=VALUE",
+                    help="per-servo torque limit 0..1000 overriding --scale, e.g. --limit 3=40 (4 %%)")
     args = ap.parse_args()
+    for item in args.limit:
+        sid, value = (int(x) for x in item.split("="))
+        DEFAULT_LIMIT[sid] = value / args.scale  # so that DEFAULT_LIMIT * scale == value
 
     port = args.port or by_serial(FOLLOWER_SERIAL)
     if not port:
