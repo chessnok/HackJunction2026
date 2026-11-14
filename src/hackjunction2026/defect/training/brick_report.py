@@ -99,6 +99,20 @@ def metrics(real: list[dict], synth: list[dict] | None) -> dict:
                 folds.append({"threshold": t, "fpr_brick_snapshots": rate(halves[b_], t),
                               "recall_brick_real": rate(b_def, t), "recall_crop_real": rate(mark, t)})
             cv = {k: float(np.mean([f[k] for f in folds])) for k in folds[0]}
+    # Per-crop recall at fixed false-positive rates, threshold set on one kind of good crop at a time.
+    at_fpr = {}
+    for neg_name, neg in (("snapshot_good_crops", good_sn), ("episode_good_crops", good_ep)):
+        if not neg:
+            continue
+        for f in (0.0, 0.05, 0.10):
+            t = t_for(neg, f)
+            at_fpr[f"{neg_name}@{int(round(100 * f))}%"] = {
+                "threshold": round(t, 4), "fpr": rate(neg, t), "recall_crop_real": rate(mark, t),
+                "recall_brick_real": rate(b_def, t), "recall_crop_synth": rate(s_mark, t),
+                "fpr_brick_snapshots": rate(b_good_sn, t)}
+    flagged = sorted(({"crop": r["path"], "score": round(r["score"], 4), "by": r.get("gemini_model", "")}
+                      for r in real if r["label"] == "good" and r.get("gemini_mark_visible") == "true"),
+                     key=lambda d: -d["score"])
     at = {}
     for name, t in thresholds.items():
         at[name] = {
@@ -122,7 +136,7 @@ def metrics(real: list[dict], synth: list[dict] | None) -> dict:
             "brick_real_visible_vs_snapshot_good": auroc(b_good_sn, b_def_vis),
             "crop_synth": auroc(s_good, s_mark), "brick_synth": auroc(sb_good, sb_def),
         },
-        "at": at, "cv_snap_b5": cv,
+        "at": at, "cv_snap_b5": cv, "at_fpr": at_fpr, "good_crops_flagged_by_gemini": flagged,
         "latency_ms": {"median": round(float(np.median(lat)), 2), "p95": round(float(np.percentile(lat, 95)), 2)}
         if lat else None,
         "score_good_snapshots": [round(float(np.percentile(good_sn, q)), 3) for q in (50, 90, 99)] if good_sn else None,
@@ -201,10 +215,25 @@ def main(argv: list[str] | None = None) -> None:
                 contact_sheet(real, DATASETS_DIR / name, t["threshold"],
                               Path("captures/anomalib") / f"failures_{run_id}_{comp}.png")
     table = "\n".join(lines)
-    print(table)
+
+    # Per-crop recall at fixed false-positive rates (CPU scores; devices agree to the third decimal).
+    fl = ["| run | comp | threshold set on | FPR target | threshold | crop FPR | recall crop real | "
+          "recall brick real | brick FPR snap | recall crop synth |", "|" + "---|" * 10]
+    for m in results:
+        if m["device"] != "CPU":
+            continue
+        for k, v in m["at_fpr"].items():
+            neg, target = k.split("@")
+            fl.append("| " + " | ".join([m["run_id"], m["compression"], neg, target, f"{v['threshold']:.3f}",
+                                         pct(v["fpr"]), pct(v["recall_crop_real"]), pct(v["recall_brick_real"]),
+                                         pct(v["fpr_brick_snapshots"]), pct(v["recall_crop_synth"])]) + " |")
+    flags = [f"- {m['run_id']} {m['compression']}: {f['crop']} score {f['score']} (flagged by {f['by']})"
+             for m in results if m["device"] == "CPU" for f in m["good_crops_flagged_by_gemini"]]
+    extra = "\n".join(fl) + "\n\nGood-brick test crops flagged as marked by the label model:\n" + ("\n".join(flags) or "- none")
+    print(table + "\n\n" + extra)
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.with_suffix(".md").write_text(f"Threshold rule: {a.threshold_rule}\n\n{table}\n")
+    out.with_suffix(".md").write_text(f"Threshold rule: {a.threshold_rule}\n\n{table}\n\n{extra}\n")
     out.with_suffix(".json").write_text(json.dumps(results, indent=2))
     print(f"\nwritten to {out}.md / .json; failure sheets in captures/anomalib/failures_*.png")
 

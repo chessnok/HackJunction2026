@@ -176,6 +176,37 @@ class Labeler:
         return {"error": "gave up after retries"}
 
 
+def compare_models(rows: list[dict], cache: dict, lab: Labeler, other: str) -> None:
+    """Agreement of --model with `other` (both from the cache), per class (good/defect) and camera."""
+    pairs = []
+    for r in rows:
+        a_rec = cache.get(r["_key"])
+        b_rec = cache.get(r["_key"].replace(f"|{lab.model}|", f"|{other}|"))
+        if a_rec and b_rec:
+            pairs.append((r, a_rec["response"], b_rec["response"]))
+    if not pairs:
+        print(f"compare: no crop labelled by both {lab.model} and {other}")
+        return
+    print(f"\nagreement {lab.model} vs {other} on {len(pairs)} crops (mark visible yes/no):")
+    print(f"  {'class':7s} {'camera':6s} {'n':>4s} {'agree':>6s} {'both yes':>9s} {'only ' + lab.model[:10]:>16s} "
+          f"{'only ' + other[:10]:>16s}")
+    for label in ("good", "defect"):
+        for cam in ("top", "floor", "arm", "all"):
+            sel = [(r, x, y) for r, x, y in pairs if r["label"] == label and (cam == "all" or r["view"] == cam)]
+            if not sel:
+                continue
+            agree = sum(x["mark_visible"] == y["mark_visible"] for _, x, y in sel)
+            both = sum(x["mark_visible"] and y["mark_visible"] for _, x, y in sel)
+            only_a = sum(x["mark_visible"] and not y["mark_visible"] for _, x, y in sel)
+            only_b = sum(y["mark_visible"] and not x["mark_visible"] for _, x, y in sel)
+            print(f"  {label:7s} {cam:6s} {len(sel):4d} {100 * agree / len(sel):5.0f}% {both:9d} {only_a:16d} {only_b:16d}")
+    print("  disagreements:")
+    for r, x, y in pairs:
+        if x["mark_visible"] != y["mark_visible"]:
+            print(f"    {r['crop_id']} ({r['label']}): {lab.model}={x['mark_visible']} ({x['confidence']}: {x['where']!r}), "
+                  f"{other}={y['mark_visible']} ({y['confidence']}: {y['where']!r})")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dataset", required=True, help="name under captures/anomalib/dataset/")
@@ -188,6 +219,7 @@ def main() -> None:
     p.add_argument("--apply", action="store_true", help="move defective-brick crops by their per-crop label")
     p.add_argument("--manual-wins", action="store_true",
                    help="with --apply: a true/false label in configs/defect_mark_labels.csv beats Gemini")
+    p.add_argument("--compare", help="another model name in the cache: print agreement per class and camera")
     a = p.parse_args()
 
     root = Path("captures/anomalib/dataset") / a.dataset
@@ -242,8 +274,13 @@ def main() -> None:
         with open(OVERRIDES, newline="") as f:
             overrides = {o["crop_id"]: o["mark_visible"].strip().lower() for o in csv.DictReader(f)}
 
+    if a.compare:
+        compare_models(rows, cache, lab, a.compare)
+
     flagged_good, moved = [], 0
     for r in rows:
+        # gemini_* columns hold the labels of --model only (never a mix of models)
+        r.update(gemini_mark_visible="", gemini_confidence="", gemini_where="", gemini_model="")
         rec = cache.get(r.pop("_key", None) or "")
         if rec:
             resp = rec["response"]
@@ -264,7 +301,7 @@ def main() -> None:
             if a.manual_wins and overrides.get(r["crop_id"]) in ("true", "false"):
                 vis, src = overrides[r["crop_id"]] == "true", "manual"
             elif r.get("gemini_mark_visible"):
-                vis, src = r["gemini_mark_visible"] == "true", "gemini"
+                vis, src = r["gemini_mark_visible"] == "true", r["gemini_model"]
             else:
                 continue
             cls = "defect" if vis else "defect_clean"
