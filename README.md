@@ -23,8 +23,10 @@ Agents and humans: read [AGENTS.md](AGENTS.md) first.
 | `docs/log/` | Daily engineering log |
 | `configs/hardware.yaml` | Stable device addresses used by code |
 | `configs/inspection.yaml` | Inspection cameras (D415 serials), exposure, crop and capture settings |
-| `src/hackjunction2026/` | Our Python package: Feetech bus helper; `defect/` = Anomalib capture, cropping, training |
-| `scripts/` | Command-line tools (`so101_probe.py`, `so101_move.py`, `arm_fk.py`, `capture_inspection.sh`, `anomalib.sh`) |
+| `src/hackjunction2026/` | Our Python package: Feetech bus helper; `defect/` = Anomalib capture, cropping, training; `kinematics/` = FK, gripper-down IK, path check; `table_map.py` = bricks in the wrist camera and pixel → table homography |
+| `scripts/` | Command-line tools (`so101_probe.py`, `so101_move.py`, `so101_goto.py`, `arm_fk.py`, `pick_above.py`, `capture_inspection.sh`, `anomalib.sh`) |
+| `tests/` | pytest (`uv run --extra table pytest`) |
+| `configs/table_homography.yaml` | Wrist camera pixel → table XY in the `observe` pose (written by `pick_above.py calib-fit`) |
 | `third_party/` | Upstream checkouts, **not committed** |
 
 ## Setup (laptop: Ubuntu 26.04, native, no Docker)
@@ -162,6 +164,67 @@ Conventions and validation: [docs/perception/B-arm-kinematics.md](docs/perceptio
 uv run scripts/arm_fk.py pose 0 -99.2 62.7 77.6 -56.9 13.5     # keypoints (mm) for one joint vector
 uv run --with pyarrow scripts/arm_fk.py annotate 431a71f7       # every frame -> captures/perception/B/arm_<id>.parquet
 ```
+
+### Hover above a brick (`scripts/pick_above.py`, hardware procedure untested)
+
+From the saved pose `observe` the wrist camera sees the white sheet. `pick_above.py` finds the
+coloured bricks on the sheet, maps image pixels to table XY with a homography that is valid only in
+that pose, and computes the joint target that puts the gripper straight down above a brick, with
+the centre of the open jaws 60 mm above the table. It checks that the straight move from `observe`
+keeps every arm point 30 mm above the table. It never moves the arm: it prints the
+`so101_goto.py goto "..."` command for you. A grasp policy takes over after that.
+Why it works this way: [ADR 0007](docs/decisions/0007-observe-pose-homography-ik.md).
+
+Tools run from the repo root with the `table` extra (headless OpenCV + PyYAML):
+
+```bash
+uv run --extra table scripts/pick_above.py --help
+uv run --extra table pytest                      # offline tests (synthetic scenes + the sample image)
+```
+
+**Calibration** (once; again after changing `observe`, re-mounting the wrist camera, moving the
+robot base on the table or recalibrating the arm):
+
+1. Lay out 5-6 bricks of **distinct colours** (red, orange, yellow, lime, green, blue; not white, grey,
+   black or purple) spread over the part of the sheet the arm can reach (see `reach` below), not
+   touching each other.
+2. In Studio teleop, bring the follower's gripper over each brick as if to grasp it: gripper about
+   vertical, jaws open a little wider than the brick and centred on it, fingertips at the brick's
+   mid-height. Press **Space** and enter the comment `calib <colour>` (e.g. `calib red`). Redo a
+   brick if needed: the latest snapshot per colour wins. Do not move the bricks after this.
+3. Check the points: `uv run --extra table scripts/pick_above.py calib-points --since <YYYYMMDD-HHMMSS>`
+   (the time you started, laptop clock; it skips older `calib` snapshots). It prints each brick's
+   table XY and warns about a tilted gripper or fingertips far above the table.
+4. Close the environment in Studio (camera and follower port must be free).
+5. Move to the observe pose (hands clear; asks for confirmation):
+   `third_party/physical-ai-studio/application/backend/.venv/bin/python scripts/so101_goto.py goto observe --go`
+6. Fit: `uv run --extra table scripts/pick_above.py calib-fit --capture --since <YYYYMMDD-HHMMSS>`.
+   It reads the follower pose (read-only), grabs a wrist camera frame, matches bricks to calib
+   points by colour, prints the residual per brick (fit and leave-one-out, mm) and writes
+   `configs/table_homography.yaml`. It refuses to save above 15 mm leave-one-out RMS. Look at the
+   annotated image under `captures/pick_above/`. If a colour is named differently by the detector,
+   add `--alias calibname=detectedname`. Commit the YAML.
+
+**End-to-end test** (one brick):
+
+1. Studio environment closed, arm in `observe` (step 5 above). Put one brick on the sheet.
+2. `uv run --extra table scripts/pick_above.py plan --capture` (`--brick <colour>` if there are
+   several, `--height <mm>` for another hover height). It prints the brick's table XY, the target
+   joints, the FK check (jaw centre position, tilt), the path check and the goto command.
+   It refuses when the arm is not in the calibrated pose (more than 1.5 units off), the brick is out
+   of reach, a joint would leave its range, or the move would bring an arm point within 30 mm of
+   the table.
+3. Run the printed `... so101_goto.py goto --go -- "<6 values>"` (hands clear; the `--` is needed
+   when the first value is negative, T-017), check that the gripper
+   hangs straight down above the brick with the brick between the jaws, and note the offset in mm.
+4. Go back with `... so101_goto.py goto observe --go` before the next `plan`: the path check assumes
+   the move starts in `observe`.
+
+Other commands: `locate --image <png or snapshot dir>` (bricks with table XY, offline),
+`plan --image <snapshot dir>` (offline dry run on a saved snapshot), `reach [--height 60]` (reachable
+table area with the gripper straight down, plot in `captures/pick_above/reach_h60.png`).
+`--capture` refuses when Studio holds the camera or the port; it resolves the wrist camera by name
+under `/dev/v4l/by-id` and never uses the laptop's HP camera.
 
 ## Status
 

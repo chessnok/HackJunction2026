@@ -16,6 +16,6 @@ git checkout -b hj/state-snapshots && git am ../../patches/physical-ai-studio/sn
 | `0007–0013` | Fixes from the review: half-resolution depth + discard on drops, seqlock store, orphan sweep by registry, same-device check, dataset warning, single-image policy, edge cases | re-review stopped before finishing: not independently re-verified |
 | `snapshots/0001–0003` | Space-hotkey state snapshots (frames, depth, joints, intrinsics) | re-review stopped before finishing: not independently re-verified |
 | `snapshot-labels/0001–0009` | Snapshot defective flag, comment, `snapshots.csv`, Enter/Escape episode hotkeys, relaxed lag check | reviewed, deployed 2026-11-14 (`hj/state-snapshots` @ 3fb5fdfa) |
-| `snapshot-viewer/0001–0002` | Thumbnail + preview dialog and move-to-trash button in the Recent snapshots list; `GET .../files/{name}`, `DELETE` endpoints (branch `hj/snapshot-viewer`) | tests pass (backend 2302, UI 625); **untested in a browser, not deployed** |
+| `snapshot-viewer/0001–0002` | Thumbnail + preview dialog and move-to-trash button in the Recent snapshots list; `GET .../files/{name}`, `DELETE` endpoints (branch `hj/snapshot-viewer`) | tests pass (backend 2302, UI 625); deployed 2026-11-14 06:19 |
 
-Studio on the laptop runs `hj/state-snapshots` @ 3fb5fdfa (since 2026-11-14). `hj/snapshot-viewer` is not deployed yet.
+Studio on the laptop runs `hj/snapshot-viewer` @ 67a1ffe5 (since 2026-11-14 06:19; before: `hj/state-snapshots` @ 3fb5fdfa).
