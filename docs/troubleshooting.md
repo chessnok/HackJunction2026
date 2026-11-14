@@ -13,6 +13,20 @@ Template:
 - Refs: ADRs, log entries, upstream issues
 ```
 
+## T-014. Studio "Deploy and connect" to Modal fails after 2 s with a generic message
+
+- Date: 2026-11-14 · Status: Open (waiting for the Modal credit / spend limit)
+- Symptom: Studio → Settings → Training Targets → Modal → Deploy and connect: "Deployment failed or
+  timed out. Check the Modal dashboard…". Backend log: `RuntimeError: The Modal deployment command
+  failed` (`services/modal_deployment.py:138`) 2 s after `POST /api/remote-trainers/providers/modal/deploy`.
+- Cause: Studio runs `python -m modal deploy --env main src/trainer/modal_app.py` with stdout and stderr
+  sent to DEVNULL, so the real error is hidden. Running the same command by hand shows:
+  `Workspace … has exceeded its spend limit` (the hackathon credit not redeemed yet, or a $0 spend
+  limit). Auth, environment `main`, modal 1.6.3 and the app script itself are fine; nothing was
+  created in Modal (no apps or volumes in `main`).
+- Fix: redeem the Modal credit / raise the workspace spend limit on modal.com, then retry Deploy and
+  connect. Studio improvement for our fork: log the deploy command's output instead of discarding it.
+
 ## T-013. Every camera preview fails: "no publisher responded within timeout"
 
 - Date: 2026-11-13 · Status: Workaround
