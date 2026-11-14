@@ -87,6 +87,24 @@ One cycle: brick in the L-shape → SPACE (`top_pre` + `side_FR`) → turn the b
 (`top_post` + `side_BL`). Output: `captures/anomalib/raw/<session>/{good,defect}/*.png` +
 `manifest.jsonl` (git-ignored). Reuse `--session <name>` to continue a session.
 
+### Moving the follower to saved poses (`scripts/so101_goto.py`)
+
+Joint-space route without a kinematic model: hard limits from the calibration, soft limits and
+floor points measured on the real arm, route "up to `transit` → rotate → down → slow approach",
+stop-and-hold when the arm cannot follow (blocked) or on Ctrl+C. Dry run by default; `--go` moves.
+Close the environment in Studio first (the arm's port must be free). Run with Studio's Python:
+
+```bash
+PY=third_party/physical-ai-studio/application/backend/.venv/bin/python
+$PY scripts/so101_goto.py where                        # both arms' poses, read-only
+$PY scripts/so101_goto.py save transit --from leader    # leader by hand to a raised pose, then save
+$PY scripts/so101_goto.py measure-limits --seconds 30   # sweep the leader through the safe workspace
+$PY scripts/so101_goto.py measure-floor                 # follower relaxed, touch the table, Enter each time
+$PY scripts/so101_goto.py save pick_1 --from leader     # any target pose
+$PY scripts/so101_goto.py goto pick_1                   # plan + checks only
+$PY scripts/so101_goto.py goto pick_1 --go              # move (asks to confirm)
+```
+
 ## Status
 
 See [docs/challenge.md](docs/challenge.md) and the latest file in [docs/log/](docs/log/).
