@@ -1,0 +1,358 @@
+From a1d9f4e34e906fdc5af401b7908e5046aada7f32 Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Sat, 14 Nov 2026 07:21:58 -0800
+Subject: [PATCH 2/4] feat(backend): say when a remote trainer predates early
+ stopping
+
+A trainer built before early stopping validates the spec with
+extra="forbid". With early stopping off nothing changes: the fields are
+not sent. With it on, such a trainer refuses the job, and Studio used to
+pass on the raw pydantic error ("early_stopping_patience: Extra inputs
+are not permitted") or a bare 422.
+
+explain_trainer_rejection() recognizes that rejection and the job fails
+with "The remote trainer does not support early stopping: it runs
+trainer code from before the feature existed. Redeploy or update the
+trainer (for Modal: deploy the trainer again from this Studio), or train
+without early stopping." This covers the remote trainer service (422 on
+POST /jobs, before any upload), Modal and AWS Batch (failed status.json
+from the batch worker, after the dataset upload). Other failures are
+reported as before.
+
+The tests rebuild the spec as it was before the feature to play the old
+trainer. docs/remote-trainer.md describes the spec compatibility rule.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ application/backend/docs/remote-trainer.md    | 12 ++++
+ .../services/training_backends/aws_batch.py   |  5 +-
+ .../src/services/training_backends/modal.py   |  5 +-
+ .../src/services/training_backends/remote.py  |  9 ++-
+ .../test_aws_batch_training_backend.py        | 20 ++++++
+ .../services/test_modal_training_backend.py   | 51 +++++++++++++++
+ .../services/test_remote_training_backend.py  | 63 ++++++++++++++++++-
+ 7 files changed, 161 insertions(+), 4 deletions(-)
+
+diff --git a/application/backend/docs/remote-trainer.md b/application/backend/docs/remote-trainer.md
+index d7f4341b..de5ce904 100644
+--- a/application/backend/docs/remote-trainer.md
++++ b/application/backend/docs/remote-trainer.md
+@@ -375,6 +375,18 @@ docker volume rm physicalai-trainer-data
+ | GET    | `/devices`            | Trainer compute devices.              |
+ | GET    | `/health`             | Liveness and image/protocol metadata. |
+ 
++### Spec compatibility
++
++The `spec` in `POST /jobs` (and in `spec.json` for AWS Batch and Modal) is a
++`training.TrainingJobSpec`, which rejects fields it does not know. So Studio
++leaves the early-stopping fields (`early_stopping_patience`,
++`early_stopping_min_delta`) out of every spec while early stopping is off, and
++`snapflow_start_epoch` out of `POST /jobs` while SnapFlow is off: an ordinary
++job still runs on a trainer built before those features existed. A job that
++turns such a feature on fails on an older trainer instead of silently training
++without it; for early stopping, Studio reports that the trainer has to be
++updated.
++
+ ## Security
+ 
+ - HTTP-uploaded datasets are validated before extraction: ZIP-only, size and
+diff --git a/application/backend/src/services/training_backends/aws_batch.py b/application/backend/src/services/training_backends/aws_batch.py
+index a8eabe64..07308860 100644
+--- a/application/backend/src/services/training_backends/aws_batch.py
++++ b/application/backend/src/services/training_backends/aws_batch.py
+@@ -23,6 +23,7 @@ from services.training_backends.base import TrainingCanceledError, TrainingSuspe
+ from services.training_backends.local import build_spec, resolve_hf_token
+ from settings import get_settings
+ from trainer.batch.status import BatchJobStatus
++from training.job import explain_trainer_rejection
+ 
+ if TYPE_CHECKING:
+     from collections.abc import Callable
+@@ -254,7 +255,9 @@ class AwsBatchTrainingBackend:
+             if status and status.status == "failed":
+                 if job["status"] not in {"FAILED", "SUCCEEDED"}:
+                     await asyncio.to_thread(self._terminate, job_id, reason="Trainer reported failure")
+-                raise RuntimeError(status.message or "AWS Batch training failed")
++                raise RuntimeError(
++                    explain_trainer_rejection(status.message) or status.message or "AWS Batch training failed"
++                )
+             if job["status"] == "FAILED":
+                 reason = status.message if status and status.status == "failed" else job.get("statusReason")
+                 raise RuntimeError(reason or "AWS Batch training failed")
+diff --git a/application/backend/src/services/training_backends/modal.py b/application/backend/src/services/training_backends/modal.py
+index ebccb4bb..c8738071 100644
+--- a/application/backend/src/services/training_backends/modal.py
++++ b/application/backend/src/services/training_backends/modal.py
+@@ -27,6 +27,7 @@ from services.training_backends.base import TrainingCanceledError, TrainingSuspe
+ from services.training_backends.local import build_spec, resolve_hf_token
+ from settings import get_settings
+ from trainer.batch.status import BatchJobStatus
++from training.job import explain_trainer_rejection
+ from training.log_format import render_progress_log
+ 
+ if TYPE_CHECKING:
+@@ -190,7 +191,9 @@ class ModalTrainingBackend:
+                         return
+                     if status.status in {"failed", "canceled"}:
+                         await asyncio.to_thread(call.cancel)
+-                        raise RuntimeError(status.message or "Modal training failed")
++                        raise RuntimeError(
++                            explain_trainer_rejection(status.message) or status.message or "Modal training failed"
++                        )
+                 try:
+                     code = await asyncio.to_thread(call.get, timeout=0)
+                 except (modal.exception.FunctionTimeoutError, modal.exception.OutputExpiredError):
+diff --git a/application/backend/src/services/training_backends/remote.py b/application/backend/src/services/training_backends/remote.py
+index b7f55f9a..41630887 100644
+--- a/application/backend/src/services/training_backends/remote.py
++++ b/application/backend/src/services/training_backends/remote.py
+@@ -33,6 +33,7 @@ from services.training_backends._transfer_progress import TransferProgressLogger
+ from services.training_backends.artifacts import extract_training_artifact
+ from services.training_backends.base import TrainingCanceledError, TrainingSuspendedError
+ from settings import get_settings
++from training.job import explain_trainer_rejection
+ from training.log_format import render_progress_log
+ 
+ if TYPE_CHECKING:
+@@ -374,7 +375,13 @@ class RemoteTrainingBackend:
+         }
+         async with await self._client() as client:
+             response = await client.post(f"{self._base_url}/jobs", json=body)
+-            response.raise_for_status()
++            try:
++                response.raise_for_status()
++            except httpx.HTTPStatusError as exc:
++                # A trainer that predates early stopping rejects its fields with a bare 422.
++                if explanation := explain_trainer_rejection(exc.response.text):
++                    raise RemoteTrainingError(explanation) from exc
++                raise
+             data = response.json()
+ 
+         remote_job_id = data.get("remote_job_id")
+diff --git a/application/backend/tests/services/test_aws_batch_training_backend.py b/application/backend/tests/services/test_aws_batch_training_backend.py
+index 9d8e7011..bead5fbf 100644
+--- a/application/backend/tests/services/test_aws_batch_training_backend.py
++++ b/application/backend/tests/services/test_aws_batch_training_backend.py
+@@ -12,6 +12,7 @@ import pytest
+ import yaml
+ from botocore.exceptions import ClientError, SSOTokenLoadError
+ from pydantic import SecretStr
++from tests.old_trainer import old_trainer_rejection
+ 
+ from schemas.job import RemoteTrainJobPayload, TrainJobPayloadAdapter
+ from schemas.remote_trainer import AwsBatchConnection, RemoteTrainer
+@@ -23,6 +24,7 @@ from services.training_backends.base import TrainingCanceledError, TrainingConte
+ from services.training_targets.remote import RemoteTrainingTargetHandler
+ from trainer.batch.status import BatchJobStatus
+ from training import TrainingJobSpec
++from training.job import EARLY_STOPPING_UNSUPPORTED_MESSAGE
+ 
+ MODULE = "services.training_backends.aws_batch"
+ 
+@@ -359,6 +361,24 @@ async def test_runner_failure_is_reported(context, aws) -> None:
+         await (await get_training_backend(context.payload)).train(context)
+ 
+ 
++@pytest.mark.asyncio
++async def test_an_image_without_early_stopping_fails_the_job_with_a_clear_message(context, aws) -> None:
++    batch, s3 = aws
++    context.remote_job_id = uuid4()
++    batch.describe_jobs.return_value = {"jobs": [{"status": "FAILED", "statusReason": "Essential container exited"}]}
++    rejection = old_trainer_rejection(
++        TrainingJobSpec(policy="act", early_stopping_patience=3).model_dump_json(exclude={"run_options"})
++    )
++    status = BatchJobStatus(status="failed", progress=0, message=rejection, updated_at=datetime.now(UTC))
++    s3.get_object.return_value = {"Body": BytesIO(status.model_dump_json().encode())}
++    s3.get_object.side_effect = None
++
++    with pytest.raises(RuntimeError) as raised:
++        await (await get_training_backend(context.payload)).train(context)
++
++    assert str(raised.value) == EARLY_STOPPING_UNSUPPORTED_MESSAGE
++
++
+ @pytest.mark.asyncio
+ async def test_failed_job_id_persistence_terminates_submitted_job(context, aws, monkeypatch, tmp_path) -> None:
+     batch, _ = aws
+diff --git a/application/backend/tests/services/test_modal_training_backend.py b/application/backend/tests/services/test_modal_training_backend.py
+index 1609b665..3a5631a5 100644
+--- a/application/backend/tests/services/test_modal_training_backend.py
++++ b/application/backend/tests/services/test_modal_training_backend.py
+@@ -3,6 +3,7 @@
+ 
+ """Exercise native Modal jobs without credentials, network access, or GPUs."""
+ 
++import json
+ from datetime import UTC, datetime
+ from io import BytesIO
+ from unittest.mock import AsyncMock, MagicMock, PropertyMock
+@@ -13,6 +14,7 @@ import modal
+ import pytest
+ from physicalai.data.archive_safety import ZipBombDetectedError
+ from pydantic import SecretStr, ValidationError
++from tests.old_trainer import EARLY_STOPPING_FIELDS, old_trainer_rejection
+ 
+ from exceptions import InvalidResourceError
+ from schemas.job import RemoteJobIdAdapter, RemoteTrainJobPayload, TrainingDevice, TrainJobPayloadAdapter
+@@ -26,6 +28,7 @@ from services.training_service import TrainingService
+ from services.training_targets.remote import RemoteTrainingTargetHandler
+ from trainer.batch.status import BatchJobStatus
+ from training import TrainingJobSpec
++from training.job import EARLY_STOPPING_UNSUPPORTED_MESSAGE
+ 
+ MODULE = "services.training_backends.modal"
+ CALL_ID = "fc-0123456789ABCDEF"
+@@ -464,6 +467,54 @@ async def test_failure_status_and_native_failure_do_not_download(context, resour
+     call.cancel.assert_called_once()
+ 
+ 
++@pytest.mark.asyncio
++async def test_an_ordinary_spec_stays_valid_for_a_modal_app_without_early_stopping(context, resources, connection):
++    """The deployed app may run older trainer code, which forbids unknown spec fields."""
++    _, volume, _, _ = resources
++
++    await ModalTrainingBackend(connection).train(context)
++
++    uploader = volume.batch_upload.return_value.__enter__.return_value
++    spec_json = uploader.put_file.call_args_list[1].args[0].getvalue().decode()
++    assert not set(EARLY_STOPPING_FIELDS) & set(json.loads(spec_json))
++    assert old_trainer_rejection(spec_json) is None
++
++
++@pytest.mark.asyncio
++async def test_an_early_stopping_spec_is_uploaded_with_its_settings(context, resources, connection, monkeypatch):
++    _, volume, _, _ = resources
++    monkeypatch.setattr(
++        f"{MODULE}.build_spec",
++        lambda context: TrainingJobSpec(policy="act", early_stopping_patience=4, early_stopping_min_delta=0.01),
++    )
++
++    await ModalTrainingBackend(connection).train(context)
++
++    uploader = volume.batch_upload.return_value.__enter__.return_value
++    spec = TrainingJobSpec.model_validate_json(uploader.put_file.call_args_list[1].args[0].getvalue())
++    assert (spec.early_stopping_patience, spec.early_stopping_min_delta) == (4, 0.01)
++
++
++@pytest.mark.asyncio
++async def test_a_modal_app_without_early_stopping_fails_the_job_with_a_clear_message(context, resources, connection):
++    """The old batch worker writes the raw validation error; Studio says to redeploy instead."""
++    _, _, call, files = resources
++    context.remote_job_id = CALL_ID
++    rejection = old_trainer_rejection(
++        TrainingJobSpec(policy="act", early_stopping_patience=4).model_dump_json(exclude={"run_options"})
++    )
++    files[f"jobs/{context.job.id}/status.json"] = (
++        BatchJobStatus(status="failed", message=rejection, updated_at=datetime.now(UTC)).model_dump_json().encode()
++    )
++
++    with pytest.raises(RuntimeError) as raised:
++        await ModalTrainingBackend(connection).train(context)
++
++    assert str(raised.value) == EARLY_STOPPING_UNSUPPORTED_MESSAGE
++    call.cancel.assert_called_once()
++    assert not context.output_dir.exists()
++
++
+ @pytest.mark.asyncio
+ async def test_training_telemetry_is_logged_without_duplicate_polls(context, resources, connection, monkeypatch):
+     _, volume, call, _ = resources
+diff --git a/application/backend/tests/services/test_remote_training_backend.py b/application/backend/tests/services/test_remote_training_backend.py
+index 5bef62e7..51a4d229 100644
+--- a/application/backend/tests/services/test_remote_training_backend.py
++++ b/application/backend/tests/services/test_remote_training_backend.py
+@@ -12,6 +12,7 @@ from __future__ import annotations
+ 
+ import asyncio
+ import json
++from functools import partial
+ from typing import TYPE_CHECKING
+ from unittest.mock import AsyncMock, MagicMock, patch
+ from uuid import UUID, uuid4
+@@ -19,8 +20,9 @@ from uuid import UUID, uuid4
+ import httpx
+ import pytest
+ from loguru import logger
+-from pydantic import SecretStr
++from pydantic import SecretStr, ValidationError
+ from sqlalchemy.ext.asyncio import AsyncSession
++from tests.old_trainer import EARLY_STOPPING_FIELDS, old_trainer_rejection, pre_early_stopping_spec_model
+ 
+ from schemas.base_job import JobStatus
+ from schemas.dataset import Snapshot
+@@ -32,6 +34,7 @@ from services.training_backends._transfer_progress import TransferProgressLogger
+ from services.training_backends.base import TrainingContext
+ from services.training_backends.local import build_spec
+ from services.training_backends.remote import SNAPSHOT_UPLOAD_PROGRESS, TRAINING_PROGRESS_END, RemoteTrainingError
++from training.job import EARLY_STOPPING_UNSUPPORTED_MESSAGE
+ 
+ if TYPE_CHECKING:
+     from pathlib import Path
+@@ -888,6 +891,64 @@ class TestHttpDatasetTransfer:
+         assert body["spec"]["snapflow_start_epoch"] == 8
+         assert body["spec"]["max_epochs"] == 11
+ 
++    @pytest.mark.anyio
++    async def test_submit_omits_early_stopping_when_it_is_off(self, tmp_path):
++        """An ordinary run stays submittable to a trainer that predates early stopping."""
++        body = await _submitted_body(_settings(), _context(tmp_path))
++
++        assert not set(EARLY_STOPPING_FIELDS) & set(body["spec"])
++        assert old_trainer_rejection(json.dumps(body["spec"])) is None
++
++    @pytest.mark.anyio
++    async def test_submit_sends_early_stopping_when_it_is_asked_for(self, tmp_path):
++        context = _context(tmp_path, early_stopping_patience=3, early_stopping_min_delta=0.05)
++
++        body = await _submitted_body(_settings(), context)
++
++        assert (body["spec"]["early_stopping_patience"], body["spec"]["early_stopping_min_delta"]) == (3, 0.05)
++
++    @pytest.mark.anyio
++    async def test_a_trainer_without_early_stopping_fails_the_job_with_a_clear_message(self, tmp_path):
++        """The trainer rejects the unknown fields with a 422; Studio says what to do instead of passing it on."""
++
++        def old_trainer(request: httpx.Request) -> httpx.Response:
++            if request.method != "POST" or not request.url.path.endswith("/jobs"):
++                return httpx.Response(200, json={})  # e.g. the proxy probe
++            # What FastAPI answers when the request body fails validation against an older spec.
++            try:
++                pre_early_stopping_spec_model().model_validate(json.loads(request.content)["spec"])
++            except ValidationError as exc:
++                detail = [{**error, "loc": ["body", "spec", *error["loc"]]} for error in exc.errors(include_url=False)]
++                return httpx.Response(422, json={"detail": detail})
++            return httpx.Response(200, json={"remote_job_id": str(uuid4())})
++
++        settings = _settings()
++        transport = httpx.MockTransport(old_trainer)
++        (tmp_path / "off").mkdir()
++        (tmp_path / "on").mkdir()
++        with (
++            patch(f"{REMOTE}.get_settings", return_value=settings),
++            patch(f"{REMOTE}.httpx.AsyncClient", partial(httpx.AsyncClient, transport=transport)),
++        ):
++            backend = _backend(settings)
++            # Without early stopping, the same trainer takes the job.
++            assert isinstance(await backend.submit_job(_context(tmp_path / "off")), UUID)
++            with pytest.raises(RemoteTrainingError) as raised:
++                await backend.submit_job(_context(tmp_path / "on", early_stopping_patience=3))
++
++        assert str(raised.value) == EARLY_STOPPING_UNSUPPORTED_MESSAGE
++
++    @pytest.mark.anyio
++    async def test_other_submission_errors_are_raised_as_before(self, tmp_path):
++        settings = _settings()
++        transport = httpx.MockTransport(lambda _request: httpx.Response(503, json={"detail": "busy"}))
++        with (
++            patch(f"{REMOTE}.get_settings", return_value=settings),
++            patch(f"{REMOTE}.httpx.AsyncClient", partial(httpx.AsyncClient, transport=transport)),
++            pytest.raises(httpx.HTTPStatusError),
++        ):
++            await _backend(settings).submit_job(_context(tmp_path, early_stopping_patience=3))
++
+     @pytest.mark.anyio
+     async def test_submit_body_omits_the_studios_device_selection(self, tmp_path):
+         """A device index names hardware on this host, not on the trainer's."""
+-- 
+2.53.0
+

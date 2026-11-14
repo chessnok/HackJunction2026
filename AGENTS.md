@@ -86,7 +86,9 @@ Rules:
 
 - Small commits, imperative subject of at most 72 chars, e.g. `docs: record follower power issue`.
 - Never commit datasets, recordings, checkpoints, exported models, `.venv`, `third_party/`,
-  camera frames, `.env`, or tokens (HF, Modal).
+  camera frames, `.env`, or tokens (HF, Modal). Exception (ADR 0011): released model weights and
+  derived annotations go to `artifacts/` through **git LFS** only, each with a `MANIFEST.md` entry
+  (source run, metrics, size). Never put camera frames or images of people there.
 - No force-push to `main`, no rewriting shared history.
 
 ## Definition of done

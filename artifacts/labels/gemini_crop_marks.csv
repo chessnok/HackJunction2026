@@ -1,0 +1,296 @@
+crop_id,snapshot,camera,brick_label,gemini_mark_visible,gemini_confidence,gemini_where,gemini_model
+snap_20261114-045923-678_arm_b0,20261114-045923-678,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-045923-678_floor_b0,20261114-045923-678,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-045923-678_top_b0,20261114-045923-678,top,good,false,high,,gemini-4-argon
+snap_20261114-050014-108_arm_b0,20261114-050014-108,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050014-108_floor_b0,20261114-050014-108,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050014-108_top_b0,20261114-050014-108,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050019-694_floor_b0,20261114-050019-694,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050019-694_top_b0,20261114-050019-694,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050023-232_floor_b0,20261114-050023-232,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050023-232_top_b0,20261114-050023-232,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050029-061_floor_b0,20261114-050029-061,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050029-061_top_b0,20261114-050029-061,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050037-260_floor_b0,20261114-050037-260,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050037-260_top_b0,20261114-050037-260,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050041-209_floor_b0,20261114-050041-209,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050041-209_top_b0,20261114-050041-209,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050045-410_floor_b0,20261114-050045-410,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050045-410_top_b0,20261114-050045-410,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050051-303_arm_b0,20261114-050051-303,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050051-303_floor_b0,20261114-050051-303,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050051-303_top_b0,20261114-050051-303,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050053-299_arm_b0,20261114-050053-299,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050053-299_floor_b0,20261114-050053-299,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050053-299_top_b0,20261114-050053-299,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050057-468_floor_b0,20261114-050057-468,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050057-468_top_b0,20261114-050057-468,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050100-108_floor_b0,20261114-050100-108,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050100-108_top_b0,20261114-050100-108,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050103-428_floor_b0,20261114-050103-428,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050103-428_top_b0,20261114-050103-428,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050106-814_floor_b0,20261114-050106-814,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050106-814_top_b0,20261114-050106-814,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050110-698_floor_b0,20261114-050110-698,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050110-698_top_b0,20261114-050110-698,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050114-892_arm_b0,20261114-050114-892,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050114-892_floor_b0,20261114-050114-892,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050114-892_top_b0,20261114-050114-892,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050120-992_floor_b0,20261114-050120-992,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050120-992_top_b0,20261114-050120-992,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050134-483_floor_b0,20261114-050134-483,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050134-483_top_b0,20261114-050134-483,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050137-399_floor_b0,20261114-050137-399,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050137-399_top_b0,20261114-050137-399,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050140-153_floor_b0,20261114-050140-153,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050140-153_top_b0,20261114-050140-153,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050142-976_arm_b0,20261114-050142-976,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050142-976_floor_b0,20261114-050142-976,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050142-976_top_b0,20261114-050142-976,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050146-685_floor_b0,20261114-050146-685,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050146-685_top_b0,20261114-050146-685,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050150-793_floor_b0,20261114-050150-793,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050150-793_top_b0,20261114-050150-793,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050153-748_floor_b0,20261114-050153-748,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050153-748_top_b0,20261114-050153-748,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050156-683_arm_b0,20261114-050156-683,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050156-683_floor_b0,20261114-050156-683,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050156-683_top_b0,20261114-050156-683,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050202-777_floor_b0,20261114-050202-777,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050202-777_top_b0,20261114-050202-777,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050206-004_floor_b0,20261114-050206-004,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050206-004_top_b0,20261114-050206-004,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050212-505_floor_b0,20261114-050212-505,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050212-505_top_b0,20261114-050212-505,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050215-858_floor_b0,20261114-050215-858,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050215-858_top_b0,20261114-050215-858,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050218-654_floor_b0,20261114-050218-654,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050218-654_top_b0,20261114-050218-654,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050221-974_floor_b0,20261114-050221-974,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050221-974_top_b0,20261114-050221-974,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050225-515_arm_b0,20261114-050225-515,arm,good,true,high,black scribble inside the hollow underside,gemini-3.1-pro-preview
+snap_20261114-050225-515_floor_b0,20261114-050225-515,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050300-236_arm_b0,20261114-050300-236,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050300-236_floor_b0,20261114-050300-236,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050300-236_top_b0,20261114-050300-236,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050302-736_arm_b0,20261114-050302-736,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050302-736_floor_b0,20261114-050302-736,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050302-736_top_b0,20261114-050302-736,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050906-495_arm_b0,20261114-050906-495,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050906-495_floor_b0,20261114-050906-495,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050906-495_top_b0,20261114-050906-495,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050924-182_arm_b0,20261114-050924-182,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050924-182_floor_b0,20261114-050924-182,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050924-182_top_b0,20261114-050924-182,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050926-533_arm_b0,20261114-050926-533,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050926-533_floor_b0,20261114-050926-533,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050926-533_top_b0,20261114-050926-533,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050929-038_arm_b0,20261114-050929-038,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050929-038_floor_b0,20261114-050929-038,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050929-038_top_b0,20261114-050929-038,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050931-901_arm_b0,20261114-050931-901,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050938-316_arm_b0,20261114-050938-316,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050938-316_floor_b0,20261114-050938-316,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050938-316_top_b0,20261114-050938-316,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050942-801_arm_b0,20261114-050942-801,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050942-801_floor_b0,20261114-050942-801,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050942-801_top_b0,20261114-050942-801,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050946-433_arm_b0,20261114-050946-433,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050946-433_floor_b0,20261114-050946-433,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050946-433_top_b0,20261114-050946-433,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050954-176_arm_b0,20261114-050954-176,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050954-176_floor_b0,20261114-050954-176,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050954-176_top_b0,20261114-050954-176,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050956-674_arm_b0,20261114-050956-674,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050956-674_floor_b0,20261114-050956-674,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050956-674_top_b0,20261114-050956-674,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050958-718_arm_b0,20261114-050958-718,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050958-718_floor_b0,20261114-050958-718,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-050958-718_top_b0,20261114-050958-718,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-051001-447_arm_b0,20261114-051001-447,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-051001-447_floor_b0,20261114-051001-447,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-051001-447_top_b0,20261114-051001-447,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-051004-868_arm_b0,20261114-051004-868,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-051004-868_floor_b0,20261114-051004-868,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-051004-868_top_b0,20261114-051004-868,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-051059-914_arm_b0,20261114-051059-914,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-051059-914_floor_b0,20261114-051059-914,floor,defective,true,high,"black arc on the front face, left side",gemini-3.1-pro-preview
+snap_20261114-051059-914_top_b0,20261114-051059-914,top,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-055500-789_arm_b0,20261114-055500-789,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-055500-789_floor_b0,20261114-055500-789,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-055500-789_top_b0,20261114-055500-789,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-061052-662_arm_b0,20261114-061052-662,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061052-662_floor_b0,20261114-061052-662,floor,defective,true,high,black arc on the left side of the front curved face,gemini-3.1-pro-preview
+snap_20261114-061052-662_top_b0,20261114-061052-662,top,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061230-797_arm_b0,20261114-061230-797,arm,defective,true,high,black tick mark on the flat side face,gemini-3.1-pro-preview
+snap_20261114-061230-797_floor_b0,20261114-061230-797,floor,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061230-797_top_b0,20261114-061230-797,top,defective,true,high,black arc on the right side face,gemini-3.1-pro-preview
+snap_20261114-061233-732_arm_b0,20261114-061233-732,arm,defective,true,high,black arc on the smooth side face,gemini-3.1-pro-preview
+snap_20261114-061233-732_floor_b0,20261114-061233-732,floor,defective,true,high,black 'V' shape on the top face,gemini-3.1-pro-preview
+snap_20261114-061233-732_top_b0,20261114-061233-732,top,defective,true,high,dark angled line on the top face,gemini-3.1-pro-preview
+snap_20261114-061236-625_arm_b0,20261114-061236-625,arm,defective,true,high,black arc on the left side face,gemini-3.1-pro-preview
+snap_20261114-061236-625_floor_b0,20261114-061236-625,floor,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061236-625_top_b0,20261114-061236-625,top,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061721-372_arm_b0,20261114-061721-372,arm,defective,true,medium,small faint black curve on the lower right face,gemini-3.1-pro-preview
+snap_20261114-061721-372_floor_b0,20261114-061721-372,floor,defective,true,high,black zigzag mark on the front-left face,gemini-3.1-pro-preview
+snap_20261114-061721-372_top_b0,20261114-061721-372,top,defective,true,high,black arc on the front face,gemini-3.1-pro-preview
+snap_20261114-061727-995_arm_b0,20261114-061727-995,arm,defective,true,high,black squiggly line on the bottom face,gemini-3.1-pro-preview
+snap_20261114-061727-995_floor_b0,20261114-061727-995,floor,defective,true,high,small dark scribble on the left side face,gemini-3.1-pro-preview
+snap_20261114-061727-995_top_b0,20261114-061727-995,top,defective,true,high,thin black arc on the left side face,gemini-3.1-pro-preview
+snap_20261114-061731-709_arm_b0,20261114-061731-709,arm,defective,true,high,black squiggle on the left face,gemini-3.1-pro-preview
+snap_20261114-061731-709_floor_b0,20261114-061731-709,floor,defective,true,high,black arc on the front face,gemini-3.1-pro-preview
+snap_20261114-061731-709_top_b0,20261114-061731-709,top,defective,true,high,black 'V' or checkmark shape on the right side face,gemini-3.1-pro-preview
+snap_20261114-061734-957_arm_b0,20261114-061734-957,arm,defective,true,high,small black tick mark on the right face,gemini-3.1-pro-preview
+snap_20261114-061734-957_floor_b0,20261114-061734-957,floor,defective,true,high,black squiggly line on the top face,gemini-3.1-pro-preview
+snap_20261114-061734-957_top_b0,20261114-061734-957,top,defective,true,high,black squiggly line or number '2' on the top face,gemini-3.1-pro-preview
+snap_20261114-061737-698_arm_b0,20261114-061737-698,arm,defective,true,high,black squiggly line on the top face,gemini-3.1-pro-preview
+snap_20261114-061737-698_floor_b0,20261114-061737-698,floor,defective,true,high,black mark on the top face,gemini-3.1-pro-preview
+snap_20261114-061737-698_top_b0,20261114-061737-698,top,defective,true,high,small black squiggle on the top face,gemini-3.1-pro-preview
+snap_20261114-061740-967_arm_b0,20261114-061740-967,arm,defective,true,high,small black dot on the left face,gemini-3.1-pro-preview
+snap_20261114-061740-967_floor_b0,20261114-061740-967,floor,defective,true,high,black squiggly line on the front face,gemini-3.1-pro-preview
+snap_20261114-061740-967_top_b0,20261114-061740-967,top,defective,true,high,black curved line resembling a smile on the front face,gemini-3.1-pro-preview
+snap_20261114-061744-536_arm_b0,20261114-061744-536,arm,defective,true,high,small black dot on the bottom face,gemini-3.1-pro-preview
+snap_20261114-061744-536_floor_b0,20261114-061744-536,floor,defective,true,high,black squiggly line on the left face,gemini-3.1-pro-preview
+snap_20261114-061744-536_top_b0,20261114-061744-536,top,defective,true,high,black arc on the front face,gemini-3.1-pro-preview
+snap_20261114-061807-653_arm_b0,20261114-061807-653,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061807-653_floor_b0,20261114-061807-653,floor,defective,true,high,diagonal line on the front face,gemini-3.1-pro-preview
+snap_20261114-061807-653_top_b0,20261114-061807-653,top,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061813-056_arm_b0,20261114-061813-056,arm,defective,true,high,black scribble on the lower left face,gemini-3.1-pro-preview
+snap_20261114-061813-056_floor_b0,20261114-061813-056,floor,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061813-056_top_b0,20261114-061813-056,top,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061820-859_arm_b0,20261114-061820-859,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061820-859_floor_b0,20261114-061820-859,floor,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061820-859_top_b0,20261114-061820-859,top,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061825-466_arm_b0,20261114-061825-466,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061825-466_floor_b0,20261114-061825-466,floor,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061825-466_top_b0,20261114-061825-466,top,defective,true,high,"diagonal black line on the front face, right side",gemini-3.1-pro-preview
+snap_20261114-061832-789_arm_b0,20261114-061832-789,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061832-789_floor_b0,20261114-061832-789,floor,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061832-789_top_b0,20261114-061832-789,top,defective,true,high,"diagonal black line on the front face, bottom right",gemini-3.1-pro-preview
+snap_20261114-061836-863_arm_b0,20261114-061836-863,arm,defective,true,high,black line on the top right face,gemini-3.1-pro-preview
+snap_20261114-061836-863_floor_b0,20261114-061836-863,floor,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061836-863_top_b0,20261114-061836-863,top,defective,true,high,thin black line on the top face,gemini-3.1-pro-preview
+snap_20261114-061847-779_arm_b0,20261114-061847-779,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061847-779_floor_b0,20261114-061847-779,floor,defective,true,high,black line on the left side of the front face,gemini-3.1-pro-preview
+snap_20261114-061847-779_top_b0,20261114-061847-779,top,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061851-240_arm_b0,20261114-061851-240,arm,defective,true,medium,small black dot on the middle stud,gemini-3.1-pro-preview
+snap_20261114-061851-240_floor_b0,20261114-061851-240,floor,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-061851-240_top_b0,20261114-061851-240,top,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062209-030_arm_b0,20261114-062209-030,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062209-030_floor_b0,20261114-062209-030,floor,defective,true,high,black scribble on the left side of the front face,gemini-3.1-pro-preview
+snap_20261114-062209-030_top_b0,20261114-062209-030,top,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062212-959_arm_b0,20261114-062212-959,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062212-959_floor_b0,20261114-062212-959,floor,defective,true,high,black mark on the left face,gemini-3.1-pro-preview
+snap_20261114-062212-959_top_b0,20261114-062212-959,top,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062220-491_arm_b0,20261114-062220-491,arm,defective,true,high,black vertical line on the left side face,gemini-3.1-pro-preview
+snap_20261114-062220-491_floor_b0,20261114-062220-491,floor,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062220-491_top_b0,20261114-062220-491,top,defective,true,high,"small black mark on the right side face, near the top edge",gemini-3.1-pro-preview
+snap_20261114-062223-726_arm_b0,20261114-062223-726,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062223-726_floor_b0,20261114-062223-726,floor,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062223-726_top_b0,20261114-062223-726,top,defective,true,high,thick black scribble on the side face,gemini-3.1-pro-preview
+snap_20261114-062228-802_arm_b0,20261114-062228-802,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062228-802_floor_b0,20261114-062228-802,floor,defective,true,high,"thick black scribble on the front face, right side",gemini-3.1-pro-preview
+snap_20261114-062228-802_top_b0,20261114-062228-802,top,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062422-006_arm_b0,20261114-062422-006,arm,defective,true,high,black scribble on the front-right face,gemini-3.1-pro-preview
+snap_20261114-062422-006_floor_b0,20261114-062422-006,floor,defective,true,high,black symbols drawn on the left and right faces,gemini-3.1-pro-preview
+snap_20261114-062422-006_top_b0,20261114-062422-006,top,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062425-701_arm_b0,20261114-062425-701,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062425-701_floor_b0,20261114-062425-701,floor,defective,true,high,"black asterisk on the front face, left side",gemini-3.1-pro-preview
+snap_20261114-062425-701_top_b0,20261114-062425-701,top,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062428-951_arm_b0,20261114-062428-951,arm,defective,true,high,black cross or 'x' shape on the front face,gemini-3.1-pro-preview
+snap_20261114-062428-951_floor_b0,20261114-062428-951,floor,defective,true,high,black star on the left face,gemini-3.1-pro-preview
+snap_20261114-062428-951_top_b0,20261114-062428-951,top,defective,true,high,black letter 'A' on the right face,gemini-3.1-pro-preview
+snap_20261114-062432-604_arm_b0,20261114-062432-604,arm,defective,true,high,black 'X' on the left-facing side,gemini-3.1-pro-preview
+snap_20261114-062432-604_floor_b0,20261114-062432-604,floor,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062432-604_top_b0,20261114-062432-604,top,defective,true,high,"black symbol on the front face, left side",gemini-3.1-pro-preview
+snap_20261114-062435-726_arm_b0,20261114-062435-726,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062435-726_floor_b0,20261114-062435-726,floor,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062435-726_top_b0,20261114-062435-726,top,defective,true,high,black asterisk-like mark on the front face,gemini-3.1-pro-preview
+snap_20261114-062439-824_arm_b0,20261114-062439-824,arm,defective,true,high,black cross mark on the top face,gemini-3.1-pro-preview
+snap_20261114-062439-824_floor_b0,20261114-062439-824,floor,defective,true,high,black drawn symbols on the front and top faces,gemini-3.1-pro-preview
+snap_20261114-062439-824_top_b0,20261114-062439-824,top,defective,true,high,black cross mark on the top face,gemini-3.1-pro-preview
+snap_20261114-062444-206_arm_b0,20261114-062444-206,arm,defective,true,high,"two black crosses, one on the top face and one on the front face",gemini-3.1-pro-preview
+snap_20261114-062444-206_floor_b0,20261114-062444-206,floor,defective,true,high,"black scribble on the top face, near the left edge",gemini-3.1-pro-preview
+snap_20261114-062444-206_top_b0,20261114-062444-206,top,defective,true,high,black scribble on the top face,gemini-3.1-pro-preview
+snap_20261114-062447-879_arm_b0,20261114-062447-879,arm,defective,true,high,"black scribble on the top face, near the top left corner",gemini-3.1-pro-preview
+snap_20261114-062447-879_floor_b0,20261114-062447-879,floor,defective,true,high,black scribble on the top face,gemini-3.1-pro-preview
+snap_20261114-062447-879_top_b0,20261114-062447-879,top,defective,true,high,black marks on the top and front faces,gemini-3.1-pro-preview
+snap_20261114-062451-505_arm_b0,20261114-062451-505,arm,defective,true,high,black scribble on the top face,gemini-3.1-pro-preview
+snap_20261114-062451-505_floor_b0,20261114-062451-505,floor,defective,true,high,"black mark on the top face, near the right edge",gemini-3.1-pro-preview
+snap_20261114-062451-505_top_b0,20261114-062451-505,top,defective,true,high,black marks on the top and left faces,gemini-3.1-pro-preview
+snap_20261114-062455-979_arm_b0,20261114-062455-979,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062455-979_floor_b0,20261114-062455-979,floor,defective,true,high,black scribble on the front face and another on the right face,gemini-3.1-pro-preview
+snap_20261114-062455-979_top_b0,20261114-062455-979,top,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062500-597_arm_b0,20261114-062500-597,arm,defective,true,high,black cross on the front-left face,gemini-3.1-pro-preview
+snap_20261114-062500-597_floor_b0,20261114-062500-597,floor,defective,true,high,black scribble on the left face,gemini-3.1-pro-preview
+snap_20261114-062500-597_top_b0,20261114-062500-597,top,defective,true,high,black scribble on the front face,gemini-3.1-pro-preview
+snap_20261114-062531-890_arm_b0,20261114-062531-890,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062531-890_floor_b0,20261114-062531-890,floor,defective,true,high,black 'N' shape on the bottom left of the front face,gemini-3.1-pro-preview
+snap_20261114-062531-890_top_b0,20261114-062531-890,top,defective,true,high,small black cross on the bottom right corner of the side face,gemini-3.1-pro-preview
+snap_20261114-062540-825_arm_b0,20261114-062540-825,arm,defective,true,high,small black mark on the bottom edge of the front face,gemini-3.1-pro-preview
+snap_20261114-062540-825_floor_b0,20261114-062540-825,floor,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062540-825_top_b0,20261114-062540-825,top,defective,true,high,black 'X' mark on the bottom left corner of the front face,gemini-3.1-pro-preview
+snap_20261114-062544-471_arm_b0,20261114-062544-471,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062544-471_floor_b0,20261114-062544-471,floor,defective,true,high,black cross on the bottom right of the front face,gemini-3.1-pro-preview
+snap_20261114-062544-471_top_b0,20261114-062544-471,top,defective,true,high,black scribble on the bottom right corner of the front face,gemini-3.1-pro-preview
+snap_20261114-062547-382_arm_b0,20261114-062547-382,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062547-382_floor_b0,20261114-062547-382,floor,defective,true,high,black cross mark on the bottom edge of the left face,gemini-3.1-pro-preview
+snap_20261114-062547-382_top_b0,20261114-062547-382,top,defective,true,high,black scribble on the bottom left corner of the front face,gemini-3.1-pro-preview
+snap_20261114-062550-803_arm_b0,20261114-062550-803,arm,defective,true,high,small black mark on the bottom edge of the right face,gemini-3.1-pro-preview
+snap_20261114-062550-803_floor_b0,20261114-062550-803,floor,defective,true,high,black 'X' on the left side of the front face,gemini-3.1-pro-preview
+snap_20261114-062550-803_top_b0,20261114-062550-803,top,defective,true,high,black scribble on the bottom right corner of the front face,gemini-3.1-pro-preview
+snap_20261114-062553-965_arm_b0,20261114-062553-965,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062553-965_floor_b0,20261114-062553-965,floor,defective,true,high,black mark resembling a '2' on the bottom right of the front face,gemini-3.1-pro-preview
+snap_20261114-062553-965_top_b0,20261114-062553-965,top,defective,true,high,black cross on the bottom right corner of the front face,gemini-3.1-pro-preview
+snap_20261114-062557-387_arm_b0,20261114-062557-387,arm,defective,true,high,black dot on the right face,gemini-3.1-pro-preview
+snap_20261114-062557-387_floor_b0,20261114-062557-387,floor,defective,true,high,"black squiggly line on the front face, bottom left",gemini-3.1-pro-preview
+snap_20261114-062557-387_top_b0,20261114-062557-387,top,defective,true,high,black cross mark on the bottom left corner of the front face,gemini-3.1-pro-preview
+snap_20261114-062603-152_arm_b0,20261114-062603-152,arm,defective,true,high,black dot on the left edge of the front face,gemini-3.1-pro-preview
+snap_20261114-062603-152_floor_b0,20261114-062603-152,floor,defective,true,high,"black scribble on the right face, near the top right corner",gemini-3.1-pro-preview
+snap_20261114-062603-152_top_b0,20261114-062603-152,top,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062605-895_arm_b0,20261114-062605-895,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062605-895_floor_b0,20261114-062605-895,floor,defective,true,high,"black 'X' mark on the front face, right side",gemini-3.1-pro-preview
+snap_20261114-062605-895_top_b0,20261114-062605-895,top,defective,true,high,"black 'Z' or 'N' shape on the front face, near the left edge",gemini-3.1-pro-preview
+snap_20261114-062612-219_arm_b0,20261114-062612-219,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062612-219_floor_b0,20261114-062612-219,floor,defective,true,high,black 'X' mark on the top right of the front face,gemini-3.1-pro-preview
+snap_20261114-062612-219_top_b0,20261114-062612-219,top,defective,true,high,black 'Z' shape on the front face,gemini-3.1-pro-preview
+snap_20261114-062619-755_arm_b0,20261114-062619-755,arm,defective,true,medium,small black dot on the right face near the top edge,gemini-3.1-pro-preview
+snap_20261114-062619-755_floor_b0,20261114-062619-755,floor,defective,true,high,"black 'X' mark on the front face, left side",gemini-3.1-pro-preview
+snap_20261114-062619-755_top_b0,20261114-062619-755,top,defective,true,high,black scribble/letter on the left face,gemini-3.1-pro-preview
+snap_20261114-062623-276_arm_b0,20261114-062623-276,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062623-276_floor_b0,20261114-062623-276,floor,defective,true,high,black 'Z' shape on the left side of the front face,gemini-3.1-pro-preview
+snap_20261114-062623-276_top_b0,20261114-062623-276,top,defective,true,high,black cross on the right side of the front face,gemini-3.1-pro-preview
+snap_20261114-062626-828_arm_b0,20261114-062626-828,arm,defective,false,high,,gemini-3.1-pro-preview
+snap_20261114-062626-828_floor_b0,20261114-062626-828,floor,defective,true,high,black squiggle on the left edge of the front face,gemini-3.1-pro-preview
+snap_20261114-062626-828_top_b0,20261114-062626-828,top,defective,true,high,black cross on the right side of the front face,gemini-3.1-pro-preview
+snap_20261114-062722-751_arm_b0,20261114-062722-751,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062722-751_floor_b0,20261114-062722-751,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062722-751_top_b0,20261114-062722-751,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062727-727_arm_b0,20261114-062727-727,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062727-727_floor_b0,20261114-062727-727,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062727-727_top_b0,20261114-062727-727,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062731-805_arm_b0,20261114-062731-805,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062737-483_arm_b0,20261114-062737-483,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062737-483_floor_b0,20261114-062737-483,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062737-483_top_b0,20261114-062737-483,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062801-005_arm_b0,20261114-062801-005,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062801-005_floor_b0,20261114-062801-005,floor,good,true,high,"small black dot on the bottom edge of the front face, towards the right",gemini-3.1-pro-preview
+snap_20261114-062801-005_top_b0,20261114-062801-005,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062809-878_arm_b0,20261114-062809-878,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062809-878_floor_b0,20261114-062809-878,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062809-878_top_b0,20261114-062809-878,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062838-307_arm_b0,20261114-062838-307,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062838-307_floor_b0,20261114-062838-307,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062838-307_top_b0,20261114-062838-307,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062842-346_arm_b0,20261114-062842-346,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062842-346_floor_b0,20261114-062842-346,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062842-346_top_b0,20261114-062842-346,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062846-611_arm_b0,20261114-062846-611,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062846-611_floor_b0,20261114-062846-611,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062846-611_top_b0,20261114-062846-611,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062855-496_arm_b0,20261114-062855-496,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062855-496_floor_b0,20261114-062855-496,floor,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-062855-496_top_b0,20261114-062855-496,top,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-063724-664_arm_b0,20261114-063724-664,arm,good,false,high,,gemini-3.1-pro-preview
+snap_20261114-063724-664_floor_b0,20261114-063724-664,floor,good,true,medium,"small black dot on the bottom edge of the left face, near the front corner",gemini-3.1-pro-preview
+snap_20261114-063724-664_top_b0,20261114-063724-664,top,good,false,high,,gemini-3.1-pro-preview

@@ -1,91 +1,96 @@
 crop_id,mark_visible,note
-snap_20261114-051059-914_top_b0,false,
-snap_20261114-051059-914_floor_b0,true,thin arc on the front face
+snap_20261114-050225-515_arm_b0,false,user review 2026-11-14: no mark
 snap_20261114-051059-914_arm_b0,false,
-snap_20261114-061052-662_top_b0,false,
-snap_20261114-061052-662_floor_b0,true,small caret on the front face
+snap_20261114-051059-914_floor_b0,true,thin arc on the front face
+snap_20261114-051059-914_top_b0,false,
+snap_20261114-055500-789_top_b0,true,user review 2026-11-14: mark visible
 snap_20261114-061052-662_arm_b0,false,
-snap_20261114-061230-797_top_b0,unsure,curve near the rounded edge
-snap_20261114-061230-797_floor_b0,false,
+snap_20261114-061052-662_floor_b0,true,small caret on the front face
+snap_20261114-061052-662_top_b0,false,
 snap_20261114-061230-797_arm_b0,true,arc
-snap_20261114-061233-732_top_b0,unsure,curve near the rounded edge
-snap_20261114-061233-732_floor_b0,true,caret top right
+snap_20261114-061230-797_floor_b0,false,
+snap_20261114-061230-797_top_b0,unsure,curve near the rounded edge
 snap_20261114-061233-732_arm_b0,true,arc
-snap_20261114-061236-625_top_b0,false,
-snap_20261114-061236-625_floor_b0,false,
+snap_20261114-061233-732_floor_b0,true,caret top right
+snap_20261114-061233-732_top_b0,unsure,curve near the rounded edge
 snap_20261114-061236-625_arm_b0,true,arc lower left
-snap_20261114-061721-372_top_b0,true,arc
-snap_20261114-061721-372_floor_b0,true,digit-like stroke
+snap_20261114-061236-625_floor_b0,false,
+snap_20261114-061236-625_top_b0,false,
 snap_20261114-061721-372_arm_b0,unsure,small stroke lower right
-snap_20261114-061727-995_top_b0,true,arc on the left face
-snap_20261114-061727-995_floor_b0,true,re-checked at 360 px: small mark at the left edge
+snap_20261114-061721-372_floor_b0,true,digit-like stroke
+snap_20261114-061721-372_top_b0,true,arc
 snap_20261114-061727-995_arm_b0,true,digit-like stroke
-snap_20261114-061731-709_top_b0,true,digit-like stroke
-snap_20261114-061731-709_floor_b0,true,arc
+snap_20261114-061727-995_floor_b0,true,re-checked at 360 px: small mark at the left edge
+snap_20261114-061727-995_top_b0,true,arc on the left face
 snap_20261114-061731-709_arm_b0,true,digit-like stroke
-snap_20261114-061734-957_top_b0,true,small stroke at the top
-snap_20261114-061734-957_floor_b0,true,re-checked at 360 px: squiggle on the top face
+snap_20261114-061731-709_floor_b0,true,arc
+snap_20261114-061731-709_top_b0,true,digit-like stroke
 snap_20261114-061734-957_arm_b0,true,short stroke
-snap_20261114-061737-698_top_b0,unsure,stroke at the top edge
-snap_20261114-061737-698_floor_b0,true,re-checked at 360 px: mark on the top face
+snap_20261114-061734-957_floor_b0,true,re-checked at 360 px: squiggle on the top face
+snap_20261114-061734-957_top_b0,true,small stroke at the top
 snap_20261114-061737-698_arm_b0,true,digit-like stroke
-snap_20261114-061740-967_top_b0,true,smile arc
-snap_20261114-061740-967_floor_b0,true,digit-like stroke
+snap_20261114-061737-698_floor_b0,true,re-checked at 360 px: mark on the top face
+snap_20261114-061737-698_top_b0,unsure,stroke at the top edge
 snap_20261114-061740-967_arm_b0,true,re-checked at 360 px: small dot on the left face
-snap_20261114-061744-536_top_b0,true,arc
-snap_20261114-061744-536_floor_b0,true,digit-like stroke
+snap_20261114-061740-967_floor_b0,true,digit-like stroke
+snap_20261114-061740-967_top_b0,true,smile arc
 snap_20261114-061744-536_arm_b0,unsure,faint stroke at the bottom
-snap_20261114-061807-653_top_b0,false,
-snap_20261114-061807-653_floor_b0,unsure,faint diagonal line (dark blue brick)
+snap_20261114-061744-536_floor_b0,true,digit-like stroke
+snap_20261114-061744-536_top_b0,true,arc
 snap_20261114-061807-653_arm_b0,false,
-snap_20261114-061813-056_top_b0,false,dark blue brick
-snap_20261114-061813-056_floor_b0,false,dark blue brick
+snap_20261114-061807-653_floor_b0,unsure,faint diagonal line (dark blue brick)
+snap_20261114-061807-653_top_b0,false,
 snap_20261114-061813-056_arm_b0,unsure,re-checked at 360 px: dark blue brick
-snap_20261114-061820-859_top_b0,false,dark blue brick
+snap_20261114-061813-056_floor_b0,false,dark blue brick
+snap_20261114-061813-056_top_b0,false,dark blue brick
+snap_20261114-061820-859_arm_b0,exclude,"user review 2026-11-14: brick not visible in this view, drop the crop"
 snap_20261114-061820-859_floor_b0,false,dark blue brick
-snap_20261114-061820-859_arm_b0,false,dark blue brick
-snap_20261114-061825-466_top_b0,unsure,faint diagonal line (dark blue brick)
-snap_20261114-061825-466_floor_b0,false,dark blue brick
+snap_20261114-061820-859_top_b0,false,dark blue brick
 snap_20261114-061825-466_arm_b0,false,dark blue brick
-snap_20261114-061832-789_top_b0,unsure,dark blue brick
-snap_20261114-061832-789_floor_b0,false,dark blue brick
+snap_20261114-061825-466_floor_b0,false,dark blue brick
+snap_20261114-061825-466_top_b0,unsure,faint diagonal line (dark blue brick)
 snap_20261114-061832-789_arm_b0,false,dark blue brick
-snap_20261114-061836-863_top_b0,unsure,re-checked at 360 px: dark blue brick
-snap_20261114-061836-863_floor_b0,false,dark blue brick
+snap_20261114-061832-789_floor_b0,false,dark blue brick
+snap_20261114-061832-789_top_b0,unsure,dark blue brick
 snap_20261114-061836-863_arm_b0,true,re-checked at 360 px: line on the top right face
-snap_20261114-061847-779_top_b0,false,dark blue brick
+snap_20261114-061836-863_floor_b0,false,dark blue brick
+snap_20261114-061836-863_top_b0,unsure,re-checked at 360 px: dark blue brick
+snap_20261114-061847-779_arm_b0,true,user review 2026-11-14: mark visible
 snap_20261114-061847-779_floor_b0,unsure,faint diagonal line (dark blue brick)
-snap_20261114-061847-779_arm_b0,false,dark blue brick
-snap_20261114-061851-240_top_b0,false,dark blue brick
-snap_20261114-061851-240_floor_b0,false,dark blue brick
+snap_20261114-061847-779_top_b0,false,dark blue brick
 snap_20261114-061851-240_arm_b0,unsure,re-checked at 360 px: dark blue brick
-snap_20261114-062209-030_top_b0,false,
+snap_20261114-061851-240_floor_b0,false,dark blue brick
+snap_20261114-061851-240_top_b0,false,dark blue brick
+snap_20261114-062209-030_arm_b0,exclude,"user review 2026-11-14: brick not visible in this view, drop the crop"
 snap_20261114-062209-030_floor_b0,true,stroke on the left face
-snap_20261114-062209-030_arm_b0,false,
-snap_20261114-062212-959_top_b0,false,
-snap_20261114-062212-959_floor_b0,true,diagonal stroke
+snap_20261114-062209-030_top_b0,false,
 snap_20261114-062212-959_arm_b0,false,
-snap_20261114-062220-491_top_b0,true,short stroke at the right edge
-snap_20261114-062220-491_floor_b0,false,
+snap_20261114-062212-959_floor_b0,true,diagonal stroke
+snap_20261114-062212-959_top_b0,false,
 snap_20261114-062220-491_arm_b0,true,stroke on the side face
-snap_20261114-062223-726_top_b0,true,stroke
-snap_20261114-062223-726_floor_b0,false,
+snap_20261114-062220-491_floor_b0,false,
+snap_20261114-062220-491_top_b0,true,short stroke at the right edge
 snap_20261114-062223-726_arm_b0,false,
-snap_20261114-062228-802_top_b0,false,
-snap_20261114-062228-802_floor_b0,true,stroke
+snap_20261114-062223-726_floor_b0,false,
+snap_20261114-062223-726_top_b0,true,stroke
 snap_20261114-062228-802_arm_b0,false,
-snap_20261114-062422-006_top_b0,false,
-snap_20261114-062422-006_floor_b0,true,two star marks
+snap_20261114-062228-802_floor_b0,true,stroke
+snap_20261114-062228-802_top_b0,false,
 snap_20261114-062422-006_arm_b0,true,star mark
-snap_20261114-062425-701_top_b0,false,
+snap_20261114-062422-006_floor_b0,true,two star marks
+snap_20261114-062422-006_top_b0,false,
+snap_20261114-062425-701_arm_b0,true,user review 2026-11-14: mark visible
 snap_20261114-062425-701_floor_b0,true,star mark
-snap_20261114-062425-701_arm_b0,true,star mark
-snap_20261114-062428-951_top_b0,true,star mark
-snap_20261114-062428-951_floor_b0,true,star mark
+snap_20261114-062425-701_top_b0,false,
 snap_20261114-062428-951_arm_b0,true,star mark
-snap_20261114-062432-604_top_b0,true,star mark
-snap_20261114-062432-604_floor_b0,false,
+snap_20261114-062428-951_floor_b0,true,star mark
+snap_20261114-062428-951_top_b0,true,star mark
 snap_20261114-062432-604_arm_b0,true,star mark
-snap_20261114-062435-726_top_b0,true,star mark
-snap_20261114-062435-726_floor_b0,false,
+snap_20261114-062432-604_floor_b0,false,
+snap_20261114-062432-604_top_b0,true,star mark
 snap_20261114-062435-726_arm_b0,false,
+snap_20261114-062435-726_floor_b0,false,
+snap_20261114-062435-726_top_b0,true,star mark
+snap_20261114-062540-825_floor_b0,true,user review 2026-11-14: mark visible
+snap_20261114-062801-005_floor_b0,false,user review 2026-11-14: no mark
+snap_20261114-063724-664_floor_b0,false,user review 2026-11-14: no mark
