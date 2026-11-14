@@ -1,0 +1,22 @@
+pick_1:
+  joints:
+    shoulder_pan: 6.3
+    shoulder_lift: 1.81
+    elbow_flex: 51.04
+    wrist_flex: 56.32
+    wrist_roll: 0.92
+    gripper: 1.72
+  from: leader
+  saved: '2026-11-13T18:26:18'
+observe:
+  joints:
+    shoulder_pan: -12.76
+    shoulder_lift: -97.0
+    elbow_flex: 26.4
+    wrist_flex: 97.0
+    wrist_roll: -59.58
+    gripper: 93.18
+  from: follower
+  saved: '2026-11-14T05:55:00'
+  snapshot: 20261114-055500-789
+  note: home pose for brick detection (wrist camera sees the whole sheet). Read from Studio's teleop session (port held by Studio) as shoulder_lift -99.83, wrist_flex 98.78; both pulled in to -97.0 / 97.0 (about 3 deg) because goto keeps 3 units from the calibrated range ends (mechanical stops).

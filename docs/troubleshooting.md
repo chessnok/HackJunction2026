@@ -13,6 +13,52 @@ Template:
 - Refs: ADRs, log entries, upstream issues
 ```
 
+## T-015. Local training on the Arc iGPU hangs at step 0: GPU page fault ("Engine memory CAT error")
+
+- Date: 2026-11-14 · Status: Open
+- Symptom: Studio local training job (ACT, 51.6 M params, dataset 431a71f7: 6 episodes, 2448 frames,
+  cameras 848×480, 848×480, 1024×768, batch 8) stays `running` at progress 0 with no metrics. Job log ends
+  at `Epoch 0/4 0/253 … 0.00it/s` (02:33:37). The trainer process uses one core at 99 % and its
+  8 dataloader workers are idle; the GPU compute GT never idles.
+- Cause: at 02:33:36, on the first training step, the `xe` driver logged
+  `GT0: Engine memory CAT error [18]: class=ccs`, `Engine reset: engine_class=ccs`,
+  `Timedout job … in python [<trainer pid>]`, `Xe device coredump has been created`. The GPU job was
+  killed by the driver, and the trainer waits forever. Likely a bug in the Arc B390 (Panther Lake) +
+  kernel 7.0 `xe` + compute runtime 26.05 + torch 2.11+xpu stack, not in our data. The devcoredump
+  expired before it could be saved (the kernel keeps it about 5 min, root-only).
+- Workaround: stop the job; train on CPU (job `device: cpu`) or on Modal (blocked by T-014). Retrying
+  on XPU is untested. For a bug report, copy `/sys/class/drm/card1/device/devcoredump/data`
+  (sudo) within 5 minutes of the next hang.
+
+## T-014. Studio "Deploy and connect" to Modal fails after 2 s with a generic message
+
+- Date: 2026-11-14 · Status: Open (waiting for the Modal credit / spend limit)
+- Symptom: Studio → Settings → Training Targets → Modal → Deploy and connect: "Deployment failed or
+  timed out. Check the Modal dashboard…". Backend log: `RuntimeError: The Modal deployment command
+  failed` (`services/modal_deployment.py:138`) 2 s after `POST /api/remote-trainers/providers/modal/deploy`.
+- Cause: Studio runs `python -m modal deploy --env main src/trainer/modal_app.py` with stdout and stderr
+  sent to DEVNULL, so the real error is hidden. Running the same command by hand shows:
+  `Workspace … has exceeded its spend limit` (the hackathon credit not redeemed yet, or a $0 spend
+  limit). Auth, environment `main`, modal 1.6.3 and the app script itself are fine; nothing was
+  created in Modal (no apps or volumes in `main`).
+- Fix: redeem the Modal credit / raise the workspace spend limit on modal.com, then retry Deploy and
+  connect. Studio improvement for our fork: log the deploy command's output instead of discarding it.
+
+## T-013. Every camera preview fails: "no publisher responded within timeout"
+
+- Date: 2026-11-13 · Status: Workaround
+- Symptom: after Studio was force-killed, every camera preview in Studio failed with
+  `physicalai.capture.errors.CaptureTimeoutError: no publisher responded within timeout`
+  (`api/camera.py:135` → `physicalai/capture/transport/_shared_camera.py:326`). Opening the same
+  D415 directly with pyrealsense2 at the same mode worked (about 20 fps).
+- Cause: cameras are shared between processes via iceoryx2 (shared memory, `/tmp/iceoryx2`,
+  `/dev/shm/iox2_*`). `SharedCamera.connect()` only starts a publisher when `_probe_service()` finds
+  none. SIGKILLed publishers (T-012) left their services behind, so the probe saw a phantom publisher
+  and Studio waited for frames forever. `Node.try_cleanup_dead_nodes()` reported 0 dead nodes because
+  the running backend held the stale services open.
+- Fix / workaround: stop Studio completely, then (with no process mapping iceoryx2) delete
+  `/tmp/iceoryx2` and `/dev/shm/iox2_*`, then start Studio. `scripts/studio_stop.sh` now does this.
+
 ## T-012. Studio backend ignores SIGTERM; orphaned camera workers keep cameras busy
 
 - Date: 2026-11-13 · Status: Workaround

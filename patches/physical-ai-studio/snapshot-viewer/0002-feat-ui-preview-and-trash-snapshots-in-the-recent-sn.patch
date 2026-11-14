@@ -1,0 +1,436 @@
+From 67a1ffe54cf341fa4b505638a3b6460056e5b0dc Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Sat, 14 Nov 2026 05:13:27 -0800
+Subject: [PATCH 2/2] feat(ui): preview and trash snapshots in the recent
+ snapshots list
+
+- Each row of the Recent list shows a thumbnail of the snapshot (its first
+  camera's color image). Clicking it opens a full-screen dialog with all of
+  its images side by side, every camera's color image and colorized depth
+  (<cam>.depth_preview.png) where there is one, captioned "<camera>, color" /
+  "<camera>, depth", and its label, comment, capture time and environment.
+  Closing it goes back to the list.
+- A trash button per row asks first, in a modal alert dialog (Cancel has
+  focus; Enter and Escape act on the dialog, not on the episode hotkeys), then
+  moves the snapshot to the trash on the backend. A toast says where it went
+  (and if the CSV lags behind), and the list is fetched again; after a failure
+  too.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../state-snapshot-controls.tsx               |   9 +-
+ .../state-snapshot-viewer.module.css          |  44 ++++
+ .../runtime-session/state-snapshot-viewer.tsx | 189 ++++++++++++++++++
+ .../runtime-session/state-snapshot.test.tsx   |  95 +++++++++
+ .../runtime-session/state-snapshot.tsx        |   7 +-
+ 5 files changed, 340 insertions(+), 4 deletions(-)
+ create mode 100644 application/ui/src/features/runtime-session/state-snapshot-viewer.module.css
+ create mode 100644 application/ui/src/features/runtime-session/state-snapshot-viewer.tsx
+
+diff --git a/application/ui/src/features/runtime-session/state-snapshot-controls.tsx b/application/ui/src/features/runtime-session/state-snapshot-controls.tsx
+index 6201f4d2..15a76f4b 100644
+--- a/application/ui/src/features/runtime-session/state-snapshot-controls.tsx
++++ b/application/ui/src/features/runtime-session/state-snapshot-controls.tsx
+@@ -24,6 +24,7 @@ import { SchemaStateSnapshot, SchemaStateSnapshotLabelUpdate } from '../../api/o
+ import { formatKeyCombo, keyboardEventToCombo } from '../hotkeys/key-combo';
+ import { snapshotListKey, useStateSnapshot } from './state-snapshot';
+ import { COMMENT_MAX_LENGTH } from './state-snapshot-label';
++import { SnapshotThumbnail, TrashSnapshot } from './state-snapshot-viewer';
+ 
+ const RECENT_SNAPSHOTS = 8;
+ const ERROR_TOAST = { timeout: 10_000 };
+@@ -150,8 +151,12 @@ const RecentSnapshot = ({ project_id, snapshot }: { project_id: string; snapshot
+ 
+     return (
+         <Flex direction='column' gap='size-50'>
+-            <Flex alignItems='center' justifyContent='space-between' gap='size-100'>
+-                <Text>{time}</Text>
++            <Flex alignItems='center' gap='size-100'>
++                <SnapshotThumbnail project_id={project_id} snapshot={snapshot} time={time} />
++                <Text flex>{time}</Text>
++                <TrashSnapshot project_id={project_id} snapshot={snapshot} time={time} />
++            </Flex>
++            <Flex alignItems='center' justifyContent='end' gap='size-100'>
+                 {defective === null ? (
+                     <Flex alignItems='center' gap='size-100'>
+                         <Text>Unlabelled</Text>
+diff --git a/application/ui/src/features/runtime-session/state-snapshot-viewer.module.css b/application/ui/src/features/runtime-session/state-snapshot-viewer.module.css
+new file mode 100644
+index 00000000..20685718
+--- /dev/null
++++ b/application/ui/src/features/runtime-session/state-snapshot-viewer.module.css
+@@ -0,0 +1,44 @@
++.thumbnail {
++    padding: 0;
++    border: 1px solid var(--spectrum-global-color-gray-400);
++    border-radius: var(--spectrum-alias-border-radius-regular);
++    background: var(--spectrum-global-color-gray-50);
++    cursor: zoom-in;
++    line-height: 0;
++    flex: none;
++}
++
++.thumbnail:focus-visible {
++    outline: 2px solid var(--spectrum-global-color-blue-400);
++    outline-offset: 1px;
++}
++
++.thumbnail img {
++    display: block;
++    width: 72px;
++    height: 41px;
++    object-fit: cover;
++}
++
++.images {
++    display: flex;
++    flex-wrap: wrap;
++    gap: var(--spectrum-global-dimension-size-200);
++}
++
++.figure {
++    margin: 0;
++    flex: 1 1 360px;
++    max-width: 100%;
++}
++
++.figure img {
++    display: block;
++    width: 100%;
++    height: auto;
++    background: black;
++}
++
++.figure figcaption {
++    margin-top: var(--spectrum-global-dimension-size-50);
++}
+diff --git a/application/ui/src/features/runtime-session/state-snapshot-viewer.tsx b/application/ui/src/features/runtime-session/state-snapshot-viewer.tsx
+new file mode 100644
+index 00000000..e76501c0
+--- /dev/null
++++ b/application/ui/src/features/runtime-session/state-snapshot-viewer.tsx
+@@ -0,0 +1,189 @@
++import { useState } from 'react';
++
++import {
++    ActionButton,
++    AlertDialog,
++    Button,
++    ButtonGroup,
++    Content,
++    Dialog,
++    DialogContainer,
++    DialogTrigger,
++    Divider,
++    Flex,
++    Heading,
++    Text,
++    toast,
++} from '@geti-ui/ui';
++import { Delete } from '@geti-ui/ui/icons';
++import { useQueryClient } from '@tanstack/react-query';
++
++import { $api, fetchClient } from '../../api/client';
++import { getApiErrorMessage } from '../../api/errors';
++import { SchemaStateSnapshot } from '../../api/openapi-spec';
++import { labelOf, snapshotListKey } from './state-snapshot';
++
++import classes from './state-snapshot-viewer.module.css';
++
++const TOAST = { timeout: 10_000 };
++
++/** The URL of one of a snapshot's images, such as `top.color.png`. */
++export const snapshotFileUrl = (project_id: string, snapshot_id: string, name: string): string =>
++    fetchClient.PATH('/api/projects/{project_id}/state_snapshots/{snapshot_id}/files/{name}', {
++        params: { path: { project_id, snapshot_id, name } },
++    });
++
++interface SnapshotImage {
++    name: string;
++    caption: string;
++}
++
++/** What a person can look at: every camera's color image, and its colorized depth if it has depth. */
++export const snapshotImages = (snapshot: SchemaStateSnapshot): SnapshotImage[] =>
++    snapshot.cameras.flatMap((camera) =>
++        [
++            { suffix: '.color.png', kind: 'color' },
++            { suffix: '.depth_preview.png', kind: 'depth' },
++        ].flatMap(({ suffix, kind }) => {
++            const name = camera.files.find((file) => file.endsWith(suffix));
++            return name === undefined ? [] : [{ name, caption: `${camera.name}, ${kind}` }];
++        })
++    );
++
++const SnapshotPreview = ({
++    project_id,
++    snapshot,
++    time,
++    onClose,
++}: {
++    project_id: string;
++    snapshot: SchemaStateSnapshot;
++    time: string;
++    onClose: () => void;
++}) => {
++    const images = snapshotImages(snapshot);
++    const comment = snapshot.comment ? `"${snapshot.comment}"` : 'no comment';
++    const capturedAt = new Date(snapshot.captured_at).toLocaleString();
++
++    return (
++        <Dialog>
++            <Heading>Snapshot of {time}</Heading>
++            <Divider />
++            <Content>
++                <Flex direction='column' gap='size-200'>
++                    <Text>
++                        {labelOf(snapshot)}, {comment}. Captured {capturedAt}
++                        {snapshot.environment_name ? ` in ${snapshot.environment_name}` : ''}.
++                    </Text>
++                    {images.length === 0 ? (
++                        <Text>This snapshot has no images.</Text>
++                    ) : (
++                        <div className={classes.images}>
++                            {images.map(({ name, caption }) => (
++                                <figure key={name} className={classes.figure}>
++                                    <img src={snapshotFileUrl(project_id, snapshot.snapshot_id, name)} alt={caption} />
++                                    <figcaption>{caption}</figcaption>
++                                </figure>
++                            ))}
++                        </div>
++                    )}
++                </Flex>
++            </Content>
++            <ButtonGroup>
++                <Button variant='secondary' onPress={onClose}>
++                    Close
++                </Button>
++            </ButtonGroup>
++        </Dialog>
++    );
++};
++
++/** A small image of the snapshot (its first camera's color image); a click shows all of its images. */
++export const SnapshotThumbnail = ({
++    project_id,
++    snapshot,
++    time,
++}: {
++    project_id: string;
++    snapshot: SchemaStateSnapshot;
++    time: string;
++}) => {
++    const [isOpen, setIsOpen] = useState(false);
++    const first = snapshotImages(snapshot)[0];
++
++    if (first === undefined) {
++        return null;
++    }
++    return (
++        <>
++            <button
++                type='button'
++                className={classes.thumbnail}
++                onClick={() => setIsOpen(true)}
++                aria-label={`Show snapshot of ${time}`}
++            >
++                <img src={snapshotFileUrl(project_id, snapshot.snapshot_id, first.name)} alt='' loading='lazy' />
++            </button>
++            <DialogContainer type='fullscreen' onDismiss={() => setIsOpen(false)}>
++                {isOpen && (
++                    <SnapshotPreview
++                        project_id={project_id}
++                        snapshot={snapshot}
++                        time={time}
++                        onClose={() => setIsOpen(false)}
++                    />
++                )}
++            </DialogContainer>
++        </>
++    );
++};
++
++/**
++ * Moves a snapshot to the trash after a confirmation, in a modal dialog: Enter and Escape there
++ * act on the dialog, never on the page's episode hotkeys. Nothing is deleted on the backend.
++ */
++export const TrashSnapshot = ({
++    project_id,
++    snapshot,
++    time,
++}: {
++    project_id: string;
++    snapshot: SchemaStateSnapshot;
++    time: string;
++}) => {
++    const queryClient = useQueryClient();
++    // Callbacks on the mutation itself: the row is gone once the list is fetched again.
++    const { mutate } = $api.useMutation('delete', '/api/projects/{project_id}/state_snapshots/{snapshot_id}', {
++        meta: { invalidates: [snapshotListKey(project_id)] },
++        onSuccess: (trashed) => {
++            toast.positive(`Snapshot of ${time} moved to trash: ${trashed.moved_to}`, TOAST);
++            if (trashed.csv_warning) {
++                toast.info(trashed.csv_warning, TOAST);
++            }
++        },
++        onError: (error) => {
++            const reason = getApiErrorMessage(error) ?? 'the backend did not answer.';
++            toast.negative(`Could not move the snapshot of ${time} to trash: ${reason}`, TOAST);
++            void queryClient.invalidateQueries({ queryKey: snapshotListKey(project_id) });
++        },
++    });
++
++    return (
++        <DialogTrigger type='modal'>
++            <ActionButton isQuiet aria-label={`Move snapshot of ${time} to trash`}>
++                <Delete />
++            </ActionButton>
++            <AlertDialog
++                title='Move this snapshot to trash?'
++                variant='destructive'
++                primaryActionLabel='Move to trash'
++                cancelLabel='Cancel'
++                autoFocusButton='cancel'
++                onPrimaryAction={() => mutate({ params: { path: { project_id, snapshot_id: snapshot.snapshot_id } } })}
++            >
++                The snapshot of {time} ({labelOf(snapshot).toLowerCase()}) leaves the list and snapshots.csv. Its folder
++                is moved to state_snapshots_trash in Studio&apos;s storage folder, from where it can be moved back.
++            </AlertDialog>
++        </DialogTrigger>
++    );
++};
+diff --git a/application/ui/src/features/runtime-session/state-snapshot.test.tsx b/application/ui/src/features/runtime-session/state-snapshot.test.tsx
+index 85809974..5df30e4a 100644
+--- a/application/ui/src/features/runtime-session/state-snapshot.test.tsx
++++ b/application/ui/src/features/runtime-session/state-snapshot.test.tsx
+@@ -576,6 +576,101 @@ describe('recent snapshots', () => {
+     });
+ });
+ 
++describe('viewing and deleting a recent snapshot', () => {
++    const WITH_DEPTH: SchemaStateSnapshot = {
++        ...SNAPSHOT,
++        defective: true,
++        comment: 'dent',
++        cameras: [
++            {
++                name: 'Top',
++                key: 'top',
++                files: ['top.color.png', 'top.depth.png', 'top.depth_preview.png'],
++                color: true,
++                depth: true,
++            },
++            { name: 'Arm', key: 'arm', files: ['arm.color.png'], color: true, depth: false },
++        ],
++    };
++
++    it('shows a thumbnail, and all images with the label in a preview', async () => {
++        mockSettings();
++        mockRecent([WITH_DEPTH]);
++        const user = userEvent.setup();
++        render(<Controls />);
++
++        const list = await openRecent(user);
++        const thumbnail = await within(list).findByRole('button', { name: 'Show snapshot of 17:15:00.123' });
++        expect(thumbnail.querySelector('img')?.getAttribute('src')).toContain(
++            '/api/projects/project-1/state_snapshots/20261113-171500-123/files/top.color.png'
++        );
++        await user.click(thumbnail);
++
++        const preview = await screen.findByRole('dialog', { name: 'Snapshot of 17:15:00.123' });
++        expect(
++            within(preview)
++                .getAllByRole('img')
++                .map((image) => image.getAttribute('alt'))
++        ).toEqual(['Top, color', 'Top, depth', 'Arm, color']);
++        expect(within(preview).getByRole('img', { name: 'Top, depth' }).getAttribute('src')).toContain(
++            '/files/top.depth_preview.png'
++        );
++        expect(within(preview).getByText(/^Defective, "dent"\. Captured /)).toBeInTheDocument();
++
++        await user.click(within(preview).getByRole('button', { name: 'Close' }));
++        await waitFor(() =>
++            expect(screen.queryByRole('dialog', { name: 'Snapshot of 17:15:00.123' })).not.toBeInTheDocument()
++        );
++        expect(screen.getByRole('switch', { name: 'Defective, snapshot of 17:15:00.123' })).toBeInTheDocument();
++    });
++
++    it('moves a snapshot to the trash after a confirmation that keeps Escape from the page', async () => {
++        mockSettings();
++        const { listRequests } = mockRecent([WITH_DEPTH]);
++        const deletes: string[] = [];
++        server.use(
++            http.delete('/api/projects/{project_id}/state_snapshots/{snapshot_id}', ({ params }) => {
++                deletes.push(String(params.snapshot_id));
++                server.use(http.get('/api/projects/{project_id}/state_snapshots', () => HttpResponse.json([])));
++                return HttpResponse.json({
++                    snapshot_id: String(params.snapshot_id),
++                    moved_to: `/storage/state_snapshots_trash/20261114-120000/project-1/${params.snapshot_id}`,
++                    csv_warning: null,
++                });
++            })
++        );
++        const notify = rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
++        const startEpisode = rs.fn();
++        const discardEpisode = rs.fn();
++        const user = userEvent.setup();
++        render(
++            <Controls>
++                <RecordingHotkeys start={startEpisode} discard={discardEpisode} />
++            </Controls>
++        );
++
++        const list = await openRecent(user);
++        const trash = await within(list).findByRole('button', { name: 'Move snapshot of 17:15:00.123 to trash' });
++        await user.click(trash);
++        await screen.findByRole('alertdialog');
++        await user.keyboard('{Escape}');
++        await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
++        expect(discardEpisode).not.toHaveBeenCalled();
++        expect(deletes).toEqual([]);
++
++        await user.click(trash);
++        const confirm = await screen.findByRole('alertdialog');
++        await user.click(within(confirm).getByRole('button', { name: 'Move to trash' }));
++
++        await waitFor(() => expect(notify).toHaveBeenCalledTimes(1));
++        expect(deletes).toEqual([SNAPSHOT.snapshot_id]);
++        expect(notify.mock.calls[0][0]).toContain('moved to trash: /storage/state_snapshots_trash/');
++        await within(list).findByText('No snapshots yet.');
++        expect(listRequests.length).toBeGreaterThanOrEqual(1);
++        expect(startEpisode).not.toHaveBeenCalled();
++    });
++});
++
+ describe('readSnapshotLabel', () => {
+     it('starts unlabelled from nothing or from a value it does not understand', () => {
+         expect(readSnapshotLabel('project-1')).toEqual({ defective: false, comment: '' });
+diff --git a/application/ui/src/features/runtime-session/state-snapshot.tsx b/application/ui/src/features/runtime-session/state-snapshot.tsx
+index f29fbfc0..7664bae9 100644
+--- a/application/ui/src/features/runtime-session/state-snapshot.tsx
++++ b/application/ui/src/features/runtime-session/state-snapshot.tsx
+@@ -13,6 +13,10 @@ import { readSnapshotLabel, SnapshotLabel, writeSnapshotLabel } from './state-sn
+ const SNAPSHOT_TOAST = { timeout: 8_000 };
+ const SNAPSHOT_ERROR_TOAST = { timeout: 10_000 };
+ 
++/** "Defective", "Good", or "Unlabelled" for a snapshot taken before labels existed. */
++export const labelOf = (snapshot: Pick<SchemaStateSnapshot, 'defective'>): string =>
++    snapshot.defective == null ? 'Unlabelled' : snapshot.defective ? 'Defective' : 'Good';
++
+ /** 'Defective snapshot "scratch" saved to …: top (color, depth), arm (color); follower and leader joints.' */
+ export const describeSnapshot = (snapshot: SchemaStateSnapshot): string => {
+     const cameras = snapshot.cameras
+@@ -27,9 +31,8 @@ export const describeSnapshot = (snapshot: SchemaStateSnapshot): string => {
+         robots !== '' ? `${robots} joints` : 'no joints',
+     ];
+     const warnings = (snapshot.warnings ?? []).length > 0 ? ` ${(snapshot.warnings ?? []).join(' ')}` : '';
+-    const kind = snapshot.defective == null ? 'Unlabelled' : snapshot.defective ? 'Defective' : 'Good';
+     const comment = snapshot.comment ? ` "${snapshot.comment}"` : '';
+-    return `${kind} snapshot${comment} saved to ${snapshot.path}: ${parts.join('; ')}.${warnings}`;
++    return `${labelOf(snapshot)} snapshot${comment} saved to ${snapshot.path}: ${parts.join('; ')}.${warnings}`;
+ };
+ 
+ /** The list of a project's snapshots; captures and label changes refresh it. */
+-- 
+2.53.0
+

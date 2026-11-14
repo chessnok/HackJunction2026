@@ -1,0 +1,115 @@
+From e1b578583b0dd7cce4b4ff2fa3c998bc28c903bd Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Fri, 13 Nov 2026 16:56:41 -0800
+Subject: [PATCH 05/13] feat(backend): warn when a dataset records faster than
+ its cameras
+
+A dataset samples every camera's latest frame at its own rate, so a camera at
+15 fps (or 8) in a 30 fps dataset has each frame recorded twice (or four
+times). Loading such a dataset now reports it on the session, naming the
+cameras and their rates.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../backend/src/runtime_session/dataset.py     | 18 +++++++++++++++++-
+ .../backend/src/runtime_session/session.py     | 11 +++++++++--
+ .../tests/runtime_session/test_recording.py    | 15 +++++++++++++++
+ 3 files changed, 41 insertions(+), 3 deletions(-)
+
+diff --git a/application/backend/src/runtime_session/dataset.py b/application/backend/src/runtime_session/dataset.py
+index 56aaa44..09a5a16 100644
+--- a/application/backend/src/runtime_session/dataset.py
++++ b/application/backend/src/runtime_session/dataset.py
+@@ -29,11 +29,12 @@ from workers import dataset_worker as dataset_rpc
+ from workers.dataset_worker import DatasetWorker, RecordingStatus
+ 
+ if TYPE_CHECKING:
+-    from collections.abc import Iterator
++    from collections.abc import Iterable, Iterator
+     from uuid import UUID
+ 
+     from runtime_session.store import Store
+     from schemas.dataset import Dataset
++    from schemas.project_camera import Camera
+ 
+ COMPONENT = "dataset"
+ """What a recording reports as."""
+@@ -125,6 +126,21 @@ def _image_spec(feature: dict[str, Any]) -> ImageSpec:
+     return ImageSpec(height, width, channels, "uint16" if is_depth else "uint8")
+ 
+ 
++def slow_cameras_warning(cameras: Iterable[Camera], fps: int) -> str | None:
++    """Why recording at ``fps`` repeats frames of cameras that deliver fewer, or ``None`` if none does.
++
++    A dataset samples every camera's latest frame at its own rate, so a camera at 15 fps in a
++    30 fps dataset has each of its frames recorded twice.
++    """
++    slow = [f"{camera.name!r} ({camera.payload.fps} fps)" for camera in cameras if camera.payload.fps < fps]
++    if not slow:
++        return None
++    return (
++        f"The dataset records at {fps} fps, faster than camera(s) {', '.join(slow)}: their frames will be "
++        f"repeated. Set those cameras to {fps} fps, or record a new dataset at a lower rate."
++    )
++
++
+ def lerobot_features(spec: FeatureSpec) -> dict[str, Any]:
+     """The LeRobot feature metadata a new dataset is created with, from the session's spec."""
+     # Imported here: lerobot is heavy, and only the dataset worker's process needs it.
+diff --git a/application/backend/src/runtime_session/session.py b/application/backend/src/runtime_session/session.py
+index b3b7eeb..b4a1769 100644
+--- a/application/backend/src/runtime_session/session.py
++++ b/application/backend/src/runtime_session/session.py
+@@ -41,7 +41,7 @@ from runtime_session.bus import EVENTS, Bus, BusRequestError, command_key, publi
+ from runtime_session.controls import build_control
+ from runtime_session.controls.base import CHANGED as CONTROL_CHANGED
+ from runtime_session.dataset import COMPONENT as DATASET
+-from runtime_session.dataset import Recording, dataset_spec
++from runtime_session.dataset import Recording, dataset_spec, slow_cameras_warning
+ from runtime_session.environment import COMPONENT as ENVIRONMENT
+ from runtime_session.environment import RELOAD, Environment, describe_environment
+ from runtime_session.model import COMPONENT as MODEL
+@@ -522,9 +522,16 @@ class RuntimeSession:
+             environment = self._environment.require("Load an environment first.")
+             # Swapping: the loaded one is finished (copied back) first.
+             await self._dataset.unload()
+-            await self._dataset.load(self._recording(dataset, environment.robot_type, fps))
++            recording = await self._dataset.load(self._recording(dataset, environment.robot_type, fps))
+             logger.info("Session {} records into dataset {!r}", self.id, dataset.name)
+         self._emit(StateMessage(data=self.state()))
++        if warning := slow_cameras_warning(environment.environment.description.cameras.values(), recording.fps):
++            logger.warning("Session {}: {}", self.id, warning)
++            self._emit(
++                ErrorMessage(
++                    component="dataset", message=warning, error_code="camera_fps_below_dataset_fps", session_alive=True
++                )
++            )
+ 
+     def _recording(self, dataset: Dataset, robot_type: str, fps: int | None) -> Recording:
+         # The store is there with any environment, even one that failed to connect.
+diff --git a/application/backend/tests/runtime_session/test_recording.py b/application/backend/tests/runtime_session/test_recording.py
+index 9b8a7a8..755f9c9 100644
+--- a/application/backend/tests/runtime_session/test_recording.py
++++ b/application/backend/tests/runtime_session/test_recording.py
+@@ -582,3 +582,18 @@ async def test_a_real_rgbd_recording_lands_in_the_dataset_with_depth_aligned_to_
+     assert lerobot.meta.total_episodes == 2
+     last = lerobot[len(lerobot) - 1]["observation.images.top_depth"].numpy()[0]
+     assert np.abs(last[~holes] - expected[~holes]).max() <= 1.5
++
++
++async def test_recording_faster_than_a_camera_warns_that_frames_repeat(new_session, fake_cameras, fake_worker) -> None:
++    dataset = _dataset()
++    session = await new_session()
++    environment = make_environment()
++    environment.cameras[0].payload.fps = 15
++    await session.load_environment(environment)
++    errors: list = []
++    with patch.object(session, "_emit", side_effect=errors.append):
++        await session.load_dataset(dataset, 30)
++    warnings = [message for message in errors if getattr(message, "error_code", None) == "camera_fps_below_dataset_fps"]
++    assert len(warnings) == 1
++    assert "'Cam 0' (15 fps)" in warnings[0].message
++    assert warnings[0].session_alive
+-- 
+2.53.0
+

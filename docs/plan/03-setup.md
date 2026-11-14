@@ -14,7 +14,7 @@ Claude Code). Never `pip install` into Studio's environment.
 | Env | Contents | Used for |
 | --- | --- | --- |
 | **Studio backend** (`third_party/physical-ai-studio/application/backend`, `uv sync --extra xpu`) | physicalai-studio 0.3.0, physicalai 0.4.1.dev5, physicalai-train 0.3.0, so101 plugin, torch 2.11.0+xpu, openvino 2026.4.1 | Studio UI/backend: robots, recording, training, Run model |
-| **repo `.venv`** (`uv sync --extra capture --extra anomalib`, ADR 0004) | Anomalib 2.7.0, torch 2.15.0+xpu, OpenVINO 2026.4.1, OpenCV, pyrealsense2 | dataset capture, Anomalib training and export |
+| **repo `.venv`** (`uv sync --extra capture --extra anomalib`, ADR 0009) | Anomalib 2.7.0, torch 2.15.0+xpu, OpenVINO 2026.4.1, OpenCV, pyrealsense2 | dataset capture, Anomalib training and export |
 | **Runtime for our loop** | see section 5 | `scripts/sort.py`: cameras, ACT via `InferenceModel`, anomaly model via plain `openvino` |
 
 Anomalib and Studio pin different PyTorch builds, which is why they are separate (guide, Step 4).
@@ -77,7 +77,7 @@ before deleting a target (deleting it deletes its Volume). Budget is in
 
 ## 4. Anomalib environment
 
-Anomalib is the `anomalib` uv extra of this repo (ADR 0004; Anomalib 2.7.0 as slide 8 requires,
+Anomalib is the `anomalib` uv extra of this repo (ADR 0009; Anomalib 2.7.0 as slide 8 requires,
 PyTorch from the Intel XPU index). From the repo root:
 
 ```bash

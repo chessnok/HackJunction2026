@@ -1,0 +1,187 @@
+From 460314ac27f88cce0eb4eddeccf7886058958432 Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Fri, 13 Nov 2026 18:28:33 -0800
+Subject: [PATCH 10/13] fix(backend): refuse one physical camera twice in an
+ environment
+
+Two rows of one device (a RealSense as "color" and again as "depth") made
+their publishers replace each other forever. Saving such an environment is
+refused (422 camera_device_conflict) and so is loading one, naming both
+cameras and, for a RealSense, pointing to output "Color + depth".
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ application/backend/src/exceptions.py         |  9 +++++++
+ .../src/runtime_session/environment.py        |  3 +++
+ .../src/services/environment_service.py       | 19 +++++++++++++-
+ .../backend/src/utils/camera_factory.py       | 20 ++++++++++++++
+ .../tests/runtime_session/test_environment.py | 26 +++++++++++++++++++
+ 5 files changed, 76 insertions(+), 1 deletion(-)
+
+diff --git a/application/backend/src/exceptions.py b/application/backend/src/exceptions.py
+index 72d26bc..b12602d 100644
+--- a/application/backend/src/exceptions.py
++++ b/application/backend/src/exceptions.py
+@@ -264,6 +264,15 @@ class CameraSettingsConflictError(BaseException):
+         )
+ 
+ 
++class CameraDeviceConflictError(BaseException):
++    """Raised when an environment would use one physical camera twice."""
++
++    def __init__(self, message: str) -> None:
++        super().__init__(
++            message=message, error_code="camera_device_conflict", http_status=http.HTTPStatus.UNPROCESSABLE_ENTITY
++        )
++
++
+ class DeviceInUseError(BaseException):
+     """Raised when a runtime session holds the robot or camera being asked for."""
+ 
+diff --git a/application/backend/src/runtime_session/environment.py b/application/backend/src/runtime_session/environment.py
+index 6b1c84b..2fbdc9d 100644
+--- a/application/backend/src/runtime_session/environment.py
++++ b/application/backend/src/runtime_session/environment.py
+@@ -31,6 +31,7 @@ from robots.features import sanitize_camera_name
+ from runtime_session.bus import Bus, Subscription, publish_status, status_key
+ from runtime_session.store import FeatureSpec, ImageSpec, Store, depth_key
+ from schemas.runtime_session import CommandDone, ReloadEnvironment, SessionCamera, SessionEnvironment, StatusMessage
++from utils.camera_factory import shared_device_conflict
+ from workers.base import WorkerStartupError
+ from workers.camera_worker import CameraWorker, camera_observations
+ from workers.robot_worker import DEFAULT_ROBOT_HZ, RobotRecipe, RobotWorker, claim_robot
+@@ -111,6 +112,8 @@ async def describe_environment(
+         leader = RobotRecipe.from_driver(leader_robot.id, leader_driver)
+         robot_names[leader_robot.id] = leader_robot.name
+ 
++    if (conflict := shared_device_conflict(environment.cameras)) is not None:
++        raise ValueError(conflict)
+     cameras: dict[str, Camera] = {}
+     observations: dict[str, ImageSpec] = {}
+     recorded_by: dict[str, Camera] = {}
+diff --git a/application/backend/src/services/environment_service.py b/application/backend/src/services/environment_service.py
+index 3a57d8b..7e49e68 100644
+--- a/application/backend/src/services/environment_service.py
++++ b/application/backend/src/services/environment_service.py
+@@ -5,10 +5,12 @@ from sqlalchemy.exc import IntegrityError
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+ from db.schema import DatasetDB
+-from exceptions import ResourceInUseError, ResourceNotFoundError, ResourceType
++from exceptions import CameraDeviceConflictError, ResourceInUseError, ResourceNotFoundError, ResourceType
++from repositories.project_camera_repo import ProjectCameraRepository
+ from repositories.project_environment_repo import ProjectEnvironmentRepository
+ from robots.catalog.registry import RobotCatalogRegistry
+ from schemas.environment import Environment, EnvironmentWithRelations
++from utils.camera_factory import shared_device_conflict
+ 
+ 
+ class EnvironmentService:
+@@ -30,10 +32,25 @@ class EnvironmentService:
+ 
+         return environment
+ 
++    async def _check_cameras(self, project_id: UUID, environment: Environment) -> None:
++        """Refuse an environment that uses one physical camera twice.
++
++        Raises:
++            CameraDeviceConflictError: Two of its cameras are the same device.
++        """
++        wanted = {camera.camera_id for camera in environment.cameras}
++        if len(wanted) < 2:
++            return
++        cameras = await ProjectCameraRepository(self.session, str(project_id)).get_all()
++        if (conflict := shared_device_conflict(camera for camera in cameras if camera.id in wanted)) is not None:
++            raise CameraDeviceConflictError(conflict)
++
+     async def create_environment(self, project_id: UUID, environment: Environment) -> Environment:
++        await self._check_cameras(project_id, environment)
+         return await self._repo(project_id).save(environment)
+ 
+     async def update_environment(self, project_id: UUID, environment: Environment) -> EnvironmentWithRelations:
++        await self._check_cameras(project_id, environment)
+         repo = self._repo(project_id)
+         existing = await repo.get_by_id(environment.id)
+         if existing is None:
+diff --git a/application/backend/src/utils/camera_factory.py b/application/backend/src/utils/camera_factory.py
+index e8b0494..13a82dd 100644
+--- a/application/backend/src/utils/camera_factory.py
++++ b/application/backend/src/utils/camera_factory.py
+@@ -18,6 +18,8 @@ from utils.camera_publishers import CameraPublishers, camera_publishers
+ from utils.v4l2_frame_interval import fix_zero_frame_intervals
+ 
+ if TYPE_CHECKING:
++    from collections.abc import Iterable
++
+     from schemas.project_camera import Camera
+ 
+ MIGRATED_DRIVERS: frozenset[str] = frozenset({"usb_camera", "realsense", "basler", "ipcam"})
+@@ -157,6 +159,24 @@ def camera_device_key(config: Camera) -> str:
+     return f"{config.driver}:{json.dumps(config.fingerprint, sort_keys=True)}"
+ 
+ 
++def shared_device_conflict(cameras: Iterable[Camera]) -> str | None:
++    """Why ``cameras`` cannot be used together because two of them are one device, or ``None``.
++
++    A device is captured by one publisher with one set of settings: two rows of it (a RealSense
++    as "color" and again as "depth", say) would replace each other's publisher forever.
++    """
++    seen: dict[str, Camera] = {}
++    for camera in cameras:
++        if camera.fingerprint is None:
++            continue
++        key = camera_device_key(camera)
++        if (other := seen.get(key)) is not None:
++            hint = " Use one RealSense camera with output 'Color + depth'." if camera.driver == "realsense" else ""
++            return f"Cameras {other.name!r} and {camera.name!r} are the same device and cannot be used together.{hint}"
++        seen[key] = camera
++    return None
++
++
+ class StudioSharedCamera(SharedCamera):
+     """A ``SharedCamera`` whose publisher Studio runs, with exactly the requested settings.
+ 
+diff --git a/application/backend/tests/runtime_session/test_environment.py b/application/backend/tests/runtime_session/test_environment.py
+index 8c573b2..744e401 100644
+--- a/application/backend/tests/runtime_session/test_environment.py
++++ b/application/backend/tests/runtime_session/test_environment.py
+@@ -3,6 +3,7 @@ from __future__ import annotations
+ import asyncio
+ from contextlib import AsyncExitStack, asynccontextmanager
+ from unittest.mock import AsyncMock, MagicMock
++from uuid import uuid4
+ 
+ import pytest
+ 
+@@ -118,3 +119,28 @@ def test_a_session_shows_a_cameras_color_and_a_depth_only_cameras_depth() -> Non
+     from api.runtime_ws import _shown_frames
+ 
+     assert _shown_frames(["top", "top_depth", "floor_depth", "arm"]) == ["top", "floor_depth", "arm"]
++
++
++async def test_one_camera_twice_in_an_environment_is_refused(test_environment, factory) -> None:
++    from schemas.project_camera import CameraAdapter
++
++    for output_type, name in (("color", "Top color"), ("depth", "Top depth")):
++        row = _realsense_row(name, output_type)
++        row["id"] = str(uuid4())
++        test_environment.cameras.append(CameraAdapter.validate_python(row))
++    with pytest.raises(ValueError, match=r"'Top color' and 'Top depth' are the same device.*Color \+ depth"):
++        await describe_environment(test_environment, factory)
++
++
++async def test_saving_an_environment_with_one_camera_twice_is_refused(test_environment, mocker) -> None:
++    from exceptions import CameraDeviceConflictError
++    from schemas.environment import Environment
++    from schemas.project_camera import CameraAdapter
++    from services.environment_service import EnvironmentService
++
++    cameras = [CameraAdapter.validate_python(_realsense_row(name, "color") | {"id": str(uuid4())}) for name in "AB"]
++    mocker.patch("services.environment_service.ProjectCameraRepository.get_all", AsyncMock(return_value=cameras))
++    service = EnvironmentService(MagicMock(), MagicMock())
++    environment = Environment(id=uuid4(), name="Bench", cameras=[{"camera_id": camera.id} for camera in cameras])
++    with pytest.raises(CameraDeviceConflictError, match="same device"):
++        await service.create_environment(uuid4(), environment)
+-- 
+2.53.0
+

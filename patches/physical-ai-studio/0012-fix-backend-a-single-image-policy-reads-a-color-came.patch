@@ -1,0 +1,49 @@
+From 2c4ee2343fd43ae0551fd00ccd22eb36218130a8 Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Fri, 13 Nov 2026 18:28:33 -0800
+Subject: [PATCH 12/13] fix(backend): a single-image policy reads a color
+ camera, never a depth map
+
+A policy whose one image input is named "images" read the first store slot,
+which with a depth-only camera sorted first was a uint16 depth map.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ application/backend/src/runtime_session/model.py        | 4 +++-
+ application/backend/tests/runtime_session/test_model.py | 8 ++++++++
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/application/backend/src/runtime_session/model.py b/application/backend/src/runtime_session/model.py
+index 32d8dd8..f2dfbd5 100644
+--- a/application/backend/src/runtime_session/model.py
++++ b/application/backend/src/runtime_session/model.py
+@@ -67,7 +67,9 @@ def model_inputs(export_dir: Path, spec: FeatureSpec) -> ModelInputs:
+             if state_size != len(spec.joint_names):
+                 reasons.append(f"it takes {state_size} joints, the follower has {len(spec.joint_names)}")
+         elif feature["ftype"] == "VISUAL":
+-            camera = name.removeprefix(f"{_IMAGES}.") if name != _IMAGES else next(iter(spec.observations), "")
++            # A policy with a single unnamed image reads the first color camera, never a depth map.
++            first_color = next((key for key, image in spec.observations.items() if not image.is_depth), "")
++            camera = name.removeprefix(f"{_IMAGES}.") if name != _IMAGES else first_color
+             # shortcut: checks the camera is there, not its resolution; the export may resize. Compare once manifests
+             # say what they resize from.
+             if camera not in spec.observations:
+diff --git a/application/backend/tests/runtime_session/test_model.py b/application/backend/tests/runtime_session/test_model.py
+index b0a04b5..86cc5d4 100644
+--- a/application/backend/tests/runtime_session/test_model.py
++++ b/application/backend/tests/runtime_session/test_model.py
+@@ -155,3 +155,11 @@ def test_the_models_actions_are_due_at_the_end_of_the_grace_period() -> None:
+         control.on_stop()
+     finally:
+         store.unlink()
++
++
++def test_a_single_image_policy_reads_the_first_color_camera_never_a_depth_map(tmp_path: Path) -> None:
++    spec = FeatureSpec(
++        ("shoulder_pan.pos", "gripper.pos"),
++        {"a_depth": ImageSpec.depth(60, 80), "b": ImageSpec(120, 160, 3)},  # sorted: the depth map first
++    )
++    assert model_inputs(_export(tmp_path / "a", cameras=("images",)), spec).images == {"images": "b"}
+-- 
+2.53.0
+

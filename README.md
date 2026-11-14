@@ -24,7 +24,7 @@ Agents and humans: read [AGENTS.md](AGENTS.md) first.
 | `configs/hardware.yaml` | Stable device addresses used by code |
 | `configs/inspection.yaml` | Inspection cameras (D415 serials), exposure, crop and capture settings |
 | `src/hackjunction2026/` | Our Python package: Feetech bus helper; `defect/` = Anomalib capture, cropping, training |
-| `scripts/` | Command-line tools (`so101_probe.py`, `so101_move.py`, `capture_inspection.sh`, `anomalib.sh`) |
+| `scripts/` | Command-line tools (`so101_probe.py`, `so101_move.py`, `arm_fk.py`, `capture_inspection.sh`, `anomalib.sh`) |
 | `third_party/` | Upstream checkouts, **not committed** |
 
 ## Setup (laptop: Ubuntu 26.04, native, no Docker)
@@ -40,12 +40,17 @@ Agents and humans: read [AGENTS.md](AGENTS.md) first.
 
 2. Tools: [uv](https://docs.astral.sh/uv/) and Node.js >= 24.2 with npm >= 11.14 (we use Node 26 via nvm).
 
-3. Physical AI Studio, `junction2026` branch:
+3. Physical AI Studio. Our private copy has upstream `junction2026` plus our patches
+   (RealSense RGB-D recording, camera fixes, Space-hotkey snapshots; see its `HACKJUNCTION.md`):
 
    ```bash
-   git clone -b junction2026 https://github.com/open-edge-platform/physical-ai-studio.git \
+   git clone -b hj/state-snapshots git@github.com:chessnok/physical-ai-studio-hj.git \
      third_party/physical-ai-studio
    ```
+
+   Plain upstream instead: `git clone -b junction2026 https://github.com/open-edge-platform/physical-ai-studio.git third_party/physical-ai-studio`.
+   The robot laptop runs `hj/state-snapshots` (see the deployment log in `docs/log/2026-11-13.md`;
+   ADR 0004 records the RGB-D patch decision).
 
 4. Run Studio in two terminals, then open http://localhost:3000:
 
@@ -90,7 +95,7 @@ One cycle: brick in the L-shape → SPACE (`top_pre` + `side_FR`) → turn the b
 ## Anomalib training (tested on mock data only)
 
 ```bash
-uv sync --extra capture --extra anomalib                    # once; ~8 GB (PyTorch XPU), ADR 0004
+uv sync --extra capture --extra anomalib                    # once; ~8 GB (PyTorch XPU), ADR 0009
 scripts/anomalib.sh cropping.make_dataset --name v1         # raw captures → cropped 256×256 dataset
 scripts/anomalib.sh training.train_padim --dataset v1       # scenario 1 (baseline, ~1 min)
 scripts/anomalib.sh training.train_patchcore --dataset v1   # scenario 2 (--coreset 0.05 --tag c005)
@@ -103,6 +108,31 @@ scripts/anomalib.sh capture.mock_session --output-dir /tmp/mock   # synthetic se
 Code: `src/hackjunction2026/defect/{capture,cropping,training}/`. Runs: `outputs/anomalib/runs/<run>/`
 (`run.json`, `eval.json`, `errors/`); models: `exports/anomalib/<run>/{fp16,int8_ptq}/weights/openvino/model.xml`.
 Training uses the Intel GPU (XPU) when available, else CPU. Exports are static batch 1.
+
+## Moving the follower to saved poses (`scripts/so101_goto.py`)
+
+Simplest possible move: `delta = target - current`, every joint moves linearly so all arrive
+together. Checks: target inside the calibrated range; stop-and-hold if the arm cannot follow
+(blocked) or does not reach the target, or on Ctrl+C. Dry run by default; `--go` moves.
+Close the environment in Studio first (the arm's port must be free). Run with Studio's Python:
+
+```bash
+PY=third_party/physical-ai-studio/application/backend/.venv/bin/python
+$PY scripts/so101_goto.py where                      # both arms' poses, read-only
+$PY scripts/so101_goto.py save pick_1 --from leader  # move the leader by hand, save its pose
+$PY scripts/so101_goto.py goto pick_1                # show from / to / delta / time
+$PY scripts/so101_goto.py goto pick_1 --go           # move (asks to confirm), default 20 units/s
+```
+
+## Arm positions from recorded joints (`scripts/arm_fk.py`, offline)
+
+Forward kinematics of the follower from Studio's normalized joint values (no robot connection).
+Conventions and validation: [docs/perception/B-arm-kinematics.md](docs/perception/B-arm-kinematics.md).
+
+```bash
+uv run scripts/arm_fk.py pose 0 -99.2 62.7 77.6 -56.9 13.5     # keypoints (mm) for one joint vector
+uv run --with pyarrow scripts/arm_fk.py annotate 431a71f7       # every frame -> captures/perception/B/arm_<id>.parquet
+```
 
 ## Status
 

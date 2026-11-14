@@ -1,4 +1,4 @@
-# 0004. Install Anomalib as a uv extra of this project, not a separate venv
+# 0009. Install Anomalib as a uv extra of this project, not a separate venv
 
 - Status: Accepted
 - Date: 2026-11-14

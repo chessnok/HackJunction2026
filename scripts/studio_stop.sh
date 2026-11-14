@@ -28,4 +28,15 @@ if [[ -n $left ]]; then
   kill -9 $left 2>/dev/null
   sleep 1
 fi
-[[ -z $(pids) ]] && echo "Studio stopped" || { echo "still running: $(echo $(pids))"; exit 1; }
+[[ -z $(pids) ]] || { echo "still running: $(echo $(pids))"; exit 1; }
+echo "Studio stopped"
+
+# Killed camera publishers leave their iceoryx2 services behind; the next Studio then "finds" a
+# publisher that does not exist and every camera preview fails with
+# "CaptureTimeoutError: no publisher responded within timeout" (T-013). With no iceoryx2 user left,
+# wipe its state.
+if grep -qls iceoryx2 /proc/[0-9]*/maps 2>/dev/null; then
+  echo "iceoryx2 still in use by another process; leaving its state alone"
+else
+  rm -rf /tmp/iceoryx2 && rm -f /dev/shm/iox2_* && echo "iceoryx2 state cleaned"
+fi

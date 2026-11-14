@@ -1,0 +1,297 @@
+From 58528b6470a6eccad9c8a3542275fb2d06fa079c Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Fri, 13 Nov 2026 16:56:41 -0800
+Subject: [PATCH 03/13] feat(train): leave depth features out when training on
+ RGB-D datasets
+
+No policy Studio trains takes depth maps: ACT, SmolVLA, Pi05 and MolmoAct2
+crash on a 1-channel image, XR0 and RLDX1 clamp millimetres to [0, 1].
+LeRobotDataModule and its dataset adapter get exclude_depth, which drops the
+depth features from the loaded metadata (in memory only), so samples no
+longer decode them. Studio passes it when the dataset has depth features.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ application/backend/src/training/job.py       | 17 +++++++++
+ .../internal_datasets/test_depth_recording.py | 24 ++++++++++++
+ .../src/physicalai/data/lerobot/datamodule.py | 11 +++++-
+ .../src/physicalai/data/lerobot/dataset.py    | 37 +++++++++++++++++++
+ library/tests/unit/data/test_lerobot.py       | 19 ++++++++++
+ 5 files changed, 107 insertions(+), 1 deletion(-)
+
+diff --git a/application/backend/src/training/job.py b/application/backend/src/training/job.py
+index f616405..dfae862 100644
+--- a/application/backend/src/training/job.py
++++ b/application/backend/src/training/job.py
+@@ -31,6 +31,7 @@ from __future__ import annotations
+ 
+ import contextlib
+ import gc
++import json
+ import logging
+ import os
+ import shutil
+@@ -302,6 +303,18 @@ def _camera_layout_kwargs(spec: TrainingJobSpec) -> dict[str, Any]:
+     return {"image_key_reorder_map": spec.image_key_reorder_map, "num_cameras": spec.num_cameras}
+ 
+ 
++def _has_depth_features(dataset_root: Path) -> bool:
++    """Whether the LeRobot dataset at ``dataset_root`` has depth-map features (``info.is_depth_map``)."""
++    info_path = dataset_root / "meta" / "info.json"
++    if not info_path.is_file():
++        return False
++    features = json.loads(info_path.read_text()).get("features", {})
++    return any(
++        (feature.get("info") or {}).get("is_depth_map") or (feature.get("info") or {}).get("video.is_depth_map")
++        for feature in features.values()
++    )
++
++
+ @contextlib.contextmanager
+ def _hf_token_env(token: SecretStr | None):
+     """Scope ``HF_TOKEN`` to one training run, restoring whatever was there before.
+@@ -388,6 +401,9 @@ def run_training_job(
+         output_dir, cache_dir = Path(output_dir), Path(cache_dir)
+         cache_dir.mkdir(parents=True, exist_ok=True)
+ 
++        # No policy Studio trains takes depth maps: train on the color cameras of an RGB-D dataset.
++        # Passed only when there is depth, so RGB datasets also train with an older library.
++        depth_options: dict[str, Any] = {"exclude_depth": True} if _has_depth_features(Path(dataset_root)) else {}
+         datamodule = LeRobotDataModule(
+             repo_id=_DATASET_REPO_ID,
+             root=str(dataset_root),
+@@ -397,6 +413,7 @@ def run_training_job(
+             # Applied to the train split only; the datamodule leaves validation
+             # images untouched so eval loss stays comparable across runs.
+             image_transforms=DefaultImageAugmentations() if spec.augment_images else None,
++            **depth_options,
+         )
+         policy = build_policy(spec, resume_from=spec.run_options.resume_from)
+ 
+diff --git a/application/backend/tests/internal_datasets/test_depth_recording.py b/application/backend/tests/internal_datasets/test_depth_recording.py
+index bce36a6..aaffbe4 100644
+--- a/application/backend/tests/internal_datasets/test_depth_recording.py
++++ b/application/backend/tests/internal_datasets/test_depth_recording.py
+@@ -156,3 +156,27 @@ def test_lerobot_reads_back_the_recorded_millimetres(rgbd_dataset: InternalLeRob
+         assert np.all(depth[:8, :8] == 0)
+         # 12-bit log codes over 0-10 m: within half a step, under 1 mm up to 1 m and 1.5 mm at 4 m.
+         assert np.abs(depth - expected).max() <= 1.5
++
++
++def test_training_leaves_the_depth_out_when_asked(rgbd_dataset: InternalLeRobotDataset) -> None:
++    from physicalai.data.lerobot.dataset import _LeRobotDatasetAdapter
++
++    from training.job import _has_depth_features
++
++    assert _has_depth_features(rgbd_dataset.path)
++    with_depth = _LeRobotDatasetAdapter(repo_id="depth", root=rgbd_dataset.path)
++    assert with_depth.observation_features["top_depth"].shape == (1, HEIGHT, WIDTH)
++
++    color_only = _LeRobotDatasetAdapter(repo_id="depth", root=rgbd_dataset.path, exclude_depth=True)
++    assert "top_depth" not in color_only.observation_features
++    assert color_only.observation_features["top"].shape == (3, HEIGHT, WIDTH)
++    assert set(color_only[0].images) == {"top"}
++
++
++def test_an_rgb_dataset_has_no_depth_to_leave_out(tmp_path: Path) -> None:
++    from training.job import _has_depth_features
++
++    assert not _has_depth_features(tmp_path)
++    (tmp_path / "meta").mkdir()
++    (tmp_path / "meta" / "info.json").write_text('{"features": {"observation.images.top": {"info": {}}}}')
++    assert not _has_depth_features(tmp_path)
+diff --git a/library/src/physicalai/data/lerobot/datamodule.py b/library/src/physicalai/data/lerobot/datamodule.py
+index 893bdb4..074281e 100644
+--- a/library/src/physicalai/data/lerobot/datamodule.py
++++ b/library/src/physicalai/data/lerobot/datamodule.py
+@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
+ from physicalai.data import DataModule
+ 
+ from .converters import DataFormat
+-from .dataset import _LeRobotDatasetAdapter
++from .dataset import _LeRobotDatasetAdapter, drop_depth_features
+ from .utils.quantile_stats import augment_dataset_quantile_stats, has_quantile_stats
+ 
+ if TYPE_CHECKING:
+@@ -141,6 +141,7 @@ class LeRobotDataModule(DataModule):
+         data_format: Literal["physicalai", "lerobot"] | DataFormat = "physicalai",
+         state_columns: list[str] | None = None,
+         action_columns: list[str] | None = None,
++        exclude_depth: bool = False,
+         # Eval-loss validation
+         val_split: float = 0.0,
+         val_split_seed: int | None = None,
+@@ -200,6 +201,9 @@ class LeRobotDataModule(DataModule):
+                 into a single ``action`` tensor (e.g. DROID's
+                 ``["action.joint_position", "action.gripper_position"]``). Only used with
+                 ``data_format="physicalai"``. Defaults to `None` (no combining).
++            exclude_depth (bool, optional): Leave out depth-map features (LeRobot video features flagged
++                ``info.is_depth_map``), for policies that take color images only. The dataset on disk is
++                untouched. Defaults to `False`.
+             val_split (float, optional): Fraction of episodes to hold out for eval-loss
+                 validation (e.g. ``0.1`` for 10%). The last N episodes are used as the
+                 validation set. Must be in ``[0, 1)``. ``0`` disables eval-loss validation.
+@@ -303,6 +307,7 @@ class LeRobotDataModule(DataModule):
+                     dataset,
+                     state_columns=state_columns,
+                     action_columns=action_columns,
++                    exclude_depth=exclude_depth,
+                 )
+                 if data_format == DataFormat.PHYSICALAI
+                 else dataset
+@@ -324,6 +329,7 @@ class LeRobotDataModule(DataModule):
+                     batch_encoding_size=batch_encoding_size,
+                     state_columns=state_columns,
+                     action_columns=action_columns,
++                    exclude_depth=exclude_depth,
+                 )
+                 if val_episodes is not None:
+                     val_eval_dataset = _LeRobotDatasetAdapter(
+@@ -339,6 +345,7 @@ class LeRobotDataModule(DataModule):
+                         batch_encoding_size=batch_encoding_size,
+                         state_columns=state_columns,
+                         action_columns=action_columns,
++                        exclude_depth=exclude_depth,
+                     )
+             else:
+                 if LeRobotDataset is None:
+@@ -358,6 +365,8 @@ class LeRobotDataModule(DataModule):
+                     video_backend=video_backend,
+                     batch_encoding_size=batch_encoding_size,
+                 )
++                if exclude_depth:
++                    drop_depth_features(train_dataset)
+         else:
+             msg = "Must provide either 'repo_id' or a 'dataset' instance."
+             raise ValueError(msg)
+diff --git a/library/src/physicalai/data/lerobot/dataset.py b/library/src/physicalai/data/lerobot/dataset.py
+index 673c9cb..c0700dc 100644
+--- a/library/src/physicalai/data/lerobot/dataset.py
++++ b/library/src/physicalai/data/lerobot/dataset.py
+@@ -5,6 +5,7 @@
+ 
+ from __future__ import annotations
+ 
++import logging
+ from typing import TYPE_CHECKING
+ 
+ import torch
+@@ -32,6 +33,8 @@ else:
+ # Number of dimensions of a single image feature (height, width, channel).
+ _IMAGE_NDIM = 3
+ 
++logger = logging.getLogger(__name__)
++
+ 
+ def _concat_columns(item: dict, columns: list[str], target_key: str, drop_prefix: str) -> dict:
+     """Return a copy of `item` with `columns` concatenated (last dim) into a single `target_key` tensor.
+@@ -98,6 +101,30 @@ def _combined_feature(
+     )
+ 
+ 
++def drop_depth_features(dataset: LeRobotDataset) -> list[str]:
++    """Remove the depth-map features from a loaded ``LeRobotDataset``, in memory only.
++
++    LeRobot 0.6 records depth maps as video features flagged ``info.is_depth_map``. They are
++    dropped from the dataset's features and stats, so samples no longer decode them and
++    policies that take color images only never see them. The files on disk are untouched.
++
++    Args:
++        dataset: The dataset to strip; its metadata is modified in place.
++
++    Returns:
++        The keys of the dropped features.
++    """
++    meta = dataset.meta
++    dropped = list(meta.depth_keys)
++    for key in dropped:
++        meta.info.features.pop(key, None)
++        if meta.stats is not None:
++            meta.stats.pop(key, None)
++    if dropped:
++        logger.info("Ignoring depth features %s", dropped)
++    return dropped
++
++
+ class _LeRobotDatasetAdapter(Dataset):
+     """An internal adapter that makes a `LeRobotDataset` compatible with the `physicalai.data.Dataset` interface.
+ 
+@@ -132,6 +159,7 @@ class _LeRobotDatasetAdapter(Dataset):
+         batch_encoding_size: int = 1,
+         state_columns: list[str] | None = None,
+         action_columns: list[str] | None = None,
++        exclude_depth: bool = False,
+     ) -> None:
+         """Initialize a _LeRobotDatasetAdapter.
+ 
+@@ -168,6 +196,8 @@ class _LeRobotDatasetAdapter(Dataset):
+                 into a single ``action`` tensor (e.g. DROID's
+                 ``["action.joint_position", "action.gripper_position"]``). All ``action.*`` sub-columns are
+                 dropped once combined. Defaults to `None` (no combining).
++            exclude_depth (bool, optional): Leave out depth-map features (see :func:`drop_depth_features`),
++                for policies that take color images only. Defaults to `False`.
+ 
+         Raises:
+             ImportError: If `lerobot` is not installed.
+@@ -195,6 +225,8 @@ class _LeRobotDatasetAdapter(Dataset):
+             video_backend=video_backend,
+             batch_encoding_size=batch_encoding_size,
+         )
++        if exclude_depth:
++            drop_depth_features(self._lerobot_dataset)
+ 
+     def __len__(self) -> int:
+         """Get the length of the dataset.
+@@ -231,6 +263,7 @@ class _LeRobotDatasetAdapter(Dataset):
+         *,
+         state_columns: list[str] | None = None,
+         action_columns: list[str] | None = None,
++        exclude_depth: bool = False,
+     ) -> _LeRobotDatasetAdapter:
+         """Creates an instance of LeRobotActionDataset from an existing LeRobotDataset instance.
+ 
+@@ -243,10 +276,14 @@ class _LeRobotDatasetAdapter(Dataset):
+                 into a single ``observation.state`` tensor. Defaults to `None` (no combining).
+             action_columns (list[str] | None, optional): Ordered LeRobot sub-column keys to concatenate
+                 into a single ``action`` tensor. Defaults to `None` (no combining).
++            exclude_depth (bool, optional): Leave out depth-map features; this modifies the metadata of
++                ``lerobot_dataset`` (see :func:`drop_depth_features`). Defaults to `False`.
+ 
+         Returns:
+             _LeRobotDatasetAdapter: A new adapter instance that uses the provided dataset.
+         """
++        if exclude_depth:
++            drop_depth_features(lerobot_dataset)
+         instance = _LeRobotDatasetAdapter.__new__(_LeRobotDatasetAdapter)
+         # Bypassing __init__ to set the internal dataset
+         instance._lerobot_dataset = lerobot_dataset  # noqa: SLF001
+diff --git a/library/tests/unit/data/test_lerobot.py b/library/tests/unit/data/test_lerobot.py
+index 20ea8d1..d2a38d1 100644
+--- a/library/tests/unit/data/test_lerobot.py
++++ b/library/tests/unit/data/test_lerobot.py
+@@ -372,3 +372,22 @@ def test_import_does_not_load_lerobot_policy_factory():
+     )
+     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+     assert result.returncode == 0, result.stderr
++
++
++def test_drop_depth_features_leaves_out_depth_maps_in_memory_only():
++    from types import SimpleNamespace
++
++    from physicalai.data.lerobot.dataset import drop_depth_features
++
++    features = {
++        "observation.images.top": {"dtype": "video", "shape": [4, 4, 3], "info": {"is_depth_map": False}},
++        "observation.images.top_depth": {"dtype": "video", "shape": [4, 4, 1], "info": {"is_depth_map": True}},
++    }
++    stats = {"observation.images.top": {}, "observation.images.top_depth": {}}
++    meta = SimpleNamespace(
++        info=SimpleNamespace(features=features), stats=stats, depth_keys=["observation.images.top_depth"]
++    )
++
++    assert drop_depth_features(SimpleNamespace(meta=meta)) == ["observation.images.top_depth"]
++    assert list(features) == ["observation.images.top"]
++    assert list(stats) == ["observation.images.top"]
+-- 
+2.53.0
+

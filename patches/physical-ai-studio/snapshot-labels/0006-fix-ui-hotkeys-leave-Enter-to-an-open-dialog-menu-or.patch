@@ -1,0 +1,92 @@
+From 3bd992fb5a6932f29d3f1391c0301fca9a984830 Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Sat, 14 Nov 2026 04:05:22 -0800
+Subject: [PATCH 6/9] fix(ui): hotkeys leave Enter to an open dialog, menu or
+ listbox
+
+With a dialog open (such as the recent snapshots list), Enter acts within it
+and must not also start or accept a recording episode behind it, just as
+Escape already did not discard one. Space is unchanged, so the snapshot
+hotkey still captures with a dialog open.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/features/hotkeys/use-hotkey.test.tsx  | 27 +++++++++++++++++++
+ .../ui/src/features/hotkeys/use-hotkey.ts     |  9 ++++---
+ 2 files changed, 32 insertions(+), 4 deletions(-)
+
+diff --git a/application/ui/src/features/hotkeys/use-hotkey.test.tsx b/application/ui/src/features/hotkeys/use-hotkey.test.tsx
+index 63ba738d..99220123 100644
+--- a/application/ui/src/features/hotkeys/use-hotkey.test.tsx
++++ b/application/ui/src/features/hotkeys/use-hotkey.test.tsx
+@@ -59,6 +59,33 @@ describe('useHotkey with Enter and Escape', () => {
+         expect(handler).not.toHaveBeenCalled();
+     });
+ 
++    it('leaves Enter to an open dialog, menu or listbox', () => {
++        const handler = rs.fn();
++        renderHook(() => useHotkey('Enter', handler));
++        const overlay = document.createElement('div');
++        document.body.appendChild(overlay);
++
++        for (const role of ['dialog', 'alertdialog', 'menu', 'listbox']) {
++            overlay.setAttribute('role', role);
++            fireEvent.keyDown(document.body, { key: 'Enter' });
++        }
++        expect(handler).not.toHaveBeenCalled();
++
++        overlay.remove();
++        fireEvent.keyDown(document.body, { key: 'Enter' });
++        expect(handler).toHaveBeenCalledTimes(1);
++    });
++
++    it('still fires Space with a dialog open', () => {
++        const handler = rs.fn();
++        renderHook(() => useHotkey(' ', handler));
++        const dialog = document.createElement('div');
++        dialog.setAttribute('role', 'dialog');
++        document.body.appendChild(dialog);
++        fireEvent.keyDown(dialog, { key: ' ' });
++        expect(handler).toHaveBeenCalledTimes(1);
++    });
++
+     it('ignores a key another handler already handled', () => {
+         const handler = rs.fn();
+         renderHook(() => useHotkey('Escape', handler));
+diff --git a/application/ui/src/features/hotkeys/use-hotkey.ts b/application/ui/src/features/hotkeys/use-hotkey.ts
+index c95008ec..f2aa567b 100644
+--- a/application/ui/src/features/hotkeys/use-hotkey.ts
++++ b/application/ui/src/features/hotkeys/use-hotkey.ts
+@@ -43,7 +43,8 @@ const isEnterActivatedTarget = (target: EventTarget | null): boolean => {
+     );
+ };
+ 
+-// Escape closes an open dialog, menu or listbox first; it must not also act on the page behind it.
++// Escape closes an open dialog, menu or listbox, and Enter acts within it; neither may also act on the
++// page behind it (such as starting, accepting or discarding an episode).
+ const hasOpenOverlay = (): boolean =>
+     document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]') !== null;
+ 
+@@ -51,8 +52,8 @@ const hasOpenOverlay = (): boolean =>
+  * Fires `handler` when `combo` (a canonical string from `keyboardEventToCombo`) is
+  * pressed anywhere in the document, while `enabled`. Ignores keystrokes into text
+  * inputs/content-editable elements, key-repeat events, events another handler already
+- * handled, Space or Enter on a focused control that the key activates, and Escape
+- * while a dialog, menu or listbox is open.
++ * handled, Space or Enter on a focused control that the key activates, and Enter or
++ * Escape while a dialog, menu or listbox is open.
+  */
+ export const useHotkey = (combo: string, handler: () => void, enabled = true): void => {
+     useEffect(() => {
+@@ -67,7 +68,7 @@ export const useHotkey = (combo: string, handler: () => void, enabled = true): v
+                 isTypingTarget(e.target) ||
+                 (e.key === ' ' && isSpaceActivatedTarget(e.target)) ||
+                 (e.key === 'Enter' && isEnterActivatedTarget(e.target)) ||
+-                (e.key === 'Escape' && hasOpenOverlay())
++                ((e.key === 'Escape' || e.key === 'Enter') && hasOpenOverlay())
+             ) {
+                 return;
+             }
+-- 
+2.53.0
+

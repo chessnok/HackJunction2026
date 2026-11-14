@@ -1,0 +1,609 @@
+From 1faa3c35504fc3bb6fd759471dae81671baa6a5f Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Sat, 14 Nov 2026 03:34:26 -0800
+Subject: [PATCH 2/9] feat(backend): label state snapshots as defective or
+ good, with a comment
+
+For anomaly detection, every snapshot now has a label, saved in its
+state.json and in snapshots.csv:
+
+- POST /api/projects/{id}/state_snapshots takes an optional JSON body
+  {"defective": bool = false, "comment": str = ""}; the comment is trimmed,
+  at most 500 characters, without NUL; unknown fields are refused (400).
+- PATCH /api/projects/{id}/state_snapshots/{snapshot_id} changes defective,
+  comment or both (at least one) in state.json (with label_updated_at) and
+  rewrites the CSV; 404 state_snapshot_not_found for an unknown snapshot.
+- GET /api/projects/{id}/state_snapshots/snapshots.csv downloads the index,
+  checked and rebuilt first if needed (?rebuild=true forces it).
+- GET /api/projects/{id}/state_snapshots returns defective and comment, and
+  takes ?limit= for the newest only.
+
+A capture whose CSV row cannot be written is still saved, with a warning; the
+next check of the index adds it. Snapshots from before labels read as good,
+without a comment.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../backend/src/api/state_snapshots.py        |  87 +++++++-
+ .../backend/src/runtime_session/snapshot.py   |  70 ++++++-
+ .../backend/src/schemas/state_snapshot.py     |  45 +++-
+ .../tests/runtime_session/test_snapshot.py    | 198 +++++++++++++++++-
+ 4 files changed, 376 insertions(+), 24 deletions(-)
+
+diff --git a/application/backend/src/api/state_snapshots.py b/application/backend/src/api/state_snapshots.py
+index 0e5cd420..d667aab0 100644
+--- a/application/backend/src/api/state_snapshots.py
++++ b/application/backend/src/api/state_snapshots.py
+@@ -1,26 +1,38 @@
+-"""State snapshots of a project's live runtime session: capture one, list them.
++"""State snapshots of a project's live runtime session: capture, list, label, and the CSV index.
+ 
+ See :mod:`runtime_session.snapshot`. Capturing reads only what the session's store
+ already holds: it opens no device, commands no robot and leaves a recording alone.
++Each snapshot has a label (``defective``, ``comment``), given when it is captured and
++changeable later; ``snapshots.csv`` (:mod:`runtime_session.snapshot_index`) lists them all.
+ """
+ 
+ import asyncio
++import http
++from pathlib import Path as FilePath
+ from typing import Annotated
+ from uuid import UUID
+ 
+-from fastapi import APIRouter, Query, status
++from fastapi import APIRouter, Body, Path, Query, Response, status
+ 
+ from api.dependencies import RuntimeSessionRegistryDep
+ from build_info import _run_git, get_build_info_async
++from exceptions import BaseException as StudioError
+ from exceptions import RuntimeSessionCommandError
+-from runtime_session import snapshot
++from runtime_session import snapshot, snapshot_index
+ from runtime_session.registry import RuntimeSessionRegistry
+ from runtime_session.session import RuntimeSession
+-from schemas.state_snapshot import StateSnapshot
++from schemas.state_snapshot import StateSnapshot, StateSnapshotLabel, StateSnapshotLabelUpdate
+ from settings import get_settings
+ 
+ router = APIRouter(prefix="/api/projects/{project_id}/state_snapshots", tags=["State Snapshots"])
+ 
++SNAPSHOT_ID_PATTERN = r"^\d{8}-\d{6}-\d{3}(-\d{1,2})?$"
++"""A snapshot folder's name: ``YYYYmmdd-HHMMSS-mmm``, with ``-<n>`` if several were taken in one millisecond."""
++
++
++def _project_root(project_id: UUID) -> FilePath:
++    return get_settings().storage_dir / "state_snapshots" / str(project_id)
++
+ 
+ def _live_session(registry: RuntimeSessionRegistry, project_id: UUID, session_id: str | None) -> RuntimeSession:
+     """The project's session to capture: ``session_id``, or the one live session with an environment.
+@@ -58,12 +70,16 @@ async def capture_state_snapshot(
+     session_id: Annotated[
+         str | None, Query(description="The live session to capture; the project's only one if omitted")
+     ] = None,
++    label: Annotated[
++        StateSnapshotLabel | None, Body(description="The snapshot's label; not defective, no comment if omitted")
++    ] = None,
+ ) -> StateSnapshot:
+-    """Save the live session's latest camera frames and robot state.
++    """Save the live session's latest camera frames and robot state, with a label, and add it to the CSV.
+ 
+     Read-only: it copies what the session's store holds, so it neither opens a device a second
+     time nor commands a robot, and a recording goes on undisturbed.
+     """
++    label = label or StateSnapshotLabel()
+     session = _live_session(registry, project_id, session_id)
+     # Copied at once, on the event loop, so the frames and joints are of one moment; written in a thread.
+     captured = snapshot.capture(session)
+@@ -71,11 +87,62 @@ async def capture_state_snapshot(
+     branch = await asyncio.to_thread(_run_git, "rev-parse", "--abbrev-ref", "HEAD")
+     app = {"studio_version": get_settings().version, **build.__dict__, "git_branch": branch}
+     root = get_settings().storage_dir / "state_snapshots"
+-    return await asyncio.to_thread(snapshot.write, captured, root, build=app)
++    return await asyncio.to_thread(
++        snapshot.write, captured, root, build=app, defective=label.defective, comment=label.comment
++    )
+ 
+ 
+ @router.get("")
+-async def list_state_snapshots(project_id: UUID) -> list[StateSnapshot]:
+-    """The project's state snapshots, newest first."""
+-    root = get_settings().storage_dir / "state_snapshots" / str(project_id)
+-    return await asyncio.to_thread(snapshot.list_snapshots, root)
++async def list_state_snapshots(
++    project_id: UUID,
++    limit: Annotated[int | None, Query(ge=1, description="At most this many, the newest")] = None,
++) -> list[StateSnapshot]:
++    """The project's state snapshots with their labels, newest first."""
++    return await asyncio.to_thread(snapshot.list_snapshots, _project_root(project_id), limit)
++
++
++@router.get(
++    "/snapshots.csv",
++    response_class=Response,
++    responses={200: {"content": {"text/csv": {}}, "description": "The CSV index, one row per snapshot"}},
++)
++async def download_state_snapshots_csv(
++    project_id: UUID,
++    rebuild: Annotated[
++        bool, Query(description="Rewrite it from every snapshot's state.json first, even if it looks current")
++    ] = False,
++) -> Response:
++    """The project's ``snapshots.csv``: one row per snapshot, with its label, times, joints and image files.
++
++    It is checked first, and rewritten from the snapshots' ``state.json`` if it is missing,
++    unreadable or does not list every snapshot exactly once. Just the header if there are none.
++    """
++    data = await asyncio.to_thread(snapshot_index.contents, _project_root(project_id), rebuild_first=rebuild)
++    return Response(
++        content=data,
++        media_type="text/csv; charset=utf-8",
++        headers={"Content-Disposition": f'attachment; filename="state_snapshots_{project_id}.csv"'},
++    )
++
++
++@router.patch("/{snapshot_id}")
++async def update_state_snapshot(
++    project_id: UUID,
++    snapshot_id: Annotated[str, Path(pattern=SNAPSHOT_ID_PATTERN, description="The snapshot's folder name")],
++    changes: StateSnapshotLabelUpdate,
++) -> StateSnapshot:
++    """Change a snapshot's label (``defective``, ``comment`` or both) in its ``state.json`` and the CSV."""
++    try:
++        return await asyncio.to_thread(
++            snapshot.update_label,
++            _project_root(project_id),
++            snapshot_id,
++            defective=changes.defective,
++            comment=changes.comment,
++        )
++    except FileNotFoundError:
++        raise StudioError(
++            f"This project has no state snapshot {snapshot_id}.",
++            error_code="state_snapshot_not_found",
++            http_status=http.HTTPStatus.NOT_FOUND,
++        ) from None
+diff --git a/application/backend/src/runtime_session/snapshot.py b/application/backend/src/runtime_session/snapshot.py
+index 7a9b8b5d..780e13f4 100644
+--- a/application/backend/src/runtime_session/snapshot.py
++++ b/application/backend/src/runtime_session/snapshot.py
+@@ -6,7 +6,8 @@ a recording does, and writes it to ``<storage>/state_snapshots/<project>/<time>/
+ 
+ - ``state.json``: when, which project, environment, robots and cameras; joint
+   positions with the time each was measured; camera settings, and a RealSense's
+-  intrinsics and depth scale as its publisher recorded them.
++  intrinsics and depth scale as its publisher recorded them; its label
++  (``defective``, ``comment``), which can be changed later.
+ - ``<camera>.color.png``: the color image, lossless.
+ - ``<camera>.depth.png`` (16-bit, millimetres, 0 = no depth) and
+   ``<camera>.depth_preview.png`` (colorized) for a camera that records depth.
+@@ -14,6 +15,9 @@ a recording does, and writes it to ``<storage>/state_snapshots/<project>/<time>/
+ It never opens a device, sends a robot anything or reads a robot's bus: the
+ leader's positions are known only while it teleoperates (they are the command
+ the follower is sent), and servo ticks are derived from the calibration.
++
++Every snapshot also gets a row in the project's ``snapshots.csv``
++(:mod:`runtime_session.snapshot_index`).
+ """
+ 
+ from __future__ import annotations
+@@ -28,6 +32,8 @@ import cv2
+ import numpy as np
+ from loguru import logger
+ 
++from runtime_session import snapshot_index
++from runtime_session.snapshot_index import STATE_FILE
+ from runtime_session.store import ACTION, STATE, depth_key
+ from schemas.state_snapshot import SnapshotCamera, StateSnapshot
+ from utils.depth_colormap import colorize_depth
+@@ -41,7 +47,6 @@ if TYPE_CHECKING:
+     from schemas.project_camera import Camera
+ 
+ FORMAT = "physicalai-studio/state-snapshot/v1"
+-STATE_FILE = "state.json"
+ 
+ 
+ @dataclass
+@@ -103,8 +108,15 @@ def capture(session: RuntimeSession) -> Captured:
+     )
+ 
+ 
+-def write(captured: Captured, root: Path, *, build: Mapping[str, Any] | None = None) -> StateSnapshot:
+-    """Write a captured snapshot under ``root/<project>/<local time>/`` and describe it."""
++def write(
++    captured: Captured,
++    root: Path,
++    *,
++    build: Mapping[str, Any] | None = None,
++    defective: bool = False,
++    comment: str = "",
++) -> StateSnapshot:
++    """Write a captured snapshot under ``root/<project>/<local time>/``, index it, and describe it."""
+     captured_at = datetime.fromtimestamp(captured.clock.wall).astimezone()
+     folder = _new_folder(root / captured.project_id, captured_at)
+     warnings: list[str] = []
+@@ -134,6 +146,8 @@ def write(captured: Captured, root: Path, *, build: Mapping[str, Any] | None = N
+             "utc": captured_at.astimezone(UTC).isoformat(timespec="milliseconds"),
+             "monotonic": captured.clock.monotonic,
+         },
++        "defective": defective,
++        "comment": comment,
+         "app": dict(build or {}),
+         "project": {"id": captured.project_id, "name": captured.project_name},
+         "session": {"id": captured.session_id, "control": captured.control, "dataset": captured.dataset},
+@@ -147,8 +161,14 @@ def write(captured: Captured, root: Path, *, build: Mapping[str, Any] | None = N
+         "cameras": cameras,
+         "warnings": warnings,
+     }
+-    (folder / STATE_FILE).write_text(json.dumps(document, indent=2, default=str))
++    snapshot_index.write_json(folder / STATE_FILE, document)
+     logger.info("Saved state snapshot {}", folder)
++    shown_warnings = list(warnings)
++    try:
++        snapshot_index.append(folder.parent, document)
++    except OSError as error:  # the snapshot is saved; the index is rebuilt when it is next found stale
++        logger.exception("Could not add snapshot {} to {}", folder.name, snapshot_index.CSV_NAME)
++        shown_warnings.append(f"It is not in {snapshot_index.CSV_NAME} yet ({error}); downloading the CSV adds it.")
+     return StateSnapshot(
+         snapshot_id=folder.name,
+         path=str(folder),
+@@ -158,22 +178,48 @@ def write(captured: Captured, root: Path, *, build: Mapping[str, Any] | None = N
+         cameras=shown,
+         follower=follower["joint_positions"] is not None,
+         leader=leader is not None and leader["joint_positions"] is not None,
+-        warnings=warnings,
++        warnings=shown_warnings,
++        defective=defective,
++        comment=comment,
+     )
+ 
+ 
+-def list_snapshots(project_root: Path) -> list[StateSnapshot]:
+-    """The snapshots saved for a project, newest first; folders without a readable ``state.json`` are skipped."""
+-    snapshots = []
+-    for folder in sorted(project_root.iterdir(), reverse=True) if project_root.is_dir() else ():
++def list_snapshots(project_root: Path, limit: int | None = None) -> list[StateSnapshot]:
++    """The snapshots saved for a project, newest first, at most ``limit``.
++
++    Folders without a readable ``state.json`` are skipped.
++    """
++    snapshots: list[StateSnapshot] = []
++    if not project_root.is_dir():
++        return snapshots
++    for folder in sorted((path for path in project_root.iterdir() if path.is_dir()), reverse=True):
++        if limit is not None and len(snapshots) >= limit:
++            break
+         try:
+-            document = json.loads((folder / STATE_FILE).read_text())
++            document = json.loads((folder / STATE_FILE).read_text(encoding="utf-8"))
+             snapshots.append(_summary(folder, document))
+         except (OSError, ValueError, KeyError, TypeError):
+             continue
+     return snapshots
+ 
+ 
++def update_label(
++    project_root: Path, snapshot_id: str, *, defective: bool | None = None, comment: str | None = None
++) -> StateSnapshot:
++    """Change a saved snapshot's label in its ``state.json`` and in ``snapshots.csv``.
++
++    Raises:
++        FileNotFoundError: The project has no such snapshot.
++    """
++    changes: dict[str, Any] = {"label_updated_at": datetime.now(UTC).isoformat(timespec="milliseconds")}
++    if defective is not None:
++        changes["defective"] = defective
++    if comment is not None:
++        changes["comment"] = comment
++    document = snapshot_index.update(project_root, snapshot_id, changes)
++    return _summary(project_root / snapshot_id, document)
++
++
+ def _summary(folder: Path, document: dict[str, Any]) -> StateSnapshot:
+     robots = document.get("robots") or {}
+     leader = robots.get("leader") or {}
+@@ -197,6 +243,8 @@ def _summary(folder: Path, document: dict[str, Any]) -> StateSnapshot:
+         follower=(robots.get("follower") or {}).get("joint_positions") is not None,
+         leader=leader.get("joint_positions") is not None,
+         warnings=document.get("warnings", []),
++        defective=document.get("defective") is True,
++        comment=document.get("comment") or "",
+     )
+ 
+ 
+diff --git a/application/backend/src/schemas/state_snapshot.py b/application/backend/src/schemas/state_snapshot.py
+index 8a323ed6..4934171b 100644
+--- a/application/backend/src/schemas/state_snapshot.py
++++ b/application/backend/src/schemas/state_snapshot.py
+@@ -1,8 +1,49 @@
+ """A state snapshot: a live session's latest camera frames and robot state, saved to disk."""
+ 
+ from datetime import datetime
++from typing import Annotated, Self
+ 
+-from pydantic import BaseModel, Field
++from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, model_validator
++
++COMMENT_MAX_LENGTH = 500
++
++
++def _printable(comment: str) -> str:
++    if "\x00" in comment:
++        raise ValueError("The comment must not contain NUL characters")
++    return comment
++
++
++SnapshotComment = Annotated[
++    str,
++    StringConstraints(strip_whitespace=True, max_length=COMMENT_MAX_LENGTH),
++    AfterValidator(_printable),
++    Field(description=f"Free text, at most {COMMENT_MAX_LENGTH} characters; leading and trailing spaces are dropped"),
++]
++
++
++class StateSnapshotLabel(BaseModel):
++    """How a new snapshot is labelled: what it shows, for anomaly detection, and a note."""
++
++    model_config = ConfigDict(extra="forbid")
++
++    defective: bool = Field(default=False, description="Whether the snapshot shows a defective part")
++    comment: SnapshotComment = ""
++
++
++class StateSnapshotLabelUpdate(BaseModel):
++    """A change to a saved snapshot's label: the fields given, at least one."""
++
++    model_config = ConfigDict(extra="forbid")
++
++    defective: bool | None = Field(default=None, description="Whether the snapshot shows a defective part")
++    comment: SnapshotComment | None = None
++
++    @model_validator(mode="after")
++    def _changes_something(self) -> Self:
++        if self.defective is None and self.comment is None:
++            raise ValueError("Give defective, comment or both")
++        return self
+ 
+ 
+ class SnapshotCamera(BaseModel):
+@@ -24,3 +65,5 @@ class StateSnapshot(BaseModel):
+     follower: bool = Field(description="Whether the follower's joint positions were captured")
+     leader: bool = Field(description="Whether the leader's joint positions were captured")
+     warnings: list[str] = Field(default_factory=list, description="What could not be captured, and why")
++    defective: bool = Field(default=False, description="Whether the snapshot shows a defective part")
++    comment: str = Field(default="", description="The note saved with the snapshot")
+diff --git a/application/backend/tests/runtime_session/test_snapshot.py b/application/backend/tests/runtime_session/test_snapshot.py
+index f93cfdeb..b1643656 100644
+--- a/application/backend/tests/runtime_session/test_snapshot.py
++++ b/application/backend/tests/runtime_session/test_snapshot.py
+@@ -2,12 +2,14 @@
+ 
+ from __future__ import annotations
+ 
++import csv
++import io
+ import json
+ from pathlib import Path
+ from types import SimpleNamespace
+ from typing import TYPE_CHECKING
+ from unittest.mock import AsyncMock
+-from uuid import uuid4
++from uuid import UUID, uuid4
+ 
+ import cv2
+ import numpy as np
+@@ -16,7 +18,7 @@ from fastapi.testclient import TestClient
+ 
+ from api.dependencies import get_runtime_session_registry
+ from main import app
+-from runtime_session import snapshot
++from runtime_session import snapshot, snapshot_index
+ from runtime_session.environment import describe_environment
+ from runtime_session.registry import RuntimeSessionRegistry
+ from runtime_session.session import LoadedEnvironment
+@@ -187,6 +189,7 @@ def test_state_json_says_what_was_measured_when(live, tmp_path) -> None:
+     assert cameras["cam 0"]["realsense"] is None
+     assert cameras["cam 0"]["depth"] is None
+     assert state["warnings"] == []
++    assert (state["defective"], state["comment"]) == (False, "")
+ 
+ 
+ def test_without_teleoperation_the_leader_is_not_read(live, tmp_path) -> None:
+@@ -260,3 +263,194 @@ def test_the_api_without_a_live_session_says_so(client) -> None:
+     assert response.status_code == 409
+     assert response.json()["error_code"] == "no_live_session"
+     assert "Open the environment" in response.json()["message"]
++
++
++# Labels and the CSV index.
++
++TRICKY_COMMENT = 'scratch, near "edge"\nsecond line; naïve ✓'
++
++
++def _csv(path: Path) -> list[dict[str, str]]:
++    return list(csv.DictReader(io.StringIO(path.read_text(encoding="utf-8"), newline="")))
++
++
++def test_a_snapshot_is_saved_with_its_label_and_indexed(live, tmp_path) -> None:
++    result = snapshot.write(snapshot.capture(live), tmp_path, defective=True, comment=TRICKY_COMMENT)
++
++    assert (result.defective, result.comment) == (True, TRICKY_COMMENT)
++    folder = Path(result.path)
++    state = json.loads((folder / "state.json").read_text())
++    assert (state["defective"], state["comment"]) == (True, TRICKY_COMMENT)
++    (row,) = _csv(folder.parent / snapshot_index.CSV_NAME)
++    assert row["snapshot_id"] == result.snapshot_id
++    assert (row["defective"], row["comment"]) == ("true", TRICKY_COMMENT)
++    assert row["captured_at_local"] == state["captured_at"]["local"]
++    assert row["captured_at_utc"] == state["captured_at"]["utc"]
++    assert row["environment_id"] == str(live.loaded_environment.row.id)
++    assert (row["session_id"], row["control_mode"]) == ("session-1", "teleop")
++    assert row["joint_names"] == "shoulder_pan.pos;gripper.pos"
++    assert (row["follower_joint_1"], row["follower_joint_2"], row["follower_joint_3"]) == ("12.5", "40.0", "")
++    assert (row["leader_joint_1"], row["leader_joint_2"]) == ("13.0", "41.5")
++    assert row["camera_names"] == "Cam 0;Top"
++    # Paths relative to the CSV that lead to the saved images.
++    for column in ("camera_1_color", "camera_2_color", "camera_2_depth", "camera_2_depth_preview"):
++        assert (folder.parent / row[column]).is_file(), column
++    assert row["camera_1_depth"] == ""
++    assert [item.comment for item in snapshot.list_snapshots(folder.parent)] == [TRICKY_COMMENT]
++
++
++def test_a_snapshot_is_saved_even_if_the_index_cannot_be_written(live, tmp_path, monkeypatch) -> None:
++    def fail(*_args, **_kwargs):
++        raise PermissionError("read-only")
++
++    monkeypatch.setattr(snapshot_index, "append", fail)
++
++    result = snapshot.write(snapshot.capture(live), tmp_path)
++
++    assert (Path(result.path) / "state.json").is_file()
++    assert any("snapshots.csv" in warning for warning in result.warnings)
++    assert snapshot_index.ensure(Path(result.path).parent)  # the next check adds it
++
++
++@pytest.fixture
++def project(live) -> UUID:
++    """A project of its own for the live session, so that no other test's snapshots show up."""
++    live.project_id = uuid4()
++    return live.project_id
++
++
++def _url(project: UUID, suffix: str = "") -> str:
++    return f"/api/projects/{project}/state_snapshots{suffix}"
++
++
++def _download(client: TestClient, project: UUID, **params) -> list[dict[str, str]]:
++    response = client.get(_url(project, "/snapshots.csv"), params=params)
++    assert response.status_code == 200
++    assert response.headers["content-type"] == "text/csv; charset=utf-8"
++    assert response.headers["content-disposition"] == f'attachment; filename="state_snapshots_{project}.csv"'
++    reader = csv.DictReader(io.StringIO(response.content.decode("utf-8"), newline=""))
++    assert tuple(reader.fieldnames or ()) == snapshot_index.COLUMNS
++    return list(reader)
++
++
++def _capture(client: TestClient, live, project: UUID, **label) -> dict:
++    response = client.post(_url(project), params={"session_id": live.id}, json=label or None)
++    assert response.status_code == 201, response.text
++    return response.json()
++
++
++def test_the_api_captures_with_a_label_lists_it_and_indexes_it(client, live, project) -> None:
++    created = _capture(client, live, project, defective=True, comment=TRICKY_COMMENT)
++
++    assert (created["defective"], created["comment"]) == (True, TRICKY_COMMENT)
++    state = json.loads((Path(created["path"]) / "state.json").read_text())
++    assert (state["defective"], state["comment"]) == (True, TRICKY_COMMENT)
++    listed = client.get(_url(project)).json()
++    assert [(item["snapshot_id"], item["defective"], item["comment"]) for item in listed] == [
++        (created["snapshot_id"], True, TRICKY_COMMENT)
++    ]
++    rows = _download(client, project)
++    assert [(row["snapshot_id"], row["defective"], row["comment"]) for row in rows] == [
++        (created["snapshot_id"], "true", TRICKY_COMMENT)
++    ]
++
++
++def test_a_capture_without_a_label_is_good_and_has_no_comment(client, live, project) -> None:
++    created = _capture(client, live, project)
++
++    assert (created["defective"], created["comment"]) == (False, "")
++    (row,) = _download(client, project)
++    assert (row["defective"], row["comment"]) == ("false", "")
++
++
++def test_a_comment_is_trimmed_and_may_have_500_characters(client, live, project) -> None:
++    created = _capture(client, live, project, comment="  " + "é" * 500 + "\n")
++
++    assert created["comment"] == "é" * 500
++
++
++@pytest.mark.parametrize(
++    "label",
++    [
++        pytest.param({"comment": "x" * 501}, id="too long"),
++        pytest.param({"comment": 5}, id="not text"),
++        pytest.param({"comment": "a\x00b"}, id="NUL"),
++        pytest.param({"defective": "maybe"}, id="not a bool"),
++        pytest.param({"defect": True}, id="unknown field"),
++    ],
++)
++def test_the_api_refuses_a_bad_label_and_saves_nothing(client, live, project, label) -> None:
++    response = client.post(_url(project), params={"session_id": live.id}, json=label)
++
++    assert response.status_code == 400
++    assert response.json()["error_code"] == "bad_request"
++    assert client.get(_url(project)).json() == []
++
++
++def test_the_api_changes_a_label_later(client, live, project) -> None:
++    first = _capture(client, live, project, comment="ok")
++    second = _capture(client, live, project, comment="untouched")
++
++    response = client.patch(_url(project, f"/{first['snapshot_id']}"), json={"defective": True})
++    assert response.status_code == 200
++    assert (response.json()["defective"], response.json()["comment"]) == (True, "ok")
++    response = client.patch(_url(project, f"/{first['snapshot_id']}"), json={"comment": f"  {TRICKY_COMMENT} "})
++    assert response.status_code == 200
++    assert (response.json()["defective"], response.json()["comment"]) == (True, TRICKY_COMMENT)
++
++    state = json.loads((Path(first["path"]) / "state.json").read_text())
++    assert (state["defective"], state["comment"]) == (True, TRICKY_COMMENT)
++    assert "label_updated_at" in state
++    assert state["robots"]["follower"]["joint_positions"] == {"shoulder_pan.pos": 12.5, "gripper.pos": 40.0}
++    labels = {row["snapshot_id"]: (row["defective"], row["comment"]) for row in _download(client, project)}
++    assert labels == {first["snapshot_id"]: ("true", TRICKY_COMMENT), second["snapshot_id"]: ("false", "untouched")}
++    listed = {item["snapshot_id"]: (item["defective"], item["comment"]) for item in client.get(_url(project)).json()}
++    assert listed == {first["snapshot_id"]: (True, TRICKY_COMMENT), second["snapshot_id"]: (False, "untouched")}
++
++    response = client.patch(_url(project, f"/{first['snapshot_id']}"), json={"defective": False, "comment": ""})
++    assert (response.json()["defective"], response.json()["comment"]) == (False, "")
++
++
++def test_a_label_change_needs_a_change_and_a_snapshot(client, live, project) -> None:
++    created = _capture(client, live, project)
++
++    for body in ({}, {"defective": None, "comment": None}, {"comment": "x" * 501}, {"defective": True, "x": 1}):
++        response = client.patch(_url(project, f"/{created['snapshot_id']}"), json=body)
++        assert response.status_code == 400, body
++    response = client.patch(_url(project, "/20261114-030000-999"), json={"defective": True})
++    assert response.status_code == 404
++    assert response.json()["error_code"] == "state_snapshot_not_found"
++    response = client.patch(_url(uuid4(), f"/{created['snapshot_id']}"), json={"defective": True})
++    assert response.status_code == 404
++    response = client.patch(_url(project, "/not-a-snapshot"), json={"defective": True})
++    assert response.status_code == 400
++    assert not client.get(_url(project)).json()[0]["defective"]
++
++
++def test_the_csv_download_is_rebuilt_when_missing_or_damaged(client, live, project) -> None:
++    assert _download(client, project) == []  # a project without snapshots: the header only
++    first = _capture(client, live, project, defective=True)
++    second = _capture(client, live, project, comment="b, c")
++    index = Path(first["path"]).parent / snapshot_index.CSV_NAME
++
++    index.unlink()
++    assert [row["snapshot_id"] for row in _download(client, project)] == [first["snapshot_id"], second["snapshot_id"]]
++
++    index.write_bytes(index.read_bytes()[:-30])
++    rows = _download(client, project)
++    assert [(row["defective"], row["comment"]) for row in rows] == [("true", ""), ("false", "b, c")]
++
++    # Edited by hand: only an explicit rebuild picks that up, since the index still lists every snapshot.
++    state_path = Path(second["path"]) / "state.json"
++    state_path.write_text(json.dumps(json.loads(state_path.read_text()) | {"comment": "by hand"}))
++    assert _download(client, project)[1]["comment"] == "b, c"
++    assert _download(client, project, rebuild="true")[1]["comment"] == "by hand"
++
++
++def test_the_list_can_be_limited_to_the_newest(client, live, project) -> None:
++    created = [_capture(client, live, project, comment=str(index))["snapshot_id"] for index in range(3)]
++
++    listed = client.get(_url(project), params={"limit": 2}).json()
++
++    assert [item["snapshot_id"] for item in listed] == created[:0:-1]
++    assert client.get(_url(project), params={"limit": 0}).status_code == 400
+-- 
+2.53.0
+

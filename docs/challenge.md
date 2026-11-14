@@ -28,8 +28,8 @@ Update this list when a step is done or blocked; link log / troubleshooting entr
 
 ### Step 2: Modal (VLA training on NVIDIA GPUs, $100 credit per participant)
 
-- [ ] Modal account and credit redeemed
-- [ ] `uvx --python 3.13 --from 'modal[api-proxy-support]>=1.6.3,<2' modal setup` run as the backend user
+- [ ] Modal account and credit redeemed. Deploy failed with "spend limit exceeded" (T-014)
+- [x] Modal credentials for the backend user (`~/.modal.toml`, profile chessnok; modal 1.6.3)
 - [ ] Studio: Settings → Training Targets → Modal Provider → Deploy and connect
 
 ### Step 3: Studio configuration
