@@ -27,7 +27,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from hackjunction2026.defect.training.common import RUNS_DIR
+from hackjunction2026.defect.training.common import DATASETS_DIR, RUNS_DIR
 
 
 def auroc(neg: list[float], pos: list[float]) -> float | None:
@@ -64,28 +64,35 @@ def latest_run() -> Path:
 
 
 def evaluate_run(run_dir: Path, device: str = "CPU", compression: str | None = None,
-                 threshold: float = 0.5, max_fpr: float = 0.05, n_errors: int = 8) -> dict:
-    """Evaluate all successful exports of a run (or only `compression`); writes eval.json."""
+                 threshold: float = 0.5, max_fpr: float = 0.05, n_errors: int = 8,
+                 dataset: str | None = None) -> dict:
+    """Evaluate all successful exports of a run (or only `compression`); writes eval.json.
+
+    dataset: evaluate on another dataset's test split (e.g. a synthetic eval set) instead of the
+    training dataset; results then go to eval_<dataset>.json and errors/<dataset>/.
+    """
     run = json.loads((run_dir / "run.json").read_text())
     exports = {k: v for k, v in run["exports"].items() if "xml" in v and (compression in (None, k))}
     if not exports:
         msg = f"{run_dir}: no successful export to evaluate"
         raise SystemExit(msg)
-    root = Path(run["dataset"]["path"])
+    root = DATASETS_DIR / dataset if dataset else Path(run["dataset"]["path"])
     with open(root / "index.csv", newline="") as f:
         rows = [r for r in csv.DictReader(f) if r["split"] == "test"]
     if not rows:
         msg = f"{root}: no test images"
         raise SystemExit(msg)
-    old = json.loads((run_dir / "eval.json").read_text()) if (run_dir / "eval.json").exists() else {}
+    out = run_dir / (f"eval_{dataset}.json" if dataset else "eval.json")
+    old = json.loads(out.read_text()) if out.exists() else {}
     results = {**old, **{comp: evaluate_export(run, run_dir, root, rows, comp, e["xml"], device, threshold,
-                                               max_fpr, n_errors) for comp, e in exports.items()}}
-    (run_dir / "eval.json").write_text(json.dumps(results, indent=2))
+                                               max_fpr, n_errors, tag=dataset or "")
+                         for comp, e in exports.items()}}
+    out.write_text(json.dumps(results, indent=2))
     return results
 
 
 def evaluate_export(run: dict, run_dir: Path, root: Path, rows: list[dict], comp: str, xml: str, device: str,
-                    threshold: float, max_fpr: float, n_errors: int) -> dict:
+                    threshold: float, max_fpr: float, n_errors: int, tag: str = "") -> dict:
     from anomalib.deploy import OpenVINOInferencer
 
     t0 = time.time()
@@ -100,6 +107,14 @@ def evaluate_export(run: dict, run_dir: Path, root: Path, rows: list[dict], comp
         score = float(np.ravel(pred.pred_score)[0])
         amap = getattr(pred, "anomaly_map", None)
         scored.append({**r, "score": score, "_img": img, "_amap": None if amap is None else np.asarray(amap)})
+
+    # per-image scores, for analyses beyond this file (by source, colour, brick-level OR, ...)
+    score_csv = run_dir / f"scores_{tag + '_' if tag else ''}{comp}_{device}.csv"
+    with open(score_csv, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=[*rows[0].keys(), "score", "latency_ms"], extrasaction="ignore")
+        w.writeheader()
+        for r, ms in zip(scored, lat, strict=True):
+            w.writerow({**{k: v for k, v in r.items() if not k.startswith("_")}, "latency_ms": round(ms, 3)})
 
     # per view: good vs defect images (defect_clean = other views of a defective brick, not used here)
     per_view = {}
@@ -125,7 +140,7 @@ def evaluate_export(run: dict, run_dir: Path, root: Path, rows: list[dict], comp
     recommended = ok[0] if ok else None
 
     # error images: worst false alarms (good, high score) and misses (defect, low score)
-    err_dir = run_dir / "errors" / comp
+    err_dir = run_dir / "errors" / tag / comp if tag else run_dir / "errors" / comp
     err_dir.mkdir(parents=True, exist_ok=True)
     for f in err_dir.glob("*.png"):
         f.unlink()
@@ -170,9 +185,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--compression", choices=("fp16", "int8_ptq"), help="default: every successful export")
     p.add_argument("--threshold", type=float, default=0.5, help="0.5 = the threshold learned in training")
     p.add_argument("--max-fpr", type=float, default=0.05, help="target share of wrongly rejected good bricks")
+    p.add_argument("--dataset", help="evaluate on this dataset's test split instead (e.g. <name>-synth); "
+                                     "writes eval_<dataset>.json")
     a = p.parse_args(argv)
     run_dir = RUNS_DIR / a.run if a.run else latest_run()
-    evaluate_run(run_dir, a.device, a.compression, a.threshold, a.max_fpr)
+    evaluate_run(run_dir, a.device, a.compression, a.threshold, a.max_fpr, dataset=a.dataset)
 
 
 if __name__ == "__main__":
