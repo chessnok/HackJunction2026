@@ -251,6 +251,13 @@ def main() -> None:
                      gemini_where=resp["where"], gemini_model=rec.get("model_version") or rec["model_requested"])
             if r["label"] == "good" and resp["mark_visible"]:
                 flagged_good.append(r)
+                if a.apply and r["split"] == "train":
+                    # Never train on a crop that may show a mark: park it in excluded/ (not read by training).
+                    new = f"excluded/flagged/{Path(r['path']).name}"
+                    (root / new).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(root / r["path"], root / new)
+                    r.update(path=new, split="excluded", cls="flagged_by_gemini")
+                    moved += 1
         if r["crop_id"] in overrides:
             r["manual_mark_visible"] = overrides[r["crop_id"]]
         if a.apply and r["label"] == "defect":

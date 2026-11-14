@@ -189,10 +189,11 @@ class Builder:
 
 
 def subsample(rows: list[dict], keep: set[str], cap: int | None, key: str, strata, seed: int) -> list[dict]:
-    """Keep at most `cap` rows of split `keep`, sampling whole `key` groups evenly over `strata`."""
+    """Keep at most `cap` dataset-episode rows of split `keep`, sampling whole `key` groups evenly over
+    `strata`. Snapshot rows are always kept."""
     if cap is None:
         return rows
-    sel = [r for r in rows if r["split"] in keep and r["label"] == "good"]
+    sel = [r for r in rows if r["split"] in keep and r["label"] == "good" and r["source"].startswith("dataset:")]
     if len(sel) <= cap:
         return rows
     groups: dict[str, list[dict]] = defaultdict(list)
@@ -293,7 +294,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--dataset", action="append", default=[], help="Studio dataset id (prefix ok) or path; repeatable")
     p.add_argument("--snapshots", action="append", default=[], help="snapshot project id (prefix ok); repeatable")
     p.add_argument("--snapshot-train-frac", type=float, default=0.0,
-                   help="share of GOOD snapshots (by snapshot) put into train/good; the rest are test (default 0)")
+                   help="share of GOOD snapshots put into train/good, in time blocks; the rest are test (default 0)")
+    p.add_argument("--snapshot-block", type=int, default=6, help="consecutive good snapshots per split block")
     p.add_argument("--every", type=int, default=10, help="every Nth dataset frame (default 10)")
     p.add_argument("--episodes", help="only these dataset episodes, e.g. 0-9,12")
     p.add_argument("--cameras", default=",".join(CAMERAS))
@@ -376,8 +378,13 @@ def main(argv: list[str] | None = None) -> None:
         dirs = [d for d in sorted(proj.iterdir()) if (d / "state.json").exists()]
         states = {d.name: json.loads((d / "state.json").read_text()) for d in dirs}
         good = {d.name: "snap" for d in dirs if not states[d.name].get("defective")}
-        snap_split = assign_splits(good, 1.0 - a.snapshot_train_frac, a.seed) if a.snapshot_train_frac > 0 \
-            else dict.fromkeys(good, "test")
+        snap_split = dict.fromkeys(good, "test")
+        if a.snapshot_train_frac > 0:
+            # Consecutive snapshots often show the same brick seconds apart: split whole time blocks.
+            names = sorted(good)
+            blocks = {f"block{i // a.snapshot_block:03d}": "snap" for i in range(len(names))}
+            block_split = assign_splits(blocks, 1.0 - a.snapshot_train_frac, a.seed)
+            snap_split = {n: block_split[f"block{i // a.snapshot_block:03d}"] for i, n in enumerate(names)}
         n_by = Counter()
         for d in dirs:
             st = states[d.name]

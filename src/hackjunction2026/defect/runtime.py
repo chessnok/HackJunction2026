@@ -58,8 +58,9 @@ class BrickAnomalyDetector:
         import yaml
 
         cfg = yaml.safe_load(Path(path).read_text())
-        xml = Path(cfg["model_xml"])
-        xml = xml if xml.is_absolute() else REPO / xml
+        xml = Path(cfg["model_xml"]).expanduser()
+        if not xml.is_absolute():  # relative to the repo root (exports/ is git-ignored), else to cwd
+            xml = REPO / xml if (REPO / xml).exists() else Path.cwd() / xml
         crop = CropConfig(**{f.name: cfg["crop"][f.name] for f in fields(CropConfig) if f.name in cfg.get("crop", {})})
         if isinstance(crop.fill, list):
             crop.fill = tuple(crop.fill)
