@@ -1,0 +1,35 @@
+# Settings of scripts/sort_cycle.py (ADR 0013). Values marked UNTESTED have not been checked on the robot.
+# Units: joints in Studio normalized units (-100..100, gripper 0..100), heights in mm above the table.
+poses: {observe: observe, photo: photo, bowl_good: bowl_good, bowl_defect: bowl_defect}  # names in poses.yaml
+hover_mm: 60.0             # jaw centre above the table over the brick before the grasp
+grasp_mm: 12.0             # jaw centre above the table when closing on a brick on the sheet (UNTESTED)
+approach_mm: 50.0          # pre-pose above a taught low pose (photo spot, bowls)
+raise_mm: 80.0             # straight up after a release, so the cameras see the brick (user requirement)
+travel_speed: 10.0         # units/s; capped at 10 for arm joints in code
+near_table_speed: 4.0
+gripper_speed: 30.0        # gripper-only moves
+travel_clearance_mm: 30.0  # every arm point above the table along a travel move
+near_table_clearance_mm: 2.0
+gripper_open: 90.0
+gripper_close_target: 0.0
+empty_closed: 2.5          # closed on nothing (agent B: 2.57)
+hold_min: 8.0              # stops above this when told to close -> holding a brick (UNTESTED; big brick ~30-34)
+load_hold_min: 150         # |Present_Load| (0.1 % of max torque) that also counts as holding (UNTESTED)
+squeeze: 3.0               # after the stop, command only this far past it (keeps the load low)
+hold_torque_limit: 300     # gripper RAM Torque_Limit (addr 48) while closing / holding (UNTESTED)
+retries_per_brick: 3
+locate: auto               # wrist (needs configs/table_homography.yaml) | top (configs/top_camera.yaml, 3-4 cm off) | auto
+homography: configs/table_homography.yaml
+top_camera: configs/top_camera.yaml
+top_serial: "243622062352"
+floor_serial: "243622062278"
+brick_half_depth_mm: 12.0
+patchcore_deploy: configs/anomalib_deploy.yaml
+classifier_xml: outputs/mark_classifier/20261114-085214_resnet18lr_bricks_z14t/model.xml
+classifier_threshold: 0.998  # 0 % crop false positives in cross-validation (ADR 0006 follow-up)
+detector_device: NPU
+act_export: ~/.local/share/physicalai/models/62003713-0c7d-44f0-878c-436b9fc2ed16/exports/openvino
+act_device: GPU
+act_max_s: 12.0
+act_replan_every: 10
+act_max_speed: 10.0        # units/s per joint, also for the policy (slower than the demonstrations)
