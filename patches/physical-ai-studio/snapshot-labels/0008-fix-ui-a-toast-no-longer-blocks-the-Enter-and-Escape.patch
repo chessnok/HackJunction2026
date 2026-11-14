@@ -1,0 +1,235 @@
+From 1e1ff8c21c5eccbf357d7b11ab2d02ff48b5e21a Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Sat, 14 Nov 2026 04:21:34 -0800
+Subject: [PATCH 8/9] fix(ui): a toast no longer blocks the Enter and Escape
+ hotkeys
+
+Every toast is an alertdialog (react-aria's useToast), so the open-overlay
+guard of useHotkey took any toast on screen for an open dialog: since Enter
+was added to the guard, the "snapshot saved" toast (8 s; errors 10 s) kept
+Enter from starting or accepting an episode, and Escape from discarding one
+already before.
+
+Only what is modal counts now: a dialog or alertdialog unless it is
+aria-modal="false", and a menu or listbox; nothing in react-aria's toast
+region counts. Tested with a real ToastContainer: Enter and Escape fire with a
+toast on screen, also right after a capture's toast, and stay with a real
+modal dialog (also with a toast on screen), an open menu and the open recent
+snapshots list.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/features/hotkeys/use-hotkey.test.tsx  | 105 +++++++++++++++++-
+ .../ui/src/features/hotkeys/use-hotkey.ts     |  21 +++-
+ .../runtime-session/state-snapshot.test.tsx   |  31 +++++-
+ 3 files changed, 151 insertions(+), 6 deletions(-)
+
+diff --git a/application/ui/src/features/hotkeys/use-hotkey.test.tsx b/application/ui/src/features/hotkeys/use-hotkey.test.tsx
+index 99220123..11ae0705 100644
+--- a/application/ui/src/features/hotkeys/use-hotkey.test.tsx
++++ b/application/ui/src/features/hotkeys/use-hotkey.test.tsx
+@@ -1,6 +1,19 @@
++import {
++    ActionButton,
++    Content,
++    Dialog,
++    DialogTrigger,
++    Heading,
++    Item,
++    Menu,
++    MenuTrigger,
++    toast,
++    ToastContainer,
++} from '@geti-ui/ui';
+ import { afterEach, describe, expect, it, rs } from '@rstest/core';
+-import { fireEvent, renderHook } from '@testing-library/react';
++import { act, fireEvent, renderHook, screen } from '@testing-library/react';
+ 
++import { render } from '../../test-utils/render';
+ import { HOTKEY_ACTIONS } from './hotkey-actions';
+ import { useHotkey } from './use-hotkey';
+ 
+@@ -96,3 +109,93 @@ describe('useHotkey with Enter and Escape', () => {
+         expect(handler).not.toHaveBeenCalled();
+     });
+ });
++
++const PageHotkeys = ({ enter, escape }: { enter: () => void; escape: () => void }) => {
++    useHotkey('Enter', enter);
++    useHotkey('Escape', escape);
++    return null;
++};
++
++describe('useHotkey with notifications and overlays on screen', () => {
++    const closeToasts: (() => void)[] = [];
++
++    afterEach(() => {
++        act(() => closeToasts.splice(0).forEach((close) => close()));
++    });
++
++    /** A real toast, as a snapshot capture shows one: an alertdialog, but not a modal one. */
++    const showToast = async (message: string) => {
++        act(() => {
++            closeToasts.push(toast.positive(message));
++        });
++        await screen.findByText(message);
++        expect(screen.getByRole('alertdialog')).toHaveAttribute('aria-modal', 'false');
++    };
++
++    it('fires Enter and Escape while a toast is on screen', async () => {
++        const enter = rs.fn();
++        const escape = rs.fn();
++        render(
++            <>
++                <ToastContainer />
++                <PageHotkeys enter={enter} escape={escape} />
++            </>
++        );
++        await showToast('Good snapshot saved');
++
++        fireEvent.keyDown(document.body, { key: 'Enter' });
++        fireEvent.keyDown(document.body, { key: 'Escape' });
++
++        expect(enter).toHaveBeenCalledTimes(1);
++        expect(escape).toHaveBeenCalledTimes(1);
++    });
++
++    it('leaves Enter and Escape to a modal dialog, also with a toast on screen', async () => {
++        const enter = rs.fn();
++        const escape = rs.fn();
++        render(
++            <>
++                <ToastContainer />
++                <PageHotkeys enter={enter} escape={escape} />
++                <DialogTrigger type='modal' defaultOpen>
++                    <ActionButton>Open</ActionButton>
++                    <Dialog>
++                        <Heading>Discard the episode?</Heading>
++                        <Content>It is not saved.</Content>
++                    </Dialog>
++                </DialogTrigger>
++            </>
++        );
++        await screen.findByRole('dialog');
++        await showToast('Good snapshot saved');
++
++        fireEvent.keyDown(document.body, { key: 'Enter' });
++        fireEvent.keyDown(document.body, { key: 'Escape' });
++
++        expect(enter).not.toHaveBeenCalled();
++        expect(escape).not.toHaveBeenCalled();
++    });
++
++    it('leaves Enter and Escape to an open menu', async () => {
++        const enter = rs.fn();
++        const escape = rs.fn();
++        render(
++            <>
++                <PageHotkeys enter={enter} escape={escape} />
++                <MenuTrigger defaultOpen>
++                    <ActionButton>Actions</ActionButton>
++                    <Menu>
++                        <Item key='rename'>Rename</Item>
++                    </Menu>
++                </MenuTrigger>
++            </>
++        );
++        await screen.findByRole('menu');
++
++        fireEvent.keyDown(document.body, { key: 'Enter' });
++        fireEvent.keyDown(document.body, { key: 'Escape' });
++
++        expect(enter).not.toHaveBeenCalled();
++        expect(escape).not.toHaveBeenCalled();
++    });
++});
+diff --git a/application/ui/src/features/hotkeys/use-hotkey.ts b/application/ui/src/features/hotkeys/use-hotkey.ts
+index f2aa567b..b330592d 100644
+--- a/application/ui/src/features/hotkeys/use-hotkey.ts
++++ b/application/ui/src/features/hotkeys/use-hotkey.ts
+@@ -43,17 +43,30 @@ const isEnterActivatedTarget = (target: EventTarget | null): boolean => {
+     );
+ };
+ 
+-// Escape closes an open dialog, menu or listbox, and Enter acts within it; neither may also act on the
+-// page behind it (such as starting, accepting or discarding an episode).
++const DIALOGS = '[role="dialog"], [role="alertdialog"]';
++const POPUPS = '[role="menu"], [role="listbox"]';
++// react-aria's toast region; its toasts are alertdialogs too.
++const TOAST_REGION = '[role="region"][data-react-aria-top-layer]';
++
++/**
++ * Whether a modal dialog, a menu or a listbox is open: Escape closes it and Enter acts within it, so
++ * neither may also act on the page behind it (such as starting, accepting or discarding an episode).
++ * A toast does not count: it is an alertdialog, but not a modal one (aria-modal="false", in the toast
++ * region), and counting it would block those hotkeys for as long as any notification is on screen.
++ */
+ const hasOpenOverlay = (): boolean =>
+-    document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]') !== null;
++    Array.from(document.querySelectorAll(`${DIALOGS}, ${POPUPS}`)).some(
++        (overlay) =>
++            overlay.closest(TOAST_REGION) === null &&
++            !(overlay.matches(DIALOGS) && overlay.getAttribute('aria-modal') === 'false')
++    );
+ 
+ /**
+  * Fires `handler` when `combo` (a canonical string from `keyboardEventToCombo`) is
+  * pressed anywhere in the document, while `enabled`. Ignores keystrokes into text
+  * inputs/content-editable elements, key-repeat events, events another handler already
+  * handled, Space or Enter on a focused control that the key activates, and Enter or
+- * Escape while a dialog, menu or listbox is open.
++ * Escape while a modal dialog, a menu or a listbox is open (a toast does not count).
+  */
+ export const useHotkey = (combo: string, handler: () => void, enabled = true): void => {
+     useEffect(() => {
+diff --git a/application/ui/src/features/runtime-session/state-snapshot.test.tsx b/application/ui/src/features/runtime-session/state-snapshot.test.tsx
+index 83275e9d..681387d2 100644
+--- a/application/ui/src/features/runtime-session/state-snapshot.test.tsx
++++ b/application/ui/src/features/runtime-session/state-snapshot.test.tsx
+@@ -1,6 +1,6 @@
+ import { ReactNode } from 'react';
+ 
+-import { toast } from '@geti-ui/ui';
++import { toast, ToastContainer } from '@geti-ui/ui';
+ import { afterEach, beforeEach, describe, expect, it, rs } from '@rstest/core';
+ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
+ import userEvent from '@testing-library/user-event';
+@@ -252,6 +252,35 @@ describe('StateSnapshotControls', () => {
+         expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+     });
+ 
++    it('leaves Enter and Escape to the page while the "saved" toast is on screen', async () => {
++        mockSettings();
++        const requests = mockCapture();
++        const shown = rs.spyOn(toast, 'positive'); // the real toast, an alertdialog that is not modal
++        const startEpisode = rs.fn();
++        const discardEpisode = rs.fn();
++        const user = userEvent.setup();
++        render(
++            <>
++                <ToastContainer />
++                <Controls>
++                    <RecordingHotkeys start={startEpisode} discard={discardEpisode} />
++                </Controls>
++            </>
++        );
++
++        pressSpace();
++        await screen.findByText(/^Good snapshot saved to /);
++        expect(requests).toHaveLength(1);
++        expect(screen.getByRole('alertdialog')).toBeInTheDocument();
++
++        await user.keyboard('{Enter}');
++        await user.keyboard('{Escape}');
++
++        expect(startEpisode).toHaveBeenCalledTimes(1);
++        expect(discardEpisode).toHaveBeenCalledTimes(1);
++        act(() => shown.mock.results.forEach((result) => (result.value as () => void)()));
++    });
++
+     it('remembers the label per project in this browser', async () => {
+         mockSettings();
+         const user = userEvent.setup();
+-- 
+2.53.0
+

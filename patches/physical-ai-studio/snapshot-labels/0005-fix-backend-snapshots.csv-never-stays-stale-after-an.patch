@@ -1,0 +1,291 @@
+From a06f4f07f186a485b658c20f692bb78d9baddff9 Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Sat, 14 Nov 2026 04:05:22 -0800
+Subject: [PATCH 5/9] fix(backend): snapshots.csv never stays stale after an
+ edit cut short
+
+A label edit wrote state.json and then rebuilt the CSV; if the rebuild failed
+(crash, full disk) the CSV kept the old label for good, since the check before
+a download compared snapshot ids only, and PATCH answered 500 although the
+label had changed.
+
+- The check (ensure, and so the CSV download) compares every row with what the
+  state.json files make now, so any difference, an edit cut short or a label
+  edited by hand, rewrites the CSV.
+- An edit marks the CSV stale (snapshots.csv.dirty) before it touches
+  state.json; the marker goes when the CSV is next written, and while it is
+  there the next capture rebuilds instead of appending.
+- If the CSV cannot be rewritten once state.json has changed, the edit stands
+  (PATCH answers 200 with the new label) and the marker stays for the next
+  capture or download; if state.json itself cannot be written, nothing
+  changes and PATCH fails as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/runtime_session/snapshot_index.py     | 63 ++++++++++++-----
+ .../tests/runtime_session/test_snapshot.py    | 21 +++++-
+ .../runtime_session/test_snapshot_index.py    | 69 +++++++++++++++++++
+ 3 files changed, 132 insertions(+), 21 deletions(-)
+
+diff --git a/application/backend/src/runtime_session/snapshot_index.py b/application/backend/src/runtime_session/snapshot_index.py
+index bd44781d..5f67016d 100644
+--- a/application/backend/src/runtime_session/snapshot_index.py
++++ b/application/backend/src/runtime_session/snapshot_index.py
+@@ -5,10 +5,12 @@ Kept next to the snapshot folders, at ``<storage>/state_snapshots/<project>/snap
+ commas, quotes or line breaks is quoted, so read it with a CSV reader, not line by line).
+ 
+ Each snapshot's ``state.json`` is the source of truth; the index is derived from it. A capture
+-appends its row; editing a label, or finding the index missing, unreadable or out of step with the
+-folders, rewrites it from every ``state.json`` (:func:`rebuild`). Every change holds the project's
+-lock (threads, and processes through ``snapshots.csv.lock``) and lands whole: an appended row in
+-one write, a rebuilt index by an atomic rename.
++appends its row; editing a label, or finding the index missing, unreadable or different from what
++the ``state.json`` files say, rewrites it from all of them (:func:`rebuild`). Every change holds the
++project's lock (threads, and processes through ``snapshots.csv.lock``) and lands whole: an appended
++row in one write, a rebuilt index by an atomic rename. An edit marks the index stale
++(``snapshots.csv.dirty``) before it touches a ``state.json``, so that an edit cut short (a crash, a
++full disk) is repaired by the next capture or download.
+ 
+ Columns, in this order (stable; new columns are only ever added at the end):
+ 
+@@ -52,6 +54,8 @@ if TYPE_CHECKING:
+ 
+ CSV_NAME = "snapshots.csv"
+ LOCK_NAME = f"{CSV_NAME}.lock"
++DIRTY_NAME = f"{CSV_NAME}.dirty"
++"""Present while an edit may have changed a ``state.json`` that the index does not show yet."""
+ STATE_FILE = "state.json"
+ JOINT_COLUMNS = 6
+ """Joint columns per robot: an SO-101 has six; a robot with more has the rest in ``state.json`` only."""
+@@ -143,11 +147,11 @@ def append(project_root: Path, document: dict[str, Any]) -> None:
+     """
+     with locked(project_root):
+         path = project_root / CSV_NAME
+-        ids = _indexed_ids(path)
+-        if ids is None:
++        rows = _current_rows(project_root)
++        if rows is None:
+             _rebuild_locked(project_root)
+             return
+-        if str(document.get("snapshot_id")) in ids:
++        if str(document.get("snapshot_id")) in {line[0] for line in rows}:
+             return
+         # A whole row in one write, under the lock: no reader or writer sees half of it.
+         with path.open("ab") as index:
+@@ -163,7 +167,10 @@ def rebuild(project_root: Path) -> int:
+ 
+ 
+ def ensure(project_root: Path) -> bool:
+-    """Rebuild the index if it is missing, unreadable, or does not list every snapshot exactly once.
++    """Rebuild the index unless it holds exactly the rows the snapshots' ``state.json`` files make.
++
++    So it is rebuilt if it is missing, unreadable, marked stale, lists a snapshot twice or not at
++    all, or any value differs (a label edited by hand, or an edit cut short).
+ 
+     Returns:
+         Whether it was rebuilt.
+@@ -189,11 +196,15 @@ def contents(project_root: Path, *, rebuild_first: bool = False) -> bytes:
+ def update(project_root: Path, snapshot_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+     """Change fields of a snapshot's ``state.json`` (such as its label), then rebuild the index.
+ 
++    The index is marked stale first. If it cannot be rebuilt once ``state.json`` is changed, the
++    change stands and the index stays marked, for the next capture or download to rebuild it.
++
+     Returns:
+         The updated ``state.json``.
+ 
+     Raises:
+         FileNotFoundError: There is no such snapshot.
++        OSError: ``state.json`` could not be changed; it is as it was.
+     """
+     folder = project_root / snapshot_id
+     if folder.resolve().parent != project_root.resolve() or not (folder / STATE_FILE).is_file():
+@@ -201,8 +212,12 @@ def update(project_root: Path, snapshot_id: str, changes: dict[str, Any]) -> dic
+     with locked(project_root):
+         document = json.loads((folder / STATE_FILE).read_text(encoding="utf-8"))
+         document.update(changes)
++        (project_root / DIRTY_NAME).touch()
+         write_json(folder / STATE_FILE, document)
+-        _rebuild_locked(project_root)
++        try:
++            _rebuild_locked(project_root)
++        except OSError:
++            logger.exception("Changed {} but could not rebuild {}; the next check will", folder.name, CSV_NAME)
+         return document
+ 
+ 
+@@ -269,29 +284,39 @@ def _documents(project_root: Path) -> list[tuple[str, dict[str, Any]]]:
+ 
+ 
+ def _ensure_locked(project_root: Path) -> bool:
+-    ids = _indexed_ids(project_root / CSV_NAME)
+-    if ids is not None and sorted(ids) == [name for name, _ in _documents(project_root)]:
++    rows = _current_rows(project_root)
++    expected = [_row_or_placeholder(document) for _, document in _documents(project_root)]
++    # In any order: appended rows follow the order captures finished in.
++    if rows is not None and sorted(rows) == sorted(expected):
+         return False
+-    _rebuild_locked(project_root)
++    _write_locked(project_root, expected)
+     return True
+ 
+ 
+ def _rebuild_locked(project_root: Path) -> int:
+-    documents = _documents(project_root)
++    rows = [_row_or_placeholder(document) for _, document in _documents(project_root)]
++    _write_locked(project_root, rows)
++    return len(rows)
++
++
++def _write_locked(project_root: Path, rows: list[list[str]]) -> None:
+     path = project_root / CSV_NAME
+     partial = path.with_name(f".{CSV_NAME}.{os.getpid()}.{threading.get_ident()}.tmp")
+-    partial.write_bytes(_encode([_row_or_placeholder(document) for _, document in documents], header=True))
++    partial.write_bytes(_encode(rows, header=True))
+     partial.replace(path)  # atomic: a reader sees the old index or the new one
+-    logger.info("Rebuilt {} with {} snapshot(s)", path, len(documents))
+-    return len(documents)
++    (project_root / DIRTY_NAME).unlink(missing_ok=True)
++    logger.info("Rebuilt {} with {} snapshot(s)", path, len(rows))
+ 
+ 
+-def _indexed_ids(path: Path) -> list[str] | None:
+-    """The snapshot ids the index lists, or None if it is missing or not exactly as this module writes it.
++def _current_rows(project_root: Path) -> list[list[str]] | None:
++    """The index's rows, or None if it is marked stale, missing, or not exactly as this module writes it.
+ 
+     Not as written: another header, a row of another width, an id twice, or no line end after the
+     last row (an append would run into it).
+     """
++    if (project_root / DIRTY_NAME).exists():
++        return None
++    path = project_root / CSV_NAME
+     try:
+         data = path.read_bytes()
+         rows = list(csv.reader(io.StringIO(data.decode("utf-8"), newline="")))
+@@ -302,4 +327,4 @@ def _indexed_ids(path: Path) -> list[str] | None:
+     if any(len(line) != len(COLUMNS) for line in rows[1:]):
+         return None
+     ids = [line[0] for line in rows[1:]]
+-    return ids if len(set(ids)) == len(ids) else None
++    return rows[1:] if len(set(ids)) == len(ids) else None
+diff --git a/application/backend/tests/runtime_session/test_snapshot.py b/application/backend/tests/runtime_session/test_snapshot.py
+index 4968576b..423586cd 100644
+--- a/application/backend/tests/runtime_session/test_snapshot.py
++++ b/application/backend/tests/runtime_session/test_snapshot.py
+@@ -440,13 +440,30 @@ def test_the_csv_download_is_rebuilt_when_missing_or_damaged(client, live, proje
+     rows = _download(client, project)
+     assert [(row["defective"], row["comment"]) for row in rows] == [("true", ""), ("false", "b, c")]
+ 
+-    # Edited by hand: only an explicit rebuild picks that up, since the index still lists every snapshot.
++    # Edited by hand: the download serves what state.json says.
+     state_path = Path(second["path"]) / "state.json"
+     state_path.write_text(json.dumps(json.loads(state_path.read_text()) | {"comment": "by hand"}))
+-    assert _download(client, project)[1]["comment"] == "b, c"
++    assert _download(client, project)[1]["comment"] == "by hand"
+     assert _download(client, project, rebuild="true")[1]["comment"] == "by hand"
+ 
+ 
++def test_a_label_change_whose_csv_cannot_be_rewritten_still_counts(client, live, project, monkeypatch) -> None:
++    created = _capture(client, live, project)
++    write = snapshot_index._write_locked
++
++    def disk_full(*_args, **_kwargs):
++        raise OSError(28, "No space left on device")
++
++    monkeypatch.setattr(snapshot_index, "_write_locked", disk_full)
++    response = client.patch(_url(project, f"/{created['snapshot_id']}"), json={"defective": True, "comment": "dent"})
++    monkeypatch.setattr(snapshot_index, "_write_locked", write)
++
++    assert response.status_code == 200
++    assert (response.json()["defective"], response.json()["comment"]) == (True, "dent")
++    (row,) = _download(client, project)
++    assert (row["defective"], row["comment"]) == ("true", "dent")
++
++
+ def test_snapshots_from_before_labels_are_unlabelled_until_labelled(client, live, project) -> None:
+     created = _capture(client, live, project)
+     state_path = Path(created["path"]) / "state.json"
+diff --git a/application/backend/tests/runtime_session/test_snapshot_index.py b/application/backend/tests/runtime_session/test_snapshot_index.py
+index 68c99a49..0c68ba25 100644
+--- a/application/backend/tests/runtime_session/test_snapshot_index.py
++++ b/application/backend/tests/runtime_session/test_snapshot_index.py
+@@ -297,6 +297,75 @@ def test_updating_a_label_rewrites_state_json_and_the_index(tmp_path) -> None:
+     ]
+ 
+ 
++def test_a_value_differing_from_state_json_is_rebuilt(tmp_path) -> None:
++    for index in range(2):
++        snapshot_index.append(tmp_path, _save(tmp_path, _snapshot_id(index), comment="before"))
++    state = tmp_path / _snapshot_id(1) / "state.json"
++    snapshot_index.write_json(state, json.loads(state.read_text()) | {"defective": True, "comment": "by hand"})
++
++    assert snapshot_index.ensure(tmp_path)
++
++    assert [(row["defective"], row["comment"]) for row in _rows(tmp_path)] == [("false", "before"), ("true", "by hand")]
++    assert not snapshot_index.ensure(tmp_path)
++
++
++def _disk_full(*_args, **_kwargs):
++    raise OSError(28, "No space left on device")
++
++
++def test_an_edit_cut_short_after_state_json_is_repaired_by_the_next_check(tmp_path, monkeypatch) -> None:
++    for index in range(2):
++        snapshot_index.append(tmp_path, _save(tmp_path, _snapshot_id(index)))
++    write = snapshot_index._write_locked
++    monkeypatch.setattr(snapshot_index, "_write_locked", _disk_full)
++
++    # The label is changed (state.json is the truth); the index cannot be rewritten yet.
++    document = snapshot_index.update(tmp_path, _snapshot_id(1), {"defective": True, "comment": "dent"})
++
++    assert (document["defective"], document["comment"]) == (True, "dent")
++    state = json.loads((tmp_path / _snapshot_id(1) / "state.json").read_text())
++    assert (state["defective"], state["comment"]) == (True, "dent")
++    assert _rows(tmp_path)[1]["defective"] == "false"  # stale, and marked so
++    assert (tmp_path / snapshot_index.DIRTY_NAME).exists()
++
++    monkeypatch.setattr(snapshot_index, "_write_locked", write)
++    downloaded = snapshot_index.contents(tmp_path)  # what the CSV download serves
++
++    rows = list(csv.DictReader(io.StringIO(downloaded.decode("utf-8"), newline="")))
++    assert [(row["defective"], row["comment"]) for row in rows] == [("false", ""), ("true", "dent")]
++    assert not (tmp_path / snapshot_index.DIRTY_NAME).exists()
++
++
++def test_a_capture_after_an_edit_cut_short_repairs_the_index(tmp_path, monkeypatch) -> None:
++    snapshot_index.append(tmp_path, _save(tmp_path, _snapshot_id(0)))
++    write = snapshot_index._write_locked
++    monkeypatch.setattr(snapshot_index, "_write_locked", _disk_full)
++    snapshot_index.update(tmp_path, _snapshot_id(0), {"comment": "dent"})
++    monkeypatch.setattr(snapshot_index, "_write_locked", write)
++
++    snapshot_index.append(tmp_path, _save(tmp_path, _snapshot_id(1)))  # the next capture
++
++    assert [(row["snapshot_id"], row["comment"]) for row in _rows(tmp_path)] == [
++        (_snapshot_id(0), "dent"),
++        (_snapshot_id(1), ""),
++    ]
++    assert not (tmp_path / snapshot_index.DIRTY_NAME).exists()
++
++
++def test_an_edit_whose_state_json_cannot_be_written_changes_nothing(tmp_path, monkeypatch) -> None:
++    snapshot_index.append(tmp_path, _save(tmp_path, _snapshot_id(0), comment="before"))
++
++    monkeypatch.setattr(snapshot_index, "write_json", _disk_full)
++    with pytest.raises(OSError, match="No space"):
++        snapshot_index.update(tmp_path, _snapshot_id(0), {"comment": "after"})
++    monkeypatch.undo()
++
++    assert json.loads((tmp_path / _snapshot_id(0) / "state.json").read_text())["comment"] == "before"
++    snapshot_index.ensure(tmp_path)
++    assert _rows(tmp_path)[0]["comment"] == "before"
++    assert not (tmp_path / snapshot_index.DIRTY_NAME).exists()
++
++
+ @pytest.mark.parametrize("snapshot_id", ["20261114-030000-999", "..", "../other-project/20261114-030000-000"])
+ def test_updating_a_missing_snapshot_fails(tmp_path, snapshot_id) -> None:
+     project = tmp_path / "project"
+-- 
+2.53.0
+

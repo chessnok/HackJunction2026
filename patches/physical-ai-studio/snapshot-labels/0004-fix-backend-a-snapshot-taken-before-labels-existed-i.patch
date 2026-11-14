@@ -1,0 +1,222 @@
+From 57ae344667d6aac51001c0f153b4b3ffd30f4db8 Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Sat, 14 Nov 2026 04:05:00 -0800
+Subject: [PATCH 4/9] fix(backend): a snapshot taken before labels existed is
+ unlabelled, not good
+
+Snapshots saved by the first snapshot feature have no defective key; they were
+read as defective=false, indistinguishable from ones labelled good.
+
+- snapshots.csv: defective is "true", "false", or empty for not labelled
+  (documented in the module's column list).
+- The API returns defective: null for them (StateSnapshot.defective is now
+  bool | null); labelling one through PATCH sets it, a comment alone does not.
+- The placeholder row for a state.json of an unexpected shape keeps its label
+  and comment where they are readable, and leaves them empty otherwise,
+  instead of writing "false" and dropping the comment.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../backend/src/runtime_session/snapshot.py   |  6 ++-
+ .../src/runtime_session/snapshot_index.py     | 28 +++++++++++---
+ .../backend/src/schemas/state_snapshot.py     |  6 ++-
+ .../tests/runtime_session/test_snapshot.py    | 19 ++++++++++
+ .../runtime_session/test_snapshot_index.py    | 38 ++++++++++++++++++-
+ 5 files changed, 86 insertions(+), 11 deletions(-)
+
+diff --git a/application/backend/src/runtime_session/snapshot.py b/application/backend/src/runtime_session/snapshot.py
+index 780e13f4..bb060e7b 100644
+--- a/application/backend/src/runtime_session/snapshot.py
++++ b/application/backend/src/runtime_session/snapshot.py
+@@ -221,6 +221,8 @@ def update_label(
+ 
+ 
+ def _summary(folder: Path, document: dict[str, Any]) -> StateSnapshot:
++    # Snapshots from before labels existed have none: neither good nor defective, but unlabelled.
++    defective, comment = document.get("defective"), document.get("comment")
+     robots = document.get("robots") or {}
+     leader = robots.get("leader") or {}
+     cameras = [
+@@ -243,8 +245,8 @@ def _summary(folder: Path, document: dict[str, Any]) -> StateSnapshot:
+         follower=(robots.get("follower") or {}).get("joint_positions") is not None,
+         leader=leader.get("joint_positions") is not None,
+         warnings=document.get("warnings", []),
+-        defective=document.get("defective") is True,
+-        comment=document.get("comment") or "",
++        defective=defective if isinstance(defective, bool) else None,
++        comment=comment if isinstance(comment, str) else "",
+     )
+ 
+ 
+diff --git a/application/backend/src/runtime_session/snapshot_index.py b/application/backend/src/runtime_session/snapshot_index.py
+index e482ff1b..bd44781d 100644
+--- a/application/backend/src/runtime_session/snapshot_index.py
++++ b/application/backend/src/runtime_session/snapshot_index.py
+@@ -14,7 +14,8 @@ Columns, in this order (stable; new columns are only ever added at the end):
+ 
+ - ``snapshot_id``: the snapshot's folder name, its local capture time ``YYYYmmdd-HHMMSS-mmm``.
+ - ``captured_at_local``, ``captured_at_utc``: ISO 8601 with milliseconds and UTC offset.
+-- ``defective``: ``true`` or ``false``.
++- ``defective``: ``true``, ``false``, or empty: not labelled (taken before labels existed; label it
++  with the API or the snapshot list).
+ - ``comment``: free text as entered (at most 500 characters), or empty.
+ - ``environment_id``, ``environment_name``, ``session_id``.
+ - ``control_mode``: what drove the follower: ``teleop``, ``model``, …; empty when it was held still.
+@@ -112,8 +113,8 @@ def row(document: dict[str, Any]) -> list[str]:
+         "snapshot_id": snapshot_id,
+         "captured_at_local": captured.get("local") or "",
+         "captured_at_utc": captured.get("utc") or "",
+-        "defective": "true" if document.get("defective") is True else "false",
+-        "comment": document.get("comment") or "",
++        "defective": _label(document.get("defective")),
++        "comment": _comment(document.get("comment")),
+         "environment_id": environment.get("id") or "",
+         "environment_name": environment.get("name") or "",
+         "session_id": session.get("id") or "",
+@@ -219,14 +220,29 @@ def _number(value: Any) -> str:
+         return ""
+ 
+ 
++def _label(defective: Any) -> str:
++    """``true``, ``false``, or empty for a snapshot that was never labelled."""
++    if isinstance(defective, bool):
++        return "true" if defective else "false"
++    return ""
++
++
++def _comment(comment: Any) -> str:
++    return comment if isinstance(comment, str) else ""
++
++
+ def _row_or_placeholder(document: dict[str, Any]) -> list[str]:
+-    """:func:`row`, or for a ``state.json`` it cannot make sense of, its id and why."""
++    """:func:`row`, or for a ``state.json`` it cannot make sense of, its id, label and why."""
+     try:
+         return row(document)
+     except (AttributeError, TypeError, ValueError) as error:
+         logger.warning("Snapshot {} has an unexpected state.json: {}", document.get("snapshot_id"), error)
+-        values = {"snapshot_id": str(document.get("snapshot_id", "")), "defective": "false"}
+-        values["warnings"] = f"state.json has an unexpected shape: {error}"
++        values = {
++            "snapshot_id": str(document.get("snapshot_id", "")),
++            "defective": _label(document.get("defective")),
++            "comment": _comment(document.get("comment")),
++            "warnings": f"state.json has an unexpected shape: {error}",
++        }
+         return [values.get(column, "") for column in COLUMNS]
+ 
+ 
+diff --git a/application/backend/src/schemas/state_snapshot.py b/application/backend/src/schemas/state_snapshot.py
+index 4934171b..3b07d306 100644
+--- a/application/backend/src/schemas/state_snapshot.py
++++ b/application/backend/src/schemas/state_snapshot.py
+@@ -65,5 +65,9 @@ class StateSnapshot(BaseModel):
+     follower: bool = Field(description="Whether the follower's joint positions were captured")
+     leader: bool = Field(description="Whether the leader's joint positions were captured")
+     warnings: list[str] = Field(default_factory=list, description="What could not be captured, and why")
+-    defective: bool = Field(default=False, description="Whether the snapshot shows a defective part")
++    defective: bool | None = Field(
++        default=None,
++        description="Whether the snapshot shows a defective part; null if it was never labelled "
++        "(taken before labels existed)",
++    )
+     comment: str = Field(default="", description="The note saved with the snapshot")
+diff --git a/application/backend/tests/runtime_session/test_snapshot.py b/application/backend/tests/runtime_session/test_snapshot.py
+index b1643656..4968576b 100644
+--- a/application/backend/tests/runtime_session/test_snapshot.py
++++ b/application/backend/tests/runtime_session/test_snapshot.py
+@@ -447,6 +447,25 @@ def test_the_csv_download_is_rebuilt_when_missing_or_damaged(client, live, proje
+     assert _download(client, project, rebuild="true")[1]["comment"] == "by hand"
+ 
+ 
++def test_snapshots_from_before_labels_are_unlabelled_until_labelled(client, live, project) -> None:
++    created = _capture(client, live, project)
++    state_path = Path(created["path"]) / "state.json"
++    old = json.loads(state_path.read_text())
++    del old["defective"], old["comment"]  # as the first snapshot feature wrote them
++    state_path.write_text(json.dumps(old))
++    (state_path.parent.parent / snapshot_index.CSV_NAME).unlink()
++
++    assert client.get(_url(project)).json()[0]["defective"] is None
++    assert _download(client, project)[0]["defective"] == ""
++
++    response = client.patch(_url(project, f"/{created['snapshot_id']}"), json={"comment": "seen"})
++    assert (response.json()["defective"], response.json()["comment"]) == (None, "seen")
++    assert _download(client, project)[0]["defective"] == ""
++    response = client.patch(_url(project, f"/{created['snapshot_id']}"), json={"defective": False})
++    assert response.json()["defective"] is False
++    assert _download(client, project)[0]["defective"] == "false"
++
++
+ def test_the_list_can_be_limited_to_the_newest(client, live, project) -> None:
+     created = [_capture(client, live, project, comment=str(index))["snapshot_id"] for index in range(3)]
+ 
+diff --git a/application/backend/tests/runtime_session/test_snapshot_index.py b/application/backend/tests/runtime_session/test_snapshot_index.py
+index e3507402..68c99a49 100644
+--- a/application/backend/tests/runtime_session/test_snapshot_index.py
++++ b/application/backend/tests/runtime_session/test_snapshot_index.py
+@@ -181,7 +181,7 @@ def test_a_missing_index_is_rebuilt_from_every_snapshot(tmp_path) -> None:
+ 
+     rows = _rows(tmp_path)
+     assert [(row["snapshot_id"], row["defective"], row["comment"]) for row in rows] == [
+-        ("20261113-170000-000", "false", ""),
++        ("20261113-170000-000", "", ""),  # not labelled, which is not the same as good
+         ("20261114-030000-123", "true", ""),
+     ]
+ 
+@@ -225,7 +225,7 @@ def test_an_index_out_of_step_with_the_folders_is_rebuilt(tmp_path) -> None:
+ 
+ def test_a_state_json_of_an_unexpected_shape_still_gets_its_row(tmp_path) -> None:
+     good = _save(tmp_path, _snapshot_id(1))
+-    _save(tmp_path, _snapshot_id(2), robots={"follower": "not a dict"}, cameras="nope")
++    _save(tmp_path, _snapshot_id(2), robots={"follower": "not a dict"}, cameras="nope", defective=True, comment="dent")
+     (tmp_path / _snapshot_id(3)).mkdir()
+     (tmp_path / _snapshot_id(3) / "state.json").write_text("{ not json")
+     _save(tmp_path, _snapshot_id(4), robots={"follower": {"joint_positions": {"gripper.pos": "high"}}})
+@@ -235,9 +235,43 @@ def test_a_state_json_of_an_unexpected_shape_still_gets_its_row(tmp_path) -> Non
+     rows = {row["snapshot_id"]: row for row in _rows(tmp_path)}
+     assert list(rows) == [_snapshot_id(1), _snapshot_id(2), _snapshot_id(4)]  # unreadable JSON is left out
+     assert "unexpected shape" in rows[_snapshot_id(2)]["warnings"]
++    # Its label survives where it is readable.
++    assert (rows[_snapshot_id(2)]["defective"], rows[_snapshot_id(2)]["comment"]) == ("true", "dent")
+     assert rows[_snapshot_id(4)]["follower_joint_1"] == ""
+ 
+ 
++def test_a_placeholder_row_leaves_an_unreadable_label_empty(tmp_path) -> None:
++    _save(tmp_path, _snapshot_id(1), robots={"follower": "not a dict"}, defective="yes", comment=7)
++
++    snapshot_index.rebuild(tmp_path)
++
++    (row,) = _rows(tmp_path)
++    assert (row["defective"], row["comment"]) == ("", "")
++    assert "unexpected shape" in row["warnings"]
++
++
++@pytest.mark.parametrize(
++    ("label", "cell"),
++    [
++        pytest.param({"defective": True}, "true", id="defective"),
++        pytest.param({"defective": False}, "false", id="good"),
++        pytest.param({}, "", id="never labelled"),
++        pytest.param({"defective": None}, "", id="null"),
++        pytest.param({"defective": "yes"}, "", id="not a bool"),
++    ],
++)
++def test_an_unlabelled_snapshot_is_neither_good_nor_defective(tmp_path, label, cell) -> None:
++    document = _document(_snapshot_id(1)) | label
++    if "defective" not in label:
++        del document["defective"]
++    (tmp_path / _snapshot_id(1)).mkdir()
++    snapshot_index.write_json(tmp_path / _snapshot_id(1) / "state.json", document)
++
++    snapshot_index.append(tmp_path, document)
++
++    assert _rows(tmp_path)[0]["defective"] == cell
++
++
+ def test_contents_of_a_project_without_snapshots_is_the_header(tmp_path) -> None:
+     data = snapshot_index.contents(tmp_path / "no-such-project")
+ 
+-- 
+2.53.0
+

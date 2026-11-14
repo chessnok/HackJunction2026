@@ -1,0 +1,1414 @@
+From 8336a876b8a142869e8a343dab0215d5b9be007c Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Sat, 14 Nov 2026 03:34:26 -0800
+Subject: [PATCH 3/9] feat(ui): label state snapshots at capture time, and
+ correct them later
+
+Wherever the snapshot hotkey works (the environment view, recording and
+inference), the page shows snapshot controls: a Defective switch, a comment
+field and a Capture button, in the session side bar, and in a row above the
+environment preview. Space (or its rebinding) and Capture save a snapshot with
+that label, which stays for the next ones (a series of one class) and is
+remembered per project in this browser (localStorage; every access may fail
+without breaking anything).
+
+- While typing in the comment field Space types; Enter or Escape leaves the
+  field without reaching the page's Enter/Escape episode hotkeys.
+- Within the controls Space captures also on the Defective switch and the
+  buttons, instead of flipping or pressing them, so that a label never changes
+  by accident; after a click there, focus goes back to the page so that Enter
+  and Escape keep starting, accepting and discarding episodes.
+- "Recent" lists the newest eight snapshots with their labels to correct
+  (switch, comment saved on Enter or when leaving the field) and downloads the
+  CSV of all snapshots.
+- The toast says how the snapshot was labelled.
+
+The capture provider now wraps the session's page (always mounted, so the page
+is never mounted anew) and gives the controls the label and capture.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../robots/environment-form/preview.tsx       |  14 +-
+ .../runtime-session-provider.tsx              |  15 +-
+ .../state-snapshot-controls.tsx               | 316 +++++++++++
+ .../state-snapshot-hotkey.test.tsx            | 200 -------
+ .../runtime-session/state-snapshot-hotkey.tsx |  65 ---
+ .../runtime-session/state-snapshot-label.ts   |  42 ++
+ .../runtime-session/state-snapshot.test.tsx   | 489 ++++++++++++++++++
+ .../runtime-session/state-snapshot.tsx        | 131 +++++
+ .../workspace/session-workspace.tsx           |   2 +
+ 9 files changed, 1000 insertions(+), 274 deletions(-)
+ create mode 100644 application/ui/src/features/runtime-session/state-snapshot-controls.tsx
+ delete mode 100644 application/ui/src/features/runtime-session/state-snapshot-hotkey.test.tsx
+ delete mode 100644 application/ui/src/features/runtime-session/state-snapshot-hotkey.tsx
+ create mode 100644 application/ui/src/features/runtime-session/state-snapshot-label.ts
+ create mode 100644 application/ui/src/features/runtime-session/state-snapshot.test.tsx
+ create mode 100644 application/ui/src/features/runtime-session/state-snapshot.tsx
+
+diff --git a/application/ui/src/features/robots/environment-form/preview.tsx b/application/ui/src/features/robots/environment-form/preview.tsx
+index 1ff034cc..110ed341 100644
+--- a/application/ui/src/features/robots/environment-form/preview.tsx
++++ b/application/ui/src/features/robots/environment-form/preview.tsx
+@@ -11,6 +11,7 @@ import { useProjectId } from '../../projects/use-project';
+ import { CameraCell } from '../../runtime-session/cells/camera-cell';
+ import { RobotCell } from '../../runtime-session/cells/robot-cell';
+ import { RuntimeSessionProvider } from '../../runtime-session/runtime-session-provider';
++import { StateSnapshotControls } from '../../runtime-session/state-snapshot-controls';
+ import { ReactComponent as RobotIllustration } from './../../../assets/illustrations/INTEL_08_NO-TESTS.svg';
+ import { EnvironmentForm, EnvironmentFormState, useEnvironmentForm } from './provider';
+ 
+@@ -188,9 +189,16 @@ export const Preview = () => {
+         return (
+             <View height='100%'>
+                 <RuntimeSessionProvider project_id={project_id} environment={toDraft(environment)}>
+-                    <Suspense fallback={<CenteredLoading />}>
+-                        <ActualPreview />
+-                    </Suspense>
++                    <Flex direction='column' height='100%'>
++                        <View paddingX='size-200' paddingY='size-100'>
++                            <StateSnapshotControls layout='row' />
++                        </View>
++                        <View flex minHeight={0} position='relative'>
++                            <Suspense fallback={<CenteredLoading />}>
++                                <ActualPreview />
++                            </Suspense>
++                        </View>
++                    </Flex>
+                 </RuntimeSessionProvider>
+             </View>
+         );
+diff --git a/application/ui/src/features/runtime-session/runtime-session-provider.tsx b/application/ui/src/features/runtime-session/runtime-session-provider.tsx
+index 6c3c8ab1..c55d8c98 100644
+--- a/application/ui/src/features/runtime-session/runtime-session-provider.tsx
++++ b/application/ui/src/features/runtime-session/runtime-session-provider.tsx
+@@ -37,7 +37,7 @@ import {
+     SchemaUnloadModelCommand,
+ } from '../../api/openapi-spec';
+ import { JointsState } from '../robots/use-robot-observations';
+-import { StateSnapshotHotkey } from './state-snapshot-hotkey';
++import { StateSnapshotProvider } from './state-snapshot';
+ 
+ /** Session errors go away by themselves; the parts panel keeps showing what is still failed. */
+ export const ERROR_TOAST = { timeout: 10_000 };
+@@ -328,11 +328,14 @@ export const RuntimeSessionProvider = ({
+ 
+     return (
+         <RuntimeSessionContext.Provider value={value}>
+-            {children}
+-            {/* Wherever a session has an environment, its hotkey saves a state snapshot. */}
+-            {state?.environment != null && (
+-                <StateSnapshotHotkey project_id={project_id} session_id={state.session_id} />
+-            )}
++            {/* Wherever a session has an environment, its hotkey saves a state snapshot, labelled as the
++                page's snapshot controls say. Always mounted, so that the page is never mounted anew. */}
++            <StateSnapshotProvider
++                project_id={project_id}
++                session_id={state?.environment != null ? state.session_id : null}
++            >
++                {children}
++            </StateSnapshotProvider>
+         </RuntimeSessionContext.Provider>
+     );
+ };
+diff --git a/application/ui/src/features/runtime-session/state-snapshot-controls.tsx b/application/ui/src/features/runtime-session/state-snapshot-controls.tsx
+new file mode 100644
+index 00000000..63bff4fe
+--- /dev/null
++++ b/application/ui/src/features/runtime-session/state-snapshot-controls.tsx
+@@ -0,0 +1,316 @@
++import { ComponentProps, KeyboardEvent, useRef, useState } from 'react';
++
++import {
++    ActionButton,
++    Button,
++    Content,
++    Dialog,
++    DialogTrigger,
++    Divider,
++    Flex,
++    Heading,
++    Loading,
++    Switch,
++    Text,
++    TextField,
++    toast,
++    View,
++} from '@geti-ui/ui';
++
++import { $api, fetchClient } from '../../api/client';
++import { getApiErrorMessage } from '../../api/errors';
++import { SchemaStateSnapshot, SchemaStateSnapshotLabelUpdate } from '../../api/openapi-spec';
++import { formatKeyCombo, keyboardEventToCombo } from '../hotkeys/key-combo';
++import { snapshotListKey, useStateSnapshot } from './state-snapshot';
++import { COMMENT_MAX_LENGTH } from './state-snapshot-label';
++
++const RECENT_SNAPSHOTS = 8;
++const ERROR_TOAST = { timeout: 10_000 };
++const TEXT_INPUT_TYPES = new Set(['text', 'search', 'email', 'number', 'password', 'tel', 'url']);
++
++/** Whether a keystroke into `target` edits text; a switch's checkbox input does not. */
++const isTextEntry = (target: EventTarget): boolean =>
++    target instanceof HTMLTextAreaElement ||
++    target instanceof HTMLSelectElement ||
++    (target instanceof HTMLInputElement && TEXT_INPUT_TYPES.has(target.type)) ||
++    (target instanceof HTMLElement && target.isContentEditable);
++
++/** "20261114-031439-950" -> "03:14:39", the snapshot's local capture time. */
++export const snapshotTime = (snapshot_id: string): string => {
++    const match = /^\d{8}-(\d{2})(\d{2})(\d{2})-/.exec(snapshot_id);
++    return match === null ? snapshot_id : `${match[1]}:${match[2]}:${match[3]}`;
++};
++
++type TextFieldKeyHandler = NonNullable<ComponentProps<typeof TextField>['onKeyDown']>;
++
++/** Enter (and Escape) leave the comment field, so that the capture hotkey works again. */
++const leaveOnEnterOrEscape: TextFieldKeyHandler = (event) => {
++    if (event.key === 'Enter' || event.key === 'Escape') {
++        (event.target as HTMLElement).blur();
++    } else {
++        event.continuePropagation();
++    }
++};
++
++/** Enter leaves the field, which saves it; Escape closes the list without saving. */
++const leaveOnEnter: TextFieldKeyHandler = (event) => {
++    if (event.key === 'Enter') {
++        (event.target as HTMLElement).blur();
++    } else {
++        event.continuePropagation();
++    }
++};
++
++/** One recent snapshot, with its label to change. */
++const RecentSnapshot = ({ project_id, snapshot }: { project_id: string; snapshot: SchemaStateSnapshot }) => {
++    const savedComment = snapshot.comment;
++    const [draft, setDraft] = useState(savedComment);
++    const [shown, setShown] = useState(savedComment);
++    // Adjusted while rendering: a comment saved elsewhere replaces the draft.
++    if (shown !== savedComment) {
++        setShown(savedComment);
++        setDraft(savedComment);
++    }
++    const { mutate, isPending, variables } = $api.useMutation(
++        'patch',
++        '/api/projects/{project_id}/state_snapshots/{snapshot_id}',
++        // Pending until the list shows the change, so that the switch does not flip back meanwhile.
++        { meta: { awaits: [snapshotListKey(project_id)] } }
++    );
++    const time = snapshotTime(snapshot.snapshot_id);
++
++    const update = (body: SchemaStateSnapshotLabelUpdate) => {
++        mutate(
++            { params: { path: { project_id, snapshot_id: snapshot.snapshot_id } }, body },
++            {
++                onError: (error) => {
++                    const reason = getApiErrorMessage(error) ?? 'the backend did not answer.';
++                    toast.negative(`Could not change the snapshot of ${time}: ${reason}`, ERROR_TOAST);
++                },
++            }
++        );
++    };
++    const saveComment = () => {
++        if (draft.trim() !== savedComment) {
++            update({ comment: draft });
++        }
++    };
++    const pendingDefective = isPending ? variables?.body?.defective : undefined;
++
++    return (
++        <Flex direction='column' gap='size-50'>
++            <Flex alignItems='center' justifyContent='space-between' gap='size-100'>
++                <Text>{time}</Text>
++                <Switch
++                    isEmphasized
++                    isSelected={pendingDefective ?? snapshot.defective}
++                    onChange={(defective) => update({ defective })}
++                    aria-label={`Defective, snapshot of ${time}`}
++                >
++                    Defective
++                </Switch>
++            </Flex>
++            <TextField
++                aria-label={`Comment, snapshot of ${time}`}
++                width='100%'
++                value={draft}
++                onChange={setDraft}
++                onBlur={saveComment}
++                onKeyDown={leaveOnEnter}
++                maxLength={COMMENT_MAX_LENGTH}
++            />
++        </Flex>
++    );
++};
++
++const RecentSnapshotList = ({ project_id }: { project_id: string }) => {
++    const { data, isPending, error } = $api.useQuery('get', '/api/projects/{project_id}/state_snapshots', {
++        params: { path: { project_id }, query: { limit: RECENT_SNAPSHOTS } },
++    });
++
++    const downloadCsv = () => {
++        const url = fetchClient.PATH('/api/projects/{project_id}/state_snapshots/snapshots.csv', {
++            params: { path: { project_id } },
++        });
++        window.open(url, '_blank', 'noopener,noreferrer');
++    };
++
++    let list;
++    if (isPending) {
++        list = <Loading mode='inline' />;
++    } else if (error) {
++        list = <Text>Could not list the snapshots: {getApiErrorMessage(error) ?? 'the backend did not answer.'}</Text>;
++    } else if (data.length === 0) {
++        list = <Text>No snapshots yet.</Text>;
++    } else {
++        list = data.map((snapshot) => (
++            <RecentSnapshot key={snapshot.snapshot_id} project_id={project_id} snapshot={snapshot} />
++        ));
++    }
++
++    return (
++        <Flex direction='column' gap='size-200'>
++            {list}
++            <Button variant='secondary' onPress={downloadCsv}>
++                Download CSV of all snapshots
++            </Button>
++        </Flex>
++    );
++};
++
++/** The project's latest snapshots, to correct their labels, and the CSV of all of them. */
++const RecentSnapshots = ({ project_id }: { project_id: string }) => {
++    const isClosing = useRef(false);
++
++    return (
++        <DialogTrigger
++            type='popover'
++            onOpenChange={(isOpen) => {
++                isClosing.current = !isOpen;
++            }}
++        >
++            <ActionButton
++                isQuiet
++                // Closed, the list gives focus back to this button; let it go, so that Enter and Escape
++                // reach the page's hotkeys (start, accept or discard an episode) instead of reopening it.
++                onFocus={(event) => {
++                    if (isClosing.current) {
++                        isClosing.current = false;
++                        (event.target as HTMLElement).blur();
++                    }
++                }}
++            >
++                Recent
++            </ActionButton>
++            <Dialog>
++                <Heading>Recent snapshots</Heading>
++                <Divider />
++                <Content>
++                    <RecentSnapshotList project_id={project_id} />
++                </Content>
++            </Dialog>
++        </DialogTrigger>
++    );
++};
++
++/**
++ * The live session's snapshot controls: the label of the next snapshots (Defective, a comment),
++ * which stays for a series and is remembered per project, a Capture button, and the recent snapshots.
++ *
++ * The capture hotkey (Space by default) captures with this label anywhere on the page except while
++ * typing; within these controls it also does on the Defective switch and the buttons, instead of
++ * flipping or pressing them, so that a label never changes by accident. Enter or Escape leaves the
++ * comment field without reaching the page's other hotkeys, and clicking a control here gives focus
++ * back to the page. Nothing is shown unless the session has an environment.
++ */
++export const StateSnapshotControls = ({ layout = 'column' }: { layout?: 'column' | 'row' }) => {
++    const snapshot = useStateSnapshot();
++    const controls = useRef<HTMLDivElement>(null);
++
++    if (snapshot === null) {
++        return null;
++    }
++    const { project_id, label, setLabel, capture, isCapturing, combo } = snapshot;
++
++    const isHotkey = (event: KeyboardEvent<HTMLDivElement>) =>
++        event.target instanceof Node &&
++        controls.current?.contains(event.target) === true && // not the recent list's popover
++        !isTextEntry(event.target) &&
++        keyboardEventToCombo(event.nativeEvent) === combo;
++    const onKeyDownCapture = (event: KeyboardEvent<HTMLDivElement>) => {
++        if (isHotkey(event)) {
++            event.preventDefault();
++            event.stopPropagation();
++            if (!event.repeat) {
++                capture();
++            }
++        }
++    };
++    // The browser activates a focused switch or button when Space is released.
++    const onKeyUpCapture = (event: KeyboardEvent<HTMLDivElement>) => {
++        if (isHotkey(event)) {
++            event.preventDefault();
++            event.stopPropagation();
++        }
++    };
++
++    // After a click on the switch or the button, focus goes back to the page, so that its hotkeys
++    // (Enter, Escape) work at once instead of pressing that control again.
++    const releaseFocus = () => {
++        const focused = document.activeElement;
++        if (focused instanceof HTMLElement && controls.current?.contains(focused)) {
++            focused.blur();
++        }
++    };
++
++    const defective = (
++        <Switch
++            isEmphasized
++            isSelected={label.defective}
++            onChange={(value) => {
++                setLabel({ defective: value });
++                releaseFocus();
++            }}
++        >
++            Defective
++        </Switch>
++    );
++    const comment = (
++        <TextField
++            label='Comment'
++            width='100%'
++            value={label.comment}
++            onChange={(value) => setLabel({ comment: value })}
++            onKeyDown={leaveOnEnterOrEscape}
++            maxLength={COMMENT_MAX_LENGTH}
++        />
++    );
++    const captureButton = (
++        <Button
++            variant='accent'
++            onPress={() => {
++                capture();
++                releaseFocus();
++            }}
++            isPending={isCapturing}
++        >
++            Capture
++        </Button>
++    );
++    const hint = `${formatKeyCombo(combo)} captures with this label, which stays for the next snapshots.`;
++
++    return (
++        <div ref={controls} onKeyDownCapture={onKeyDownCapture} onKeyUpCapture={onKeyUpCapture}>
++            {layout === 'row' ? (
++                <Flex direction='column' gap='size-50'>
++                    <Flex alignItems='end' gap='size-200' wrap>
++                        {defective}
++                        <View flex minWidth='size-3000'>
++                            {comment}
++                        </View>
++                        {captureButton}
++                        <RecentSnapshots project_id={project_id} />
++                    </Flex>
++                    <Text>{hint}</Text>
++                </Flex>
++            ) : (
++                <View backgroundColor='gray-200' padding='size-150' borderRadius='regular'>
++                    <Flex direction='column' gap='size-100'>
++                        <Flex alignItems='center' justifyContent='space-between' gap='size-100'>
++                            <Heading level={4} margin={0}>
++                                State snapshot
++                            </Heading>
++                            <RecentSnapshots project_id={project_id} />
++                        </Flex>
++                        <Flex alignItems='center' justifyContent='space-between' gap='size-100'>
++                            {defective}
++                            {captureButton}
++                        </Flex>
++                        {comment}
++                        <Text>{hint}</Text>
++                    </Flex>
++                </View>
++            )}
++        </div>
++    );
++};
+diff --git a/application/ui/src/features/runtime-session/state-snapshot-hotkey.test.tsx b/application/ui/src/features/runtime-session/state-snapshot-hotkey.test.tsx
+deleted file mode 100644
+index 1a44f7c9..00000000
+--- a/application/ui/src/features/runtime-session/state-snapshot-hotkey.test.tsx
++++ /dev/null
+@@ -1,200 +0,0 @@
+-import { toast } from '@geti-ui/ui';
+-import { afterEach, describe, expect, it, rs } from '@rstest/core';
+-import { act, fireEvent, screen, waitFor } from '@testing-library/react';
+-import { HttpResponse } from 'msw';
+-import useWebSocket from 'react-use-websocket';
+-
+-import { SchemaStateSnapshot } from '../../api/openapi-spec';
+-import { http } from '../../api/utils';
+-import { server } from '../../msw-node-setup';
+-import { render } from '../../test-utils/render';
+-import { RuntimeSessionProvider } from './runtime-session-provider';
+-import { describeSnapshot, StateSnapshotHotkey } from './state-snapshot-hotkey';
+-
+-rs.mock('react-use-websocket', () => ({
+-    default: rs.fn(() => ({ sendJsonMessage: rs.fn() })),
+-}));
+-
+-const SNAPSHOT: SchemaStateSnapshot = {
+-    snapshot_id: '20261113-171500-123',
+-    path: '/storage/state_snapshots/project-1/20261113-171500-123',
+-    captured_at: '2026-11-13T17:15:00.123+01:00',
+-    session_id: 'session-1',
+-    environment_name: 'Bench',
+-    cameras: [
+-        { name: 'Top', key: 'top', files: ['top.color.png', 'top.depth.png'], color: true, depth: true },
+-        { name: 'Arm', key: 'arm', files: ['arm.color.png'], color: true, depth: false },
+-    ],
+-    follower: true,
+-    leader: true,
+-    warnings: [],
+-};
+-
+-const mockSettings = (bindings: Record<string, string> = {}) =>
+-    server.use(
+-        http.get('/api/settings', () =>
+-            HttpResponse.json({
+-                video_recording: { preset: null },
+-                trainer: {
+-                    request_timeout_s: 30,
+-                    download_read_timeout_s: 120,
+-                    stream_reconnect_max_s: 900,
+-                    stream_reconnect_backoff_max_s: 30,
+-                },
+-                huggingface: { hf_token: null },
+-                ssh: {
+-                    connect_timeout_s: 10,
+-                    command_timeout_s: 15,
+-                    preflight_timeout_s: 30,
+-                    image_pull_timeout_s: 1800,
+-                    trainer_shm_size_gb: 32,
+-                },
+-                hotkeys: { bindings },
+-            })
+-        )
+-    );
+-
+-const mockCapture = (respond: () => Response) => {
+-    const requests: URL[] = [];
+-    server.use(
+-        http.post('/api/projects/{project_id}/state_snapshots', ({ request }) => {
+-            requests.push(new URL(request.url));
+-            return respond() as never;
+-        })
+-    );
+-    return requests;
+-};
+-
+-const pressSpace = (target: Element | Window = window) => fireEvent.keyDown(target, { key: ' ' });
+-
+-afterEach(() => {
+-    rs.restoreAllMocks();
+-});
+-
+-describe('StateSnapshotHotkey', () => {
+-    it('saves a snapshot of the live session on Space and says what it saved', async () => {
+-        mockSettings();
+-        const requests = mockCapture(() => HttpResponse.json(SNAPSHOT, { status: 201 }));
+-        const notify = rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
+-        render(<StateSnapshotHotkey project_id='project-1' session_id='session-1' />);
+-
+-        pressSpace();
+-
+-        await waitFor(() => expect(notify).toHaveBeenCalled());
+-        expect(requests).toHaveLength(1);
+-        expect(requests[0].pathname).toBe('/api/projects/project-1/state_snapshots');
+-        expect(requests[0].searchParams.get('session_id')).toBe('session-1');
+-        const message = notify.mock.calls[0][0] as string;
+-        expect(message).toContain(SNAPSHOT.path);
+-        expect(message).toContain('Top (color, depth)');
+-        expect(message).toContain('follower and leader joints');
+-    });
+-
+-    it('says clearly why no snapshot was saved', async () => {
+-        mockSettings();
+-        mockCapture(() =>
+-            HttpResponse.json(
+-                {
+-                    message: 'No live session with an environment to snapshot.',
+-                    error_code: 'no_live_session',
+-                },
+-                { status: 409 }
+-            )
+-        );
+-        const notify = rs.spyOn(toast, 'negative').mockReturnValue(rs.fn());
+-        render(<StateSnapshotHotkey project_id='project-1' session_id='session-1' />);
+-
+-        pressSpace();
+-
+-        await waitFor(() => expect(notify).toHaveBeenCalled());
+-        expect(notify.mock.calls[0][0]).toContain('No live session with an environment to snapshot.');
+-    });
+-
+-    it('leaves Space to a focused button and to text fields', async () => {
+-        mockSettings();
+-        const requests = mockCapture(() => HttpResponse.json(SNAPSHOT, { status: 201 }));
+-        render(
+-            <>
+-                <StateSnapshotHotkey project_id='project-1' session_id='session-1' />
+-                <button type='button'>Teleoperate</button>
+-                <input aria-label='Task' />
+-            </>
+-        );
+-
+-        pressSpace(screen.getByRole('button', { name: 'Teleoperate' }));
+-        pressSpace(screen.getByRole('textbox', { name: 'Task' }));
+-        await new Promise((resolve) => setTimeout(resolve, 50));
+-
+-        expect(requests).toHaveLength(0);
+-    });
+-
+-    it('follows a rebinding from the settings', async () => {
+-        mockSettings({ 'session.capture_snapshot': 'S' });
+-        const requests = mockCapture(() => HttpResponse.json(SNAPSHOT, { status: 201 }));
+-        rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
+-        render(<StateSnapshotHotkey project_id='project-1' session_id='session-1' />);
+-        await new Promise((resolve) => setTimeout(resolve, 100)); // the settings load
+-
+-        fireEvent.keyDown(window, { key: 's' });
+-        await waitFor(() => expect(requests).toHaveLength(1));
+-        pressSpace();
+-        await new Promise((resolve) => setTimeout(resolve, 50));
+-
+-        expect(requests).toHaveLength(1);
+-    });
+-});
+-
+-describe('describeSnapshot', () => {
+-    it('reports what could not be captured', () => {
+-        const message = describeSnapshot({
+-            ...SNAPSHOT,
+-            cameras: [],
+-            leader: false,
+-            warnings: ["The leader's joints are known only while teleoperation runs"],
+-        });
+-
+-        expect(message).toContain('no camera frames; follower joints.');
+-        expect(message).toContain('known only while teleoperation runs');
+-    });
+-});
+-
+-describe('in a live session', () => {
+-    it('is on once the session has an environment, for that session', async () => {
+-        mockSettings();
+-        const requests = mockCapture(() => HttpResponse.json(SNAPSHOT, { status: 201 }));
+-        rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
+-        render(
+-            <RuntimeSessionProvider project_id='project-1' environment={null}>
+-                {null}
+-            </RuntimeSessionProvider>
+-        );
+-        const onMessage = rs.mocked(useWebSocket).mock.calls.at(-1)?.[1]?.onMessage;
+-        const state = (environment: object | null) =>
+-            act(() => {
+-                onMessage?.(
+-                    new MessageEvent('message', {
+-                        data: JSON.stringify({ type: 'state', data: { session_id: 'session-9', environment } }),
+-                    })
+-                );
+-            });
+-
+-        state(null);
+-        pressSpace();
+-        await new Promise((resolve) => setTimeout(resolve, 50));
+-        expect(requests).toHaveLength(0);
+-
+-        state({
+-            environment_id: null,
+-            name: 'Bench',
+-            robot_id: 'robot-1',
+-            leader_id: null,
+-            joint_names: ['gripper.pos'],
+-            cameras: [],
+-        });
+-        await new Promise((resolve) => setTimeout(resolve, 100)); // the settings load
+-        pressSpace();
+-
+-        await waitFor(() => expect(requests).toHaveLength(1));
+-        expect(requests[0].searchParams.get('session_id')).toBe('session-9');
+-    });
+-});
+diff --git a/application/ui/src/features/runtime-session/state-snapshot-hotkey.tsx b/application/ui/src/features/runtime-session/state-snapshot-hotkey.tsx
+deleted file mode 100644
+index acdddf15..00000000
+--- a/application/ui/src/features/runtime-session/state-snapshot-hotkey.tsx
++++ /dev/null
+@@ -1,65 +0,0 @@
+-import { useCallback } from 'react';
+-
+-import { toast } from '@geti-ui/ui';
+-
+-import { $api } from '../../api/client';
+-import { getApiErrorMessage } from '../../api/errors';
+-import { SchemaStateSnapshot } from '../../api/openapi-spec';
+-import { getEffectiveBindings } from '../hotkeys/key-combo';
+-import { useHotkey } from '../hotkeys/use-hotkey';
+-
+-const SNAPSHOT_TOAST = { timeout: 8_000 };
+-const SNAPSHOT_ERROR_TOAST = { timeout: 10_000 };
+-
+-/** "Saved to …: top (color, depth), arm (color); follower and leader joints." */
+-export const describeSnapshot = (snapshot: SchemaStateSnapshot): string => {
+-    const cameras = snapshot.cameras
+-        .filter((camera) => camera.color || camera.depth)
+-        .map(
+-            (camera) =>
+-                `${camera.name} (${[camera.color && 'color', camera.depth && 'depth'].filter(Boolean).join(', ')})`
+-        );
+-    const robots = [snapshot.follower && 'follower', snapshot.leader && 'leader'].filter(Boolean).join(' and ');
+-    const parts = [
+-        cameras.length > 0 ? cameras.join(', ') : 'no camera frames',
+-        robots !== '' ? `${robots} joints` : 'no joints',
+-    ];
+-    const warnings = (snapshot.warnings ?? []).length > 0 ? ` ${(snapshot.warnings ?? []).join(' ')}` : '';
+-    return `Snapshot saved to ${snapshot.path}: ${parts.join('; ')}.${warnings}`;
+-};
+-
+-/**
+- * Saves a state snapshot of the live session ``session_id`` when its hotkey (Space by default) is pressed.
+- *
+- * The session provider mounts it while its session has an environment, so it works wherever one is
+- * live: the environment view, recording, inference. Snapshots are read-only on the backend.
+- */
+-export const StateSnapshotHotkey = ({ project_id, session_id }: { project_id: string; session_id: string }) => {
+-    const { data: settings } = $api.useQuery('get', '/api/settings');
+-    const combo = getEffectiveBindings(settings?.hotkeys.bindings)['session.capture_snapshot'];
+-    const { mutate, isPending } = $api.useMutation('post', '/api/projects/{project_id}/state_snapshots');
+-
+-    const takeSnapshot = useCallback(() => {
+-        if (isPending) {
+-            return;
+-        }
+-        mutate(
+-            { params: { path: { project_id }, query: { session_id } } },
+-            {
+-                onSuccess: (snapshot) => {
+-                    toast.positive(describeSnapshot(snapshot), SNAPSHOT_TOAST);
+-                },
+-                onError: (error) => {
+-                    toast.negative(
+-                        `Could not save a snapshot: ${getApiErrorMessage(error) ?? 'the backend did not answer.'}`,
+-                        SNAPSHOT_ERROR_TOAST
+-                    );
+-                },
+-            }
+-        );
+-    }, [isPending, mutate, project_id, session_id]);
+-
+-    useHotkey(combo, takeSnapshot);
+-
+-    return null;
+-};
+diff --git a/application/ui/src/features/runtime-session/state-snapshot-label.ts b/application/ui/src/features/runtime-session/state-snapshot-label.ts
+new file mode 100644
+index 00000000..1b5d6d5f
+--- /dev/null
++++ b/application/ui/src/features/runtime-session/state-snapshot-label.ts
+@@ -0,0 +1,42 @@
++/** How the next state snapshots are labelled: what they show, for anomaly detection, and a note. */
++export interface SnapshotLabel {
++    defective: boolean;
++    comment: string;
++}
++
++/** The backend's limit (schemas/state_snapshot.py). */
++export const COMMENT_MAX_LENGTH = 500;
++
++export const NO_LABEL: SnapshotLabel = { defective: false, comment: '' };
++
++const STORAGE_KEY_PREFIX = 'physicalai:snapshotLabel:';
++
++export const getSnapshotLabelStorageKey = (projectId: string): string => `${STORAGE_KEY_PREFIX}${projectId}`;
++
++/** The label last used in this browser for the project's snapshots; none if storage is unavailable. */
++export const readSnapshotLabel = (projectId: string): SnapshotLabel => {
++    try {
++        const raw = window.localStorage.getItem(getSnapshotLabelStorageKey(projectId));
++        if (raw === null) {
++            return NO_LABEL;
++        }
++        const stored: unknown = JSON.parse(raw);
++        if (typeof stored !== 'object' || stored === null) {
++            return NO_LABEL;
++        }
++        const { defective, comment } = stored as Record<string, unknown>;
++        return {
++            defective: defective === true,
++            comment: typeof comment === 'string' ? comment.slice(0, COMMENT_MAX_LENGTH) : '',
++        };
++    } catch {
++        // Private browsing, blocked storage or a corrupt value: start unlabelled.
++        return NO_LABEL;
++    }
++};
++
++export const writeSnapshotLabel = (projectId: string, label: SnapshotLabel): void => {
++    try {
++        window.localStorage.setItem(getSnapshotLabelStorageKey(projectId), JSON.stringify(label));
++    } catch {}
++};
+diff --git a/application/ui/src/features/runtime-session/state-snapshot.test.tsx b/application/ui/src/features/runtime-session/state-snapshot.test.tsx
+new file mode 100644
+index 00000000..eb8392a3
+--- /dev/null
++++ b/application/ui/src/features/runtime-session/state-snapshot.test.tsx
+@@ -0,0 +1,489 @@
++import { ReactNode } from 'react';
++
++import { toast } from '@geti-ui/ui';
++import { afterEach, beforeEach, describe, expect, it, rs } from '@rstest/core';
++import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { HttpResponse } from 'msw';
++import useWebSocket from 'react-use-websocket';
++
++import { SchemaStateSnapshot } from '../../api/openapi-spec';
++import { http } from '../../api/utils';
++import { server } from '../../msw-node-setup';
++import { render } from '../../test-utils/render';
++import { useHotkey } from '../hotkeys/use-hotkey';
++import { RuntimeSessionProvider } from './runtime-session-provider';
++import { describeSnapshot, StateSnapshotProvider } from './state-snapshot';
++import { StateSnapshotControls } from './state-snapshot-controls';
++import { getSnapshotLabelStorageKey, readSnapshotLabel } from './state-snapshot-label';
++
++rs.mock('react-use-websocket', () => ({
++    default: rs.fn(() => ({ sendJsonMessage: rs.fn() })),
++}));
++
++const SNAPSHOT: SchemaStateSnapshot = {
++    snapshot_id: '20261113-171500-123',
++    path: '/storage/state_snapshots/project-1/20261113-171500-123',
++    captured_at: '2026-11-13T17:15:00.123+01:00',
++    session_id: 'session-1',
++    environment_name: 'Bench',
++    cameras: [
++        { name: 'Top', key: 'top', files: ['top.color.png', 'top.depth.png'], color: true, depth: true },
++        { name: 'Arm', key: 'arm', files: ['arm.color.png'], color: true, depth: false },
++    ],
++    follower: true,
++    leader: true,
++    warnings: [],
++    defective: false,
++    comment: '',
++};
++
++const mockSettings = (bindings: Record<string, string> = {}) =>
++    server.use(
++        http.get('/api/settings', () =>
++            HttpResponse.json({
++                video_recording: { preset: null },
++                trainer: {
++                    request_timeout_s: 30,
++                    download_read_timeout_s: 120,
++                    stream_reconnect_max_s: 900,
++                    stream_reconnect_backoff_max_s: 30,
++                },
++                huggingface: { hf_token: null },
++                ssh: {
++                    connect_timeout_s: 10,
++                    command_timeout_s: 15,
++                    preflight_timeout_s: 30,
++                    image_pull_timeout_s: 1800,
++                    trainer_shm_size_gb: 32,
++                },
++                hotkeys: { bindings },
++            })
++        )
++    );
++
++type CaptureRequest = { url: URL; body: unknown };
++
++/** Answers captures with `respond`, or with the snapshot as labelled; returns what was asked. */
++const mockCapture = (respond?: () => Response) => {
++    const requests: CaptureRequest[] = [];
++    server.use(
++        http.post('/api/projects/{project_id}/state_snapshots', async ({ request }) => {
++            const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
++            requests.push({ url: new URL(request.url), body });
++            return (respond?.() ?? HttpResponse.json({ ...SNAPSHOT, ...body }, { status: 201 })) as never;
++        })
++    );
++    return requests;
++};
++
++const pressSpace = (target: Element | Window = window) => fireEvent.keyDown(target, { key: ' ' });
++const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
++
++const Controls = ({
++    project_id = 'project-1',
++    session_id = 'session-1',
++    layout,
++    children,
++}: {
++    project_id?: string;
++    session_id?: string | null;
++    layout?: 'column' | 'row';
++    children?: ReactNode;
++}) => (
++    <StateSnapshotProvider project_id={project_id} session_id={session_id}>
++        <StateSnapshotControls layout={layout} />
++        {children}
++    </StateSnapshotProvider>
++);
++
++/** The recording page's hotkeys, as the base branch binds them. */
++const RecordingHotkeys = ({ start, discard }: { start: () => void; discard: () => void }) => {
++    useHotkey('Enter', start);
++    useHotkey('Escape', discard);
++    return null;
++};
++
++const defectiveSwitch = () => screen.getByRole('switch', { name: 'Defective' });
++const commentField = () => screen.getByRole('textbox', { name: 'Comment' });
++
++beforeEach(() => {
++    window.localStorage.clear();
++});
++
++afterEach(() => {
++    rs.restoreAllMocks();
++});
++
++describe('StateSnapshotControls', () => {
++    it('captures on Space with the label and comment, and keeps them for the next snapshot', async () => {
++        mockSettings();
++        const requests = mockCapture();
++        const notify = rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
++        const user = userEvent.setup();
++        render(<Controls />);
++
++        await user.click(defectiveSwitch());
++        await user.type(commentField(), '  scratch, "left" ');
++        expect(requests).toHaveLength(0); // the spaces typed are text
++        await user.keyboard('{Enter}'); // leaves the field
++        expect(commentField()).not.toHaveFocus();
++        await user.keyboard(' ');
++
++        await waitFor(() => expect(notify).toHaveBeenCalledTimes(1));
++        expect(requests).toHaveLength(1);
++        expect(requests[0].url.pathname).toBe('/api/projects/project-1/state_snapshots');
++        expect(requests[0].url.searchParams.get('session_id')).toBe('session-1');
++        expect(requests[0].body).toEqual({ defective: true, comment: 'scratch, "left"' });
++        const message = notify.mock.calls[0][0] as string;
++        expect(message).toContain(`Defective snapshot "scratch, "left"" saved to ${SNAPSHOT.path}`);
++        expect(message).toContain('Top (color, depth)');
++
++        // A series of one class: the label stays.
++        expect(defectiveSwitch()).toBeChecked();
++        expect(commentField()).toHaveValue('  scratch, "left" ');
++        await user.click(screen.getByRole('button', { name: 'Capture' }));
++        await waitFor(() => expect(requests).toHaveLength(2));
++        expect(requests[1].body).toEqual({ defective: true, comment: 'scratch, "left"' });
++    });
++
++    it('captures on Space on its own switch and button instead of flipping or pressing them', async () => {
++        mockSettings();
++        const requests = mockCapture();
++        const notify = rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
++        const user = userEvent.setup();
++        render(<Controls />);
++
++        await user.click(defectiveSwitch());
++        defectiveSwitch().focus();
++        await user.keyboard(' ');
++        await waitFor(() => expect(notify).toHaveBeenCalledTimes(1));
++        expect(defectiveSwitch()).toBeChecked();
++        expect(requests.map((request) => request.body)).toEqual([{ defective: true, comment: '' }]);
++
++        screen.getByRole('button', { name: 'Capture' }).focus();
++        await user.keyboard(' ');
++        await waitFor(() => expect(notify).toHaveBeenCalledTimes(2));
++        await settle();
++        expect(requests).toHaveLength(2); // once, not by the hotkey and the button press both
++    });
++
++    it('leaves Space to the comment field while typing; Escape leaves the field', async () => {
++        mockSettings();
++        const requests = mockCapture();
++        rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
++        const user = userEvent.setup();
++        render(<Controls layout='row' />);
++
++        await user.type(commentField(), 'a b c');
++        pressSpace(commentField());
++        await settle();
++        expect(requests).toHaveLength(0);
++        expect(commentField()).toHaveValue('a b c');
++
++        await user.keyboard('{Escape}');
++        expect(commentField()).not.toHaveFocus();
++        await user.keyboard(' ');
++        await waitFor(() => expect(requests).toHaveLength(1));
++        expect(requests[0].body).toEqual({ defective: false, comment: 'a b c' });
++    });
++
++    it('keeps Enter and Escape typed into the comment from the recording hotkeys', async () => {
++        mockSettings();
++        const requests = mockCapture();
++        const startEpisode = rs.fn();
++        const discardEpisode = rs.fn();
++        const user = userEvent.setup();
++        render(
++            <Controls>
++                <RecordingHotkeys start={startEpisode} discard={discardEpisode} />
++            </Controls>
++        );
++
++        await user.type(commentField(), 'dent{Enter}');
++        expect(commentField()).not.toHaveFocus();
++        await user.type(commentField(), ' left{Escape}');
++        expect(commentField()).not.toHaveFocus();
++        await settle();
++
++        expect(startEpisode).not.toHaveBeenCalled();
++        expect(discardEpisode).not.toHaveBeenCalled();
++        expect(requests).toHaveLength(0);
++        expect(commentField()).toHaveValue('dent left');
++        // Outside the field the page's hotkeys work as before.
++        await user.keyboard('{Enter}');
++        expect(startEpisode).toHaveBeenCalledTimes(1);
++    });
++
++    it('gives focus back to the page after a click, so that Enter and Escape reach the page', async () => {
++        mockSettings();
++        const requests = mockCapture();
++        const notify = rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
++        server.use(http.get('/api/projects/{project_id}/state_snapshots', () => HttpResponse.json([])));
++        const startEpisode = rs.fn();
++        const discardEpisode = rs.fn();
++        const user = userEvent.setup();
++        render(
++            <Controls>
++                <RecordingHotkeys start={startEpisode} discard={discardEpisode} />
++            </Controls>
++        );
++
++        await user.click(defectiveSwitch());
++        expect(defectiveSwitch()).toBeChecked();
++        expect(defectiveSwitch()).not.toHaveFocus();
++        await user.keyboard('{Enter}');
++        expect(startEpisode).toHaveBeenCalledTimes(1);
++
++        await user.click(screen.getByRole('button', { name: 'Capture' }));
++        await waitFor(() => expect(notify).toHaveBeenCalledTimes(1));
++        await user.keyboard('{Enter}');
++        expect(startEpisode).toHaveBeenCalledTimes(2);
++        expect(requests).toHaveLength(1);
++
++        await user.click(screen.getByRole('button', { name: 'Recent' }));
++        await screen.findByText('No snapshots yet.');
++        await user.keyboard('{Escape}'); // closes the list, and only that
++        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
++        expect(discardEpisode).not.toHaveBeenCalled();
++        await waitFor(() => expect(screen.getByRole('button', { name: 'Recent' })).not.toHaveFocus());
++        await user.keyboard('{Enter}');
++        expect(startEpisode).toHaveBeenCalledTimes(3);
++        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
++    });
++
++    it('remembers the label per project in this browser', async () => {
++        mockSettings();
++        const user = userEvent.setup();
++        const first = render(<Controls project_id='project-1' />);
++        await user.click(defectiveSwitch());
++        await user.type(commentField(), 'dent');
++        first.unmount();
++
++        expect(JSON.parse(window.localStorage.getItem(getSnapshotLabelStorageKey('project-1')) ?? '')).toEqual({
++            defective: true,
++            comment: 'dent',
++        });
++        const again = render(<Controls project_id='project-1' />);
++        expect(defectiveSwitch()).toBeChecked();
++        expect(commentField()).toHaveValue('dent');
++        again.unmount();
++
++        render(<Controls project_id='project-2' />);
++        expect(defectiveSwitch()).not.toBeChecked();
++        expect(commentField()).toHaveValue('');
++    });
++
++    it('works without browser storage', async () => {
++        mockSettings();
++        const requests = mockCapture();
++        rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
++        const denied = () => {
++            throw new DOMException('The operation is insecure.', 'SecurityError');
++        };
++        rs.spyOn(Storage.prototype, 'getItem').mockImplementation(denied);
++        rs.spyOn(Storage.prototype, 'setItem').mockImplementation(denied);
++        const user = userEvent.setup();
++        render(<Controls />);
++
++        await user.click(defectiveSwitch());
++        pressSpace();
++
++        await waitFor(() => expect(requests).toHaveLength(1));
++        expect(requests[0].body).toEqual({ defective: true, comment: '' });
++    });
++
++    it('shows nothing and ignores the hotkey without a live session', async () => {
++        mockSettings();
++        const requests = mockCapture();
++        render(<Controls session_id={null} />);
++
++        pressSpace();
++        await settle();
++
++        expect(screen.queryByRole('switch', { name: 'Defective' })).not.toBeInTheDocument();
++        expect(requests).toHaveLength(0);
++    });
++
++    it('says clearly why no snapshot was saved', async () => {
++        mockSettings();
++        mockCapture(() =>
++            HttpResponse.json(
++                {
++                    message: 'No live session with an environment to snapshot.',
++                    error_code: 'no_live_session',
++                },
++                { status: 409 }
++            )
++        );
++        const notify = rs.spyOn(toast, 'negative').mockReturnValue(rs.fn());
++        render(<Controls />);
++
++        pressSpace();
++
++        await waitFor(() => expect(notify).toHaveBeenCalled());
++        expect(notify.mock.calls[0][0]).toContain('No live session with an environment to snapshot.');
++    });
++
++    it('leaves Space to a focused button and to text fields elsewhere on the page', async () => {
++        mockSettings();
++        const requests = mockCapture();
++        render(
++            <Controls>
++                <button type='button'>Teleoperate</button>
++                <input aria-label='Task' />
++            </Controls>
++        );
++
++        pressSpace(screen.getByRole('button', { name: 'Teleoperate' }));
++        pressSpace(screen.getByRole('textbox', { name: 'Task' }));
++        await settle();
++
++        expect(requests).toHaveLength(0);
++    });
++
++    it('follows a rebinding from the settings', async () => {
++        mockSettings({ 'session.capture_snapshot': 'S' });
++        const requests = mockCapture();
++        rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
++        render(<Controls />);
++        await screen.findByText('S captures with this label, which stays for the next snapshots.');
++
++        fireEvent.keyDown(window, { key: 's' });
++        await waitFor(() => expect(requests).toHaveLength(1));
++        pressSpace();
++        await settle();
++
++        expect(requests).toHaveLength(1);
++    });
++});
++
++describe('recent snapshots', () => {
++    it('lists the latest, changes their labels and downloads the CSV', async () => {
++        mockSettings();
++        const requests = mockCapture();
++        let listed: SchemaStateSnapshot[] = [{ ...SNAPSHOT, comment: 'old' }];
++        const listRequests: URL[] = [];
++        const patches: { snapshot_id: string; body: unknown }[] = [];
++        server.use(
++            http.get('/api/projects/{project_id}/state_snapshots', ({ request }) => {
++                listRequests.push(new URL(request.url));
++                return HttpResponse.json(listed);
++            }),
++            http.patch('/api/projects/{project_id}/state_snapshots/{snapshot_id}', async ({ request, params }) => {
++                const body = (await request.json()) as Partial<SchemaStateSnapshot>;
++                patches.push({ snapshot_id: String(params.snapshot_id), body });
++                listed = listed.map((item) => (item.snapshot_id === params.snapshot_id ? { ...item, ...body } : item));
++                return HttpResponse.json(listed[0]);
++            })
++        );
++        const open = rs.spyOn(window, 'open').mockReturnValue(null);
++        const user = userEvent.setup();
++        render(<Controls />);
++
++        await user.click(screen.getByRole('button', { name: 'Recent' }));
++        const dialog = await screen.findByRole('dialog');
++        const toggle = await within(dialog).findByRole('switch', { name: 'Defective, snapshot of 17:15:00' });
++        expect(listRequests[0].searchParams.get('limit')).toBe('8');
++        expect(toggle).not.toBeChecked();
++
++        await user.click(toggle);
++        await waitFor(() =>
++            expect(patches).toEqual([{ snapshot_id: SNAPSHOT.snapshot_id, body: { defective: true } }])
++        );
++        await waitFor(() => expect(toggle).toBeChecked());
++
++        const field = within(dialog).getByRole('textbox', { name: 'Comment, snapshot of 17:15:00' });
++        expect(field).toHaveValue('old');
++        await user.clear(field);
++        await user.type(field, 'dent, fixed{Enter}');
++        await waitFor(() => expect(patches).toHaveLength(2));
++        expect(patches[1]).toEqual({ snapshot_id: SNAPSHOT.snapshot_id, body: { comment: 'dent, fixed' } });
++        expect(requests).toHaveLength(0); // typing a space there captured nothing
++
++        await user.click(within(dialog).getByRole('button', { name: 'Download CSV of all snapshots' }));
++        expect(open).toHaveBeenCalledWith(
++            expect.stringContaining('/api/projects/project-1/state_snapshots/snapshots.csv'),
++            '_blank',
++            'noopener,noreferrer'
++        );
++    });
++});
++
++describe('readSnapshotLabel', () => {
++    it('starts unlabelled from nothing or from a value it does not understand', () => {
++        expect(readSnapshotLabel('project-1')).toEqual({ defective: false, comment: '' });
++        window.localStorage.setItem(getSnapshotLabelStorageKey('project-1'), '{not json');
++        expect(readSnapshotLabel('project-1')).toEqual({ defective: false, comment: '' });
++        window.localStorage.setItem(getSnapshotLabelStorageKey('project-1'), '{"defective":"yes","comment":5}');
++        expect(readSnapshotLabel('project-1')).toEqual({ defective: false, comment: '' });
++        window.localStorage.setItem(
++            getSnapshotLabelStorageKey('project-1'),
++            JSON.stringify({ defective: true, comment: 'x'.repeat(600) })
++        );
++        expect(readSnapshotLabel('project-1')).toEqual({ defective: true, comment: 'x'.repeat(500) });
++    });
++});
++
++describe('describeSnapshot', () => {
++    it('says how the snapshot is labelled', () => {
++        expect(describeSnapshot(SNAPSHOT)).toMatch(/^Good snapshot saved to /);
++        expect(describeSnapshot({ ...SNAPSHOT, defective: true, comment: 'dent' })).toMatch(
++            /^Defective snapshot "dent" saved to /
++        );
++    });
++
++    it('reports what could not be captured', () => {
++        const message = describeSnapshot({
++            ...SNAPSHOT,
++            cameras: [],
++            leader: false,
++            warnings: ["The leader's joints are known only while teleoperation runs"],
++        });
++
++        expect(message).toContain('no camera frames; follower joints.');
++        expect(message).toContain('known only while teleoperation runs');
++    });
++});
++
++describe('in a live session', () => {
++    it('is on once the session has an environment, for that session', async () => {
++        mockSettings();
++        const requests = mockCapture();
++        rs.spyOn(toast, 'positive').mockReturnValue(rs.fn());
++        render(
++            <RuntimeSessionProvider project_id='project-1' environment={null}>
++                <StateSnapshotControls />
++            </RuntimeSessionProvider>
++        );
++        const onMessage = rs.mocked(useWebSocket).mock.calls.at(-1)?.[1]?.onMessage;
++        const state = (environment: object | null) =>
++            act(() => {
++                onMessage?.(
++                    new MessageEvent('message', {
++                        data: JSON.stringify({ type: 'state', data: { session_id: 'session-9', environment } }),
++                    })
++                );
++            });
++
++        state(null);
++        pressSpace();
++        await settle();
++        expect(requests).toHaveLength(0);
++        expect(screen.queryByRole('switch', { name: 'Defective' })).not.toBeInTheDocument();
++
++        state({
++            environment_id: null,
++            name: 'Bench',
++            robot_id: 'robot-1',
++            leader_id: null,
++            joint_names: ['gripper.pos'],
++            cameras: [],
++        });
++        await screen.findByRole('switch', { name: 'Defective' });
++        pressSpace();
++
++        await waitFor(() => expect(requests).toHaveLength(1));
++        expect(requests[0].url.searchParams.get('session_id')).toBe('session-9');
++    });
++});
+diff --git a/application/ui/src/features/runtime-session/state-snapshot.tsx b/application/ui/src/features/runtime-session/state-snapshot.tsx
+new file mode 100644
+index 00000000..bf313030
+--- /dev/null
++++ b/application/ui/src/features/runtime-session/state-snapshot.tsx
+@@ -0,0 +1,131 @@
++import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useState } from 'react';
++
++import { toast } from '@geti-ui/ui';
++
++import { $api } from '../../api/client';
++import { getApiErrorMessage } from '../../api/errors';
++import { SchemaStateSnapshot } from '../../api/openapi-spec';
++import { getQueryKey } from '../../query-client/query-client.interface';
++import { getEffectiveBindings } from '../hotkeys/key-combo';
++import { useHotkey } from '../hotkeys/use-hotkey';
++import { readSnapshotLabel, SnapshotLabel, writeSnapshotLabel } from './state-snapshot-label';
++
++const SNAPSHOT_TOAST = { timeout: 8_000 };
++const SNAPSHOT_ERROR_TOAST = { timeout: 10_000 };
++
++/** 'Defective snapshot "scratch" saved to …: top (color, depth), arm (color); follower and leader joints.' */
++export const describeSnapshot = (snapshot: SchemaStateSnapshot): string => {
++    const cameras = snapshot.cameras
++        .filter((camera) => camera.color || camera.depth)
++        .map(
++            (camera) =>
++                `${camera.name} (${[camera.color && 'color', camera.depth && 'depth'].filter(Boolean).join(', ')})`
++        );
++    const robots = [snapshot.follower && 'follower', snapshot.leader && 'leader'].filter(Boolean).join(' and ');
++    const parts = [
++        cameras.length > 0 ? cameras.join(', ') : 'no camera frames',
++        robots !== '' ? `${robots} joints` : 'no joints',
++    ];
++    const warnings = (snapshot.warnings ?? []).length > 0 ? ` ${(snapshot.warnings ?? []).join(' ')}` : '';
++    const kind = snapshot.defective ? 'Defective' : 'Good';
++    const comment = snapshot.comment ? ` "${snapshot.comment}"` : '';
++    return `${kind} snapshot${comment} saved to ${snapshot.path}: ${parts.join('; ')}.${warnings}`;
++};
++
++/** The list of a project's snapshots; captures and label changes refresh it. */
++export const snapshotListKey = (project_id: string) =>
++    getQueryKey(['get', '/api/projects/{project_id}/state_snapshots', { params: { path: { project_id } } }]);
++
++interface StateSnapshotContextValue {
++    project_id: string;
++    /** The label the next snapshot gets; kept between captures and remembered per project in this browser. */
++    label: SnapshotLabel;
++    setLabel: (changes: Partial<SnapshotLabel>) => void;
++    /** Saves a snapshot of the live session with the current label. */
++    capture: () => void;
++    isCapturing: boolean;
++    /** The capture hotkey, as `keyboardEventToCombo` writes it. */
++    combo: string;
++}
++
++const StateSnapshotContext = createContext<StateSnapshotContextValue | null>(null);
++
++/** The live session's snapshot label and capture, or null where no session with an environment is live. */
++export const useStateSnapshot = (): StateSnapshotContextValue | null => useContext(StateSnapshotContext);
++
++/** The project's snapshot label, read from and written to this browser's storage. */
++const useSnapshotLabel = (project_id: string) => {
++    const [stored, setStored] = useState(() => ({ project_id, label: readSnapshotLabel(project_id) }));
++    // Adjusted while rendering: another project has its own label.
++    if (stored.project_id !== project_id) {
++        setStored({ project_id, label: readSnapshotLabel(project_id) });
++    }
++
++    useEffect(() => {
++        writeSnapshotLabel(stored.project_id, stored.label);
++    }, [stored]);
++
++    const setLabel = useCallback((changes: Partial<SnapshotLabel>) => {
++        setStored((previous) => ({ ...previous, label: { ...previous.label, ...changes } }));
++    }, []);
++
++    return [stored.label, setLabel] as const;
++};
++
++/**
++ * Saves state snapshots of the live session `session_id`, labelled as its controls say, when the
++ * capture hotkey (Space by default) is pressed or the controls' Capture button.
++ *
++ * The session provider mounts it around its page, with `session_id` while its session has an
++ * environment, so it works wherever one is live: the environment view, recording, inference.
++ * Snapshots are read-only on the backend.
++ */
++export const StateSnapshotProvider = ({
++    project_id,
++    session_id,
++    children,
++}: {
++    project_id: string;
++    /** The live session with an environment; null turns capturing off. */
++    session_id: string | null;
++    children: ReactNode;
++}) => {
++    const { data: settings } = $api.useQuery('get', '/api/settings');
++    const combo = getEffectiveBindings(settings?.hotkeys.bindings)['session.capture_snapshot'];
++    const [label, setLabel] = useSnapshotLabel(project_id);
++    const { mutate, isPending } = $api.useMutation('post', '/api/projects/{project_id}/state_snapshots', {
++        meta: { invalidates: [snapshotListKey(project_id)] },
++    });
++
++    const capture = useCallback(() => {
++        if (session_id === null || isPending) {
++            return;
++        }
++        mutate(
++            {
++                params: { path: { project_id }, query: { session_id } },
++                body: { defective: label.defective, comment: label.comment.trim() },
++            },
++            {
++                onSuccess: (snapshot) => {
++                    toast.positive(describeSnapshot(snapshot), SNAPSHOT_TOAST);
++                },
++                onError: (error) => {
++                    toast.negative(
++                        `Could not save a snapshot: ${getApiErrorMessage(error) ?? 'the backend did not answer.'}`,
++                        SNAPSHOT_ERROR_TOAST
++                    );
++                },
++            }
++        );
++    }, [isPending, label, mutate, project_id, session_id]);
++
++    useHotkey(combo, capture, session_id !== null);
++
++    const value = useMemo(
++        () => (session_id === null ? null : { project_id, label, setLabel, capture, isCapturing: isPending, combo }),
++        [project_id, session_id, label, setLabel, capture, isPending, combo]
++    );
++
++    return <StateSnapshotContext.Provider value={value}>{children}</StateSnapshotContext.Provider>;
++};
+diff --git a/application/ui/src/features/runtime-session/workspace/session-workspace.tsx b/application/ui/src/features/runtime-session/workspace/session-workspace.tsx
+index 51053531..e82f50ad 100644
+--- a/application/ui/src/features/runtime-session/workspace/session-workspace.tsx
++++ b/application/ui/src/features/runtime-session/workspace/session-workspace.tsx
+@@ -4,6 +4,7 @@ import { Button, Divider, Flex, Grid, Item, Loading, minmax, Picker, Text, View
+ 
+ import { SessionPartName, useRuntimeSession } from '../runtime-session-provider';
+ import { SessionViewer } from '../session-viewer';
++import { StateSnapshotControls } from '../state-snapshot-controls';
+ import { InferenceMode } from './inference-mode';
+ import { PartControlsProvider, usePartControls } from './part-controls';
+ import { PartsPanel } from './parts-panel';
+@@ -99,6 +100,7 @@ export const SessionWorkspace = ({ initialMode, cancelHref }: { initialMode: Mod
+                         <Suspense fallback={<Loading mode='inline' />}>
+                             <PartsPanel />
+                         </Suspense>
++                        <StateSnapshotControls />
+                         <Divider size='S' />
+                         <Picker
+                             label='Mode'
+-- 
+2.53.0
+

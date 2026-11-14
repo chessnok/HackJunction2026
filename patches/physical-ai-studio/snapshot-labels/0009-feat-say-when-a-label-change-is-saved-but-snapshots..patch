@@ -1,0 +1,214 @@
+From 3fb5fdfa4322e3c3d05447c77a6ce4b190ae3a44 Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Sat, 14 Nov 2026 04:23:39 -0800
+Subject: [PATCH 9/9] feat: say when a label change is saved but snapshots.csv
+ lags behind
+
+When PATCH changes state.json but cannot rewrite snapshots.csv (it answers
+200, and the next capture or download repairs the CSV), the response now has
+csv_warning saying so, and the recent snapshots list shows it as a toast.
+csv_warning is null otherwise.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../backend/src/runtime_session/snapshot.py   | 10 +++++--
+ .../src/runtime_session/snapshot_index.py     |  9 +++---
+ .../backend/src/schemas/state_snapshot.py     |  5 ++++
+ .../tests/runtime_session/test_snapshot.py    |  3 ++
+ .../runtime_session/test_snapshot_index.py    |  8 ++++--
+ .../state-snapshot-controls.tsx               |  6 ++++
+ .../runtime-session/state-snapshot.test.tsx   | 28 +++++++++++++++++--
+ 7 files changed, 59 insertions(+), 10 deletions(-)
+
+diff --git a/application/backend/src/runtime_session/snapshot.py b/application/backend/src/runtime_session/snapshot.py
+index bb060e7b..098638ad 100644
+--- a/application/backend/src/runtime_session/snapshot.py
++++ b/application/backend/src/runtime_session/snapshot.py
+@@ -216,8 +216,14 @@ def update_label(
+         changes["defective"] = defective
+     if comment is not None:
+         changes["comment"] = comment
+-    document = snapshot_index.update(project_root, snapshot_id, changes)
+-    return _summary(project_root / snapshot_id, document)
++    document, index_error = snapshot_index.update(project_root, snapshot_id, changes)
++    summary = _summary(project_root / snapshot_id, document)
++    if index_error is not None:
++        summary.csv_warning = (
++            f"The label is saved, but {snapshot_index.CSV_NAME} could not be rewritten ({index_error}); "
++            "the next capture or CSV download brings it up to date."
++        )
++    return summary
+ 
+ 
+ def _summary(folder: Path, document: dict[str, Any]) -> StateSnapshot:
+diff --git a/application/backend/src/runtime_session/snapshot_index.py b/application/backend/src/runtime_session/snapshot_index.py
+index 5f67016d..1211fec2 100644
+--- a/application/backend/src/runtime_session/snapshot_index.py
++++ b/application/backend/src/runtime_session/snapshot_index.py
+@@ -193,14 +193,14 @@ def contents(project_root: Path, *, rebuild_first: bool = False) -> bytes:
+         return (project_root / CSV_NAME).read_bytes()
+ 
+ 
+-def update(project_root: Path, snapshot_id: str, changes: dict[str, Any]) -> dict[str, Any]:
++def update(project_root: Path, snapshot_id: str, changes: dict[str, Any]) -> tuple[dict[str, Any], OSError | None]:
+     """Change fields of a snapshot's ``state.json`` (such as its label), then rebuild the index.
+ 
+     The index is marked stale first. If it cannot be rebuilt once ``state.json`` is changed, the
+     change stands and the index stays marked, for the next capture or download to rebuild it.
+ 
+     Returns:
+-        The updated ``state.json``.
++        The updated ``state.json``, and why the index could not be rebuilt, if it could not.
+ 
+     Raises:
+         FileNotFoundError: There is no such snapshot.
+@@ -216,9 +216,10 @@ def update(project_root: Path, snapshot_id: str, changes: dict[str, Any]) -> dic
+         write_json(folder / STATE_FILE, document)
+         try:
+             _rebuild_locked(project_root)
+-        except OSError:
++        except OSError as error:
+             logger.exception("Changed {} but could not rebuild {}; the next check will", folder.name, CSV_NAME)
+-        return document
++            return document, error
++        return document, None
+ 
+ 
+ def write_json(path: Path, document: dict[str, Any]) -> None:
+diff --git a/application/backend/src/schemas/state_snapshot.py b/application/backend/src/schemas/state_snapshot.py
+index 3b07d306..595f3d7a 100644
+--- a/application/backend/src/schemas/state_snapshot.py
++++ b/application/backend/src/schemas/state_snapshot.py
+@@ -71,3 +71,8 @@ class StateSnapshot(BaseModel):
+         "(taken before labels existed)",
+     )
+     comment: str = Field(default="", description="The note saved with the snapshot")
++    csv_warning: str | None = Field(
++        default=None,
++        description="Set when a label change is saved but snapshots.csv could not be rewritten yet; "
++        "the next capture or CSV download brings it up to date",
++    )
+diff --git a/application/backend/tests/runtime_session/test_snapshot.py b/application/backend/tests/runtime_session/test_snapshot.py
+index 423586cd..70a4dc48 100644
+--- a/application/backend/tests/runtime_session/test_snapshot.py
++++ b/application/backend/tests/runtime_session/test_snapshot.py
+@@ -394,6 +394,7 @@ def test_the_api_changes_a_label_later(client, live, project) -> None:
+     response = client.patch(_url(project, f"/{first['snapshot_id']}"), json={"defective": True})
+     assert response.status_code == 200
+     assert (response.json()["defective"], response.json()["comment"]) == (True, "ok")
++    assert response.json()["csv_warning"] is None
+     response = client.patch(_url(project, f"/{first['snapshot_id']}"), json={"comment": f"  {TRICKY_COMMENT} "})
+     assert response.status_code == 200
+     assert (response.json()["defective"], response.json()["comment"]) == (True, TRICKY_COMMENT)
+@@ -460,6 +461,8 @@ def test_a_label_change_whose_csv_cannot_be_rewritten_still_counts(client, live,
+ 
+     assert response.status_code == 200
+     assert (response.json()["defective"], response.json()["comment"]) == (True, "dent")
++    assert "snapshots.csv could not be rewritten" in response.json()["csv_warning"]
++    assert "No space left on device" in response.json()["csv_warning"]
+     (row,) = _download(client, project)
+     assert (row["defective"], row["comment"]) == ("true", "dent")
+ 
+diff --git a/application/backend/tests/runtime_session/test_snapshot_index.py b/application/backend/tests/runtime_session/test_snapshot_index.py
+index 0c68ba25..594de1f6 100644
+--- a/application/backend/tests/runtime_session/test_snapshot_index.py
++++ b/application/backend/tests/runtime_session/test_snapshot_index.py
+@@ -283,9 +283,12 @@ def test_updating_a_label_rewrites_state_json_and_the_index(tmp_path) -> None:
+     for index in range(3):
+         snapshot_index.append(tmp_path, _save(tmp_path, _snapshot_id(index)))
+ 
+-    document = snapshot_index.update(tmp_path, _snapshot_id(1), {"defective": True, "comment": TRICKY_COMMENT})
++    document, index_error = snapshot_index.update(
++        tmp_path, _snapshot_id(1), {"defective": True, "comment": TRICKY_COMMENT}
++    )
+ 
+     assert document["defective"] is True
++    assert index_error is None
+     state = json.loads((tmp_path / _snapshot_id(1) / "state.json").read_text())
+     assert (state["defective"], state["comment"]) == (True, TRICKY_COMMENT)
+     assert state["robots"] == _document("x")["robots"]  # the rest is kept
+@@ -320,9 +323,10 @@ def test_an_edit_cut_short_after_state_json_is_repaired_by_the_next_check(tmp_pa
+     monkeypatch.setattr(snapshot_index, "_write_locked", _disk_full)
+ 
+     # The label is changed (state.json is the truth); the index cannot be rewritten yet.
+-    document = snapshot_index.update(tmp_path, _snapshot_id(1), {"defective": True, "comment": "dent"})
++    document, index_error = snapshot_index.update(tmp_path, _snapshot_id(1), {"defective": True, "comment": "dent"})
+ 
+     assert (document["defective"], document["comment"]) == (True, "dent")
++    assert "No space left" in str(index_error)
+     state = json.loads((tmp_path / _snapshot_id(1) / "state.json").read_text())
+     assert (state["defective"], state["comment"]) == (True, "dent")
+     assert _rows(tmp_path)[1]["defective"] == "false"  # stale, and marked so
+diff --git a/application/ui/src/features/runtime-session/state-snapshot-controls.tsx b/application/ui/src/features/runtime-session/state-snapshot-controls.tsx
+index 30a24c95..6201f4d2 100644
+--- a/application/ui/src/features/runtime-session/state-snapshot-controls.tsx
++++ b/application/ui/src/features/runtime-session/state-snapshot-controls.tsx
+@@ -112,6 +112,12 @@ const RecentSnapshot = ({ project_id, snapshot }: { project_id: string; snapshot
+         mutate(
+             { params: { path: { project_id, snapshot_id: snapshot.snapshot_id } }, body },
+             {
++                onSuccess: (changed) => {
++                    // Saved, but the CSV lags behind until the next capture or download.
++                    if (changed.csv_warning) {
++                        toast.info(changed.csv_warning, ERROR_TOAST);
++                    }
++                },
+                 onError: (error) => {
+                     const reason = getApiErrorMessage(error) ?? 'the backend did not answer.';
+                     toast.negative(`Could not change the snapshot of ${time}: ${reason}`, ERROR_TOAST);
+diff --git a/application/ui/src/features/runtime-session/state-snapshot.test.tsx b/application/ui/src/features/runtime-session/state-snapshot.test.tsx
+index 681387d2..85809974 100644
+--- a/application/ui/src/features/runtime-session/state-snapshot.test.tsx
++++ b/application/ui/src/features/runtime-session/state-snapshot.test.tsx
+@@ -388,7 +388,10 @@ describe('StateSnapshotControls', () => {
+ });
+ 
+ /** Serves the recent list from `initial` and applies PATCHes to it (or fails them); returns what was asked. */
+-const mockRecent = (initial: SchemaStateSnapshot[], { failPatches = false } = {}) => {
++const mockRecent = (
++    initial: SchemaStateSnapshot[],
++    { failPatches = false, csvWarning = null as string | null } = {}
++) => {
+     let listed = initial;
+     const listRequests: URL[] = [];
+     const patches: { snapshot_id: string; body: unknown }[] = [];
+@@ -407,7 +410,8 @@ const mockRecent = (initial: SchemaStateSnapshot[], { failPatches = false } = {}
+                 ) as never;
+             }
+             listed = listed.map((item) => (item.snapshot_id === params.snapshot_id ? { ...item, ...body } : item));
+-            return HttpResponse.json(listed.find((item) => item.snapshot_id === params.snapshot_id) ?? listed[0]);
++            const changed = listed.find((item) => item.snapshot_id === params.snapshot_id) ?? listed[0];
++            return HttpResponse.json({ ...changed, csv_warning: csvWarning });
+         })
+     );
+     return { listRequests, patches };
+@@ -524,6 +528,26 @@ describe('recent snapshots', () => {
+         expect(toggle).not.toBeChecked();
+     });
+ 
++    it('says when a change is saved but the CSV is not rewritten yet', async () => {
++        mockSettings();
++        const warning =
++            'The label is saved, but snapshots.csv could not be rewritten (No space left on device); ' +
++            'the next capture or CSV download brings it up to date.';
++        mockRecent([SNAPSHOT], { csvWarning: warning });
++        const info = rs.spyOn(toast, 'info').mockReturnValue(rs.fn());
++        const negative = rs.spyOn(toast, 'negative').mockReturnValue(rs.fn());
++        const user = userEvent.setup();
++        render(<Controls />);
++
++        const dialog = await openRecent(user);
++        const toggle = await within(dialog).findByRole('switch', { name: 'Defective, snapshot of 17:15:00.123' });
++        await user.click(toggle);
++
++        await waitFor(() => expect(info).toHaveBeenCalledWith(warning, expect.anything()));
++        expect(toggle).toBeChecked();
++        expect(negative).not.toHaveBeenCalled();
++    });
++
+     it('keeps Enter and Escape in the open list from the recording hotkeys; Escape drops a comment edit', async () => {
+         mockSettings();
+         const { patches } = mockRecent([{ ...SNAPSHOT, comment: 'old' }]);
+-- 
+2.53.0
+
