@@ -54,7 +54,14 @@ def trunk_module():
     return Trunk(m)
 
 
+CENTER = 1.0  # centre fraction of the crop kept (tighter view of the brick); set from --center
+
+
 def prep(bgr: np.ndarray) -> np.ndarray:
+    if CENTER < 1.0:
+        h = bgr.shape[0]
+        m = int(round(h * (1 - CENTER) / 2))
+        bgr = bgr[m : h - m, m : h - m]
     rgb = cv2.cvtColor(cv2.resize(bgr, (SIZE, SIZE), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
     return ((rgb.astype(np.float32) / 255.0 - MEAN) / STD).transpose(2, 0, 1)[None]
 
@@ -91,6 +98,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--device", default="NPU")
     p.add_argument("--folds", type=int, default=5)
     p.add_argument("--C", type=float, default=0.3)
+    p.add_argument("--center", type=float, default=1.0, help="keep this centre fraction of each crop (e.g. 0.8)")
+    p.add_argument("--dark-synth", type=int, default=0,
+                   help="extra SYNTHETIC positives: faint strokes (opacity 0.3-0.6) on dark good crops (brick L < 110)")
+    p.add_argument("--tag", default="")
     p.add_argument("--seed", type=int, default=42)
     a = p.parse_args(argv)
 
@@ -102,7 +113,9 @@ def main(argv: list[str] | None = None) -> None:
 
     torch.set_num_threads(2)
     rng = np.random.default_rng(a.seed)
-    run = OUT / f"{time.strftime('%Y%m%d-%H%M%S')}_resnet18lr_{a.dataset}"
+    global CENTER
+    CENTER = a.center
+    run = OUT / (f"{time.strftime('%Y%m%d-%H%M%S')}_resnet18lr_{a.dataset}" + (f"_{a.tag}" if a.tag else ""))
     run.mkdir(parents=True)
     root, sroot = DATASETS / a.dataset, DATASETS / f"{a.dataset}-synth"
 
@@ -120,6 +133,28 @@ def main(argv: list[str] | None = None) -> None:
                     r.update(y=1, real=False, root=str(sroot),
                              grp=r["scene"] if r["source"].startswith("snapshot:") else f"{r['session']}/{r['brick']}")
                     synth.append(r)
+
+    if a.dark_synth:
+        from hackjunction2026.defect.cropping.synth import add_marker
+
+        dark = []
+        for r in rows:
+            if r["label"] != "good":
+                continue
+            img = cv2.imread(str(root / r["path"]))
+            mask = cv2.imread(str(root / "masks" / f"{r['crop_id']}.png"), cv2.IMREAD_GRAYSCALE)
+            L = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)[..., 0][mask > 0]
+            if L.size and float(np.median(L)) < 110:
+                dark.append((r, img, mask))
+        rng.shuffle(dark)
+        (run / "dark_synth").mkdir()
+        for r, img, mask in dark[: a.dark_synth]:
+            marked, _, _ = add_marker(img, mask, rng, upscale=256 / max(int(r["square_side"]), 1),
+                                      opacity_range=(0.3, 0.6))
+            f = run / "dark_synth" / Path(r["path"]).name
+            cv2.imwrite(str(f), marked)
+            synth.append({**r, "path": str(f.resolve()), "root": "/", "y": 1, "real": False})
+        print(f"dark synthetic positives: {min(len(dark), a.dark_synth)} (of {len(dark)} dark good crops)", flush=True)
 
     # ---- features on the device (trunk as OpenVINO IR)
     t0 = time.time()

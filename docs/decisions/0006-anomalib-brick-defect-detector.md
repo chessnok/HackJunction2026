@@ -132,6 +132,70 @@ Checks:
   `layers=[layer1, layer2]` was not run (4x the patches per image, about 16x the coreset time on 2 CPU
   threads) and `bricks_z24t` was not trained (deadline).
 
+### Follow-up 2: VLM dropped; detector = PatchCore OR classifier; error analysis (09:20-10:15)
+
+- **Decision (user, 2026-11-14 ~09:15):** the VLM (Qwen3-VL on OVMS) is dropped and its server is
+  stopped. The detector is PatchCore (NPU, threshold 0.521) OR the supervised mark classifier (NPU,
+  strict threshold 0.9984), per crop and per brick. `configs/anomalib_deploy.yaml` has both;
+  `scripts/brick_anomaly.py` / `runtime.BrickAnomalyDetector.from_deploy()` run both (PatchCore 70 ms +
+  classifier 1-3 ms per crop). On the 50 defective / 34 good test bricks: **94 % recall, 6 % false
+  alarms** (PatchCore alone 84 % / 3 %).
+- **Error analysis** (`training/error_analysis.py` → `outputs/error_analysis/bricks_z14t/`: crops.csv,
+  bricks.csv, breakdown.md, errors.png):
+  1. Dark-blue bricks: 12 of the 50 defective bricks, 2 of the 3 bricks the OR misses. Crop recall on
+     blue mark crops: PatchCore 5/15 (33 %), classifier 1/15 (7 %); brick recall classifier 1/12. In the
+     top / floor views the dark-blue brick is nearly black (auto exposure), so a black mark has almost no
+     contrast.
+  2. Faint / small marks: mark crops PatchCore misses have 4x fewer dark pixels inside the brick than
+     the ones it catches (median dark fraction 0.0028 vs 0.0108; contrast 0.30 vs 0.37); the classifier
+     shows the same (0.0019 vs 0.0116).
+  3. The top camera sees the marks worst: crop recall top 37 % (PatchCore) / 40 % (classifier), floor
+     54 / 57 %, arm 67 / 30 %.
+  4. Brick size is not a driver in this data (bricks are 56-91 px; recall by size bucket is flat), but
+     every brick is small: a 1.5-3 px mark on a ~70 px brick.
+  5. Wrist camera finds the brick in 84 of 108 snapshots: all 24 misses are 05:00-05:02 snapshots
+     taken from a higher wrist pose where the brick touches the top image edge (rejected on purpose as
+     cut off). In the current observe pose the brick is always found: a framing issue, not a code bug.
+  6. Labels: of the 3 bricks the OR misses, 2 had their only mark-visible crop excluded by the user
+     (brick not visible in that view), so 48 of 50 are catchable from the crops that exist.
+- **Quick fixes tried** (same split, classifier out of fold; OR with PatchCore at the strict / 5 %
+  thresholds): tighter centre crop (0.8): crop AUROC 0.873 vs 0.881, OR 92 % / 3 %; faint synthetic
+  strokes on dark bricks (+150): 0.872, OR 90 % / 3 % strict but **98 % / 9 %** at the 5 % point (baseline
+  98 % / 18 %); CLAHE on luminance: 0.841, OR 90 % / 6 %. None beats the baseline overall; the dark-stroke
+  variant gives a better high-recall point (selected post hoc on 34 good bricks: confirm on new data).
+  PatchCore on CLAHE crops (`bricks_z14c`, run `20261114-092306_patchcore_bricks_z14c`): brick AUROC 0.919
+  vs 0.943, recall at the 5 %-brick rule 68 % vs 84 %: worse.
+- **Fine-tuning the classifier helps** (all resnet18 layers, `scripts/mark_classifier_modal.py`, Modal T4,
+  ephemeral app `hj-mark-classifier-ft`, 8.5 MB of brick-only JPEG crops, 5 folds by brick, 8 epochs,
+  538 s; run `outputs/mark_classifier/20261114-093822_finetune_bricks_z14t`): crop AUROC **0.962** (frozen
+  0.881), brick AUROC **0.973** (0.935); at 0 % crop FPR crop / brick recall 62 / 72 % (43 / 66 %); at 5 %:
+  87 / 94 % (71 / 88 %). IR 1.0 ms per crop on the NPU. OR with PatchCore at its strict threshold 0.9834:
+  **92 % recall, 3 % false alarms** (frozen strict: 94 % / 6 %); with thresholds tuned on these 34 good
+  bricks both reach 94 % / 3-6 % and 98 % / 9-12 %: the OR is limited by bricks on which neither model
+  sees a mark, i.e. by the data. Deployed: fine-tuned classifier at 0.9834 (better per crop, so expected
+  to generalise better; confirm on new captures).
+- **Data is the real lever. Capture checklist** (Studio state snapshots, Space key, `defective` flag):
+  - [ ] Resolution: D415 colour at **1920x1080** (Studio allows width <= 1920; colour-only output; USB 3
+        port needed): the brick grows ~2.3x (70 → ~160 px), marks from ~2 px to ~4-5 px. Fallback 1280x720
+        (1.5x). Wrist camera (USB2.0_CAM1, 05a3:9230): MJPEG modes up to 1920x1080, 1440x1080, 1280x960
+        (USB descriptors; `v4l2-ctl` is not installed: `sudo apt install v4l-utils`); now 1024x768.
+  - [ ] Exposure: lock exposure / white balance, or add light, until a dark-blue brick is clearly blue,
+        not black, in the top and floor views.
+  - [ ] Pose: the current observe pose (all 84/84 wrist detections there); avoid poses where the brick
+        touches the image edge.
+  - [ ] Good bricks: every colour (dark blue, cyan, red, yellow, lime / olive, two-tone), ~10 bricks per
+        colour, 6 orientations each (top up, each side, underside), spread over the sheet: ~300 snapshots
+        (~900 crops).
+  - [ ] Marked bricks: ~30 more, at least 10 dark-blue, marks of 3 sizes (dot, thin line, letter) on
+        different faces, 3-4 orientations each so the mark faces each camera once: ~120 snapshots. Write
+        the marked face in the snapshot comment.
+  - [ ] Interleave good and marked bricks in the same session (no "all good at 05:00, all marked at
+        06:00" time confound).
+  - [ ] Then: `scripts/brick_retrain.sh <name> patchcore -- --dataset 431a71f7 --snapshots 0fd76ff2`
+        (crops ~5 min; Argon labels only for new crops, 7-35 s each at concurrency 3 → ~1 h for 900 new
+        crops; PatchCore ~15 min on 2 CPU threads) + `training.mark_classifier` (~2 min, NPU) and review the
+        Gemini labels on the review page; user corrections go to `configs/defect_mark_labels.csv`.
+
 ## Alternatives considered
 
 - **PaDiM** (resnet18; one Gaussian per image position): brick AUROC 0.55, crop 0.51 on the same
