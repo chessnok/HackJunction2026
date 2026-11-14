@@ -1,0 +1,53 @@
+description: 'Top RealSense 243622062352 pose in the robot base frame (mm): x_cam
+  = R @ x_base + t. Robot-as-marker fit (jaw tips), scripts/calib_top_camera.py run
+  20261114-070328, tips re-detected.'
+date: '2026-11-14T07:06:47'
+image_size:
+- 848
+- 480
+K:
+- - 607.4506
+  - 0.0
+  - 420.9905
+- - 0.0
+  - 606.6509
+  - 247.9883
+- - 0.0
+  - 0.0
+  - 1.0
+dist:
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+R_cam_from_base:
+- - -0.96405546
+  - 0.26511908
+  - -0.01757689
+- - 0.16750313
+  - 0.55507647
+  - -0.81475936
+- - -0.20625174
+  - -0.78841739
+  - -0.57953277
+t_cam_from_base_mm:
+- 337.442
+- -118.172
+- 438.363
+camera_centre_in_base_mm:
+- 435.5
+- 321.7
+- 163.7
+fit:
+  points: 7
+  median_px: 4.59821463223822
+  max_px: 11.341783412520563
+  loo_mm:
+  - 9.8
+  - 11.9
+  - 2.0
+  - 6.2
+  - 3.1
+  - 10.7
+  - 5.7
