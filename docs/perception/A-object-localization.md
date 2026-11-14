@@ -41,7 +41,8 @@ talks only to the shared local OpenVINO Model Server (`localhost:8000/v3`), one 
   camera is biased up to ~2.5 cm along its viewing direction, the two biases cancel in the fused
   mean). Task names are **not** colour labels (table below).
 - **Live**: the same CV path runs at 15 ms per frame for both D415s plus the gripper on one CPU
-  thread (67 Hz).
+  thread (67 Hz). The local VLM (Qwen3-VL-8B int8 on the iGPU) needs 7.5 s per image: fine for
+  naming objects once per episode, not for the per-frame map.
 
 ## Scene and cameras (what the data shows)
 
@@ -156,7 +157,7 @@ failure images `evaluation/fail_<method>/`.
 | CV v1 | floor | 100 % | 100 % | 0.00 | 2.0 / 4.0 | 0.88 | 3.0 / 5.4 | 5 ms |
 | CV v1 | fused | | | | | | 1.9 / 11.4 | |
 
-VLM rows: see "Local VLM results" below.
+VLM rows (local Qwen3-VL-8B): see "Local VLM results" below.
 
 Detection by occlusion (CV v2): 100 % for free, partly hidden and mostly hidden bricks in both
 cameras.
@@ -195,8 +196,60 @@ point on the gripper.
 
 ### Local VLM results
 
-PENDING: the shared OpenVINO Model Server was still downloading Qwen3-VL-8B-Instruct (int8) at
-06:15 PST.
+Server: the team's OpenVINO Model Server on this laptop (`/home/intel/opt/ovms/current/bin/ovms`,
+REST on 127.0.0.1:8000, OpenAI-compatible `/v3/chat/completions`), model
+**Qwen3-VL-8B-Instruct, OpenVINO IR int8** (`OpenVINO/Qwen3-VL-8B-Instruct-int8-ov`), on the Arc
+B390 iGPU (set up by another agent). Requests from this agent: one at a time, `temperature 0`,
+JSON-schema `response_format` (`vlm.py: DET_SCHEMA / MV_SCHEMA`), images sent as JPEG (quality 92)
+at full resolution. Nothing was sent to a cloud API.
+
+Box convention, checked first on six first frames **outside** the GT set (episodes 0, 20, 50;
+`scripts/perception_vlm_probe.py`): Qwen3-VL answers in a 0-1000 grid relative to the image even
+when the prompt asks for pixels (IoU with the CV box: 0.87 median when read as 0-1000, 0.00 when
+read as pixels). All runs below use the 0-1000 reading.
+
+| Method | Camera | Detected | Colour exact | False pos. / frame | Bottom-centre px median / p90 | IoU median | Table mm median / p90 | Time per image |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| VLM per camera | top | 98 % (47/48) | 100 % | 0.00 | 1.8 / 5.8 | 0.92 | 2.0 / 8.3 | 7.6 s |
+| VLM per camera | floor | 98 % (47/48) | 85 % | 0.00 | 2.1 / 5.5 | 0.90 | 2.5 / 5.4 | 7.4 s |
+| VLM per camera | **fused** | | | | | | **1.7 / 6.7** | |
+| VLM per camera | wrist | 48/48 colour hit, 47/48 exact | | | | | (no table position) | 9.0 s |
+| Hybrid (VLM objects + CV boxes) | top | 98 % | 100 % | 0.00 | 3.2 / 10.6 | 0.87 | 3.7 / 11.5 | 7.6 s |
+| Hybrid | floor | 98 % | 85 % | 0.00 | 2.0 / 4.0 | 0.88 | 2.9 / 5.3 | 7.4 s |
+| Hybrid | fused | | | | | | 2.4 / 7.9 | |
+| VLM multi-view (3 images, 1 request) | top | 100 % | 100 % | 0.00 | 2.1 / 8.6 | 0.91 | 2.6 / 7.2 | 28 s per request |
+| VLM multi-view | floor | 100 % | 100 % | 0.00 | 8.6 / 14.5 | 0.75 | 7.1 / 13.3 | (same request) |
+| VLM multi-view | fused | | | | | | 4.3 / 8.7 | |
+| VLM multi-view | wrist | 48/48, 48/48 exact | | | | | (no table position) | (same request) |
+
+Findings:
+
+- **Boxes**: the VLM's boxes are tighter than the CV blobs in the top camera (IoU 0.92 vs 0.87,
+  p90 bottom-centre error 5.8 vs 11.0 px): it does not include the bluish reflection under the
+  turquoise brick (ep 49) that CV v2 still adds. In the table frame the fused error is the same as
+  CV within noise (1.7 / 6.7 vs 2.0 / 6.3 mm).
+- **Misses** (2 of 96 top/floor views): an empty answer for a clearly visible green 2×4 brick
+  (ep 36 mid, floor) and for a brick hidden under the jaws (ep 49 late, top).
+- **Colour**: 7 of 47 floor answers wrong: the lime-green Duplo is called "yellow" in the floor
+  camera (ep 25 and 29, all 6 frames; under that camera's colour cast it does look yellow-green),
+  and a turquoise brick under the jaws is called "green" (ep 49 late). The top camera was 100 %.
+  CV has no colour errors on this set because its hue ranges were measured on this scene.
+- **Wrist camera**: the VLM finds the brick in 48/48 frames with 47/48 exact colour; CV 43/48.
+  This is the one place where the VLM is clearly better, but the wrist camera gives no table
+  position without the arm pose.
+- **Multi-view** (top + floor + wrist in one request): every brick found in every view with the
+  right colour (100 % / 100 % / 48 of 48), so seeing the brick in all views fixes the per-camera
+  misses and the lime-green confusion. Its boxes are looser, mainly in the floor view (IoU 0.75,
+  bottom-centre p90 14.5 px, fused 4.3 / 8.7 mm), and one request takes 28 s median (p90 80 s while
+  other agents used the server).
+- **Hybrid** (VLM decides, CV draws the box) inherits the VLM's misses and colour errors and CV's
+  looser boxes: no gain on this scene.
+- **Cost**: 7.5 s per D415 image and 9 s per wrist image on the iGPU (one request at a time, the
+  server also serves other agents), about 1000× the CV path. Annotating the whole dataset per
+  camera would take 19228 × 2 × 7.5 s ≈ 80 h; every 30th frame ≈ 2.7 h. Live use at ≥ 10 Hz is out
+  of reach (0.13 Hz per camera).
+
+No cloud results exist to compare with: this agent never called a cloud model.
 
 ## Dataset annotation (outputs)
 
@@ -271,8 +324,11 @@ Modal GPU: not used (local-only rule; nothing heavy to offload).
   detection and colour on the GT, 2 mm median / 6 mm p90 fused, the whole dataset in 3 minutes.
 - **Live (≥ 10 Hz): the same CV path**, 67 Hz on one thread. Compute the sheet ROI and distractor
   masks once per episode (or when the scene changes) from a frame with the arm at home.
-- The VLM is not needed for the map of this scene; it could label new object types once per episode
-  (see the VLM section for its measured accuracy and latency).
+- The local VLM is not needed for the map of this scene: per camera it is as accurate in the table
+  frame (1.7 vs 2.0 mm median) but 1000× slower and it misreads lime green in the floor view. Where
+  it helps: labelling new or unusual objects, and the wrist camera (48/48 vs 43/48). A useful
+  combination is one **multi-view** request per episode (or when CV sees a colour it does not know)
+  to name the objects (100 % colour on the GT set), with CV giving the per-frame positions.
 
 ## Limits, untested, blocked
 
