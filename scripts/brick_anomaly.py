@@ -34,6 +34,7 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
+from hackjunction2026.defect.cropping.bricks import CropConfig  # noqa: E402
 from hackjunction2026.defect.runtime import DEPLOY, BrickAnomalyDetector  # noqa: E402
 
 SNAPSHOTS = Path.home() / ".local/share/physicalai/state_snapshots"
@@ -70,18 +71,28 @@ def scenes(args) -> list[tuple[str, dict[str, np.ndarray] | None, list[Path] | N
     return out
 
 
+def model_and_crop(args) -> tuple[Path | None, CropConfig | None]:
+    """--run <run_id> → its exported model + the crop settings of its dataset; --model → that file."""
+    if args.run:
+        xml = Path("exports/anomalib") / args.run / args.compression / "weights/openvino/model.xml"
+        return xml, BrickAnomalyDetector.crop_from_run(Path("outputs/anomalib/runs") / args.run / "run.json")
+    return (Path(args.model), None) if args.model else (None, None)
+
+
 def benchmark(args) -> None:
     import openvino as ov
 
-    det0 = BrickAnomalyDetector.from_deploy(args.deploy, device="CPU") if not args.model else None
-    xml = Path(args.model) if args.model else det0.xml
+    xml, crop = model_and_crop(args)
+    if xml is None:
+        det0 = BrickAnomalyDetector.from_deploy(args.deploy, device="CPU")
+        xml, crop = det0.xml, det0.crop
     crops = sorted(Path(args.bench_crops).glob("*.png"))[:16] if args.bench_crops else []
     imgs = [cv2.imread(str(c)) for c in crops] or [np.full((256, 256, 3), 200, np.uint8)]
     print(f"available devices: {ov.Core().available_devices}", file=sys.stderr)
     results = []
     for dev in args.benchmark.split(","):
         try:
-            det = BrickAnomalyDetector(xml, dev, crop=det0.crop if det0 else None)
+            det = BrickAnomalyDetector(xml, dev, crop=crop)
         except Exception as exc:  # noqa: BLE001  report and continue with the next device
             results.append({"device": dev, "error": repr(exc)[:300]})
             continue
@@ -104,7 +115,9 @@ def main() -> None:
     p.add_argument("--camera", help="camera name for a single raw frame")
     p.add_argument("--scene", help="scene name for loose raw frames")
     p.add_argument("--deploy", default=str(DEPLOY), help="deploy config (model, threshold, crop)")
-    p.add_argument("--model", help="model.xml instead of the deploy config's")
+    p.add_argument("--model", help="model.xml instead of the deploy config's (crop settings: defaults)")
+    p.add_argument("--run", help="training run id: its exported model + its dataset's crop settings")
+    p.add_argument("--compression", default="fp16", choices=("fp16", "int8_ptq"), help="with --run")
     p.add_argument("--device", help="NPU, GPU or CPU (default: deploy config)")
     p.add_argument("--threshold", type=float, help="override the deploy threshold")
     p.add_argument("--max-bricks", type=int, default=1, help="bricks per camera frame (largest first)")
@@ -119,8 +132,10 @@ def main() -> None:
         benchmark(args)
         return
 
-    if args.model:
-        det = BrickAnomalyDetector(args.model, args.device or "CPU", args.threshold if args.threshold is not None else 0.5)
+    xml, crop = model_and_crop(args)
+    if xml is not None:
+        det = BrickAnomalyDetector(xml, args.device or "CPU", args.threshold if args.threshold is not None else 0.5,
+                                   crop=crop, name=args.run or "")
     else:
         det = BrickAnomalyDetector.from_deploy(args.deploy, device=args.device, threshold=args.threshold)
     print(f"model {det.xml} on {det.device}, compiled in {det.compile_s:.1f} s, threshold {det.threshold}",

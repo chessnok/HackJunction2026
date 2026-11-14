@@ -381,8 +381,10 @@ def main(argv: list[str] | None = None) -> None:
         snap_split = dict.fromkeys(good, "test")
         if a.snapshot_train_frac > 0:
             # Consecutive snapshots often show the same brick seconds apart: split whole time blocks.
+            # Stratify the blocks by capture hour (snapshot id YYYYMMDD-HHMMSS-mmm), so both splits get
+            # early and late good snapshots (lighting and set-up drift over the session).
             names = sorted(good)
-            blocks = {f"block{i // a.snapshot_block:03d}": "snap" for i in range(len(names))}
+            blocks = {f"block{i // a.snapshot_block:03d}": f"h{n[9:11]}x" for i, n in enumerate(names)}
             block_split = assign_splits(blocks, 1.0 - a.snapshot_train_frac, a.seed)
             snap_split = {n: block_split[f"block{i // a.snapshot_block:03d}"] for i, n in enumerate(names)}
         n_by = Counter()
