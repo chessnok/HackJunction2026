@@ -11,4 +11,4 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 exec uv run --no-sync --project "$ROOT/third_party/physical-ai-studio/application/backend" \
-  python -m hackjunction2026.defect.capture_inspection "$@"
+  python -m hackjunction2026.defect.capture.capture_inspection "$@"

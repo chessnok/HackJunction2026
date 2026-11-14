@@ -8,8 +8,12 @@ bricks, turn them and pick defective ones in between. One cycle = one placement 
     PRE  brick pushed into the L-shape   -> SPACE saves top_pre  + side_FR
     POST brick turned 180° (vertical)    -> SPACE saves top_post + side_BL   (cycle += 1)
 
-Keys:  SPACE save   b brick   g/d good/defect   f defect note   c check on/off   u undo   q quit
+Keys:  SPACE save   b brick   g/d good/defect   f defect note + views   c check on/off   u undo   q quit
        (b, g, d only at the start of a cycle; text is typed in the terminal)
+
+For a defective brick you also say which views show the defect (e.g. a scratch on face F is only
+visible in side_FR). The dataset step uses that to label each image; the other views of that brick
+are not used as "defect" images.
 
 Files: captures/anomalib/raw/<session>/{good,defect}/<brick>_<cycle>_<view>.png + manifest.jsonl.
 Each PNG is the crop box enlarged by `save_margin`, the manifest says where the crop box is inside
@@ -18,7 +22,7 @@ it. Cropping to 256x256 happens later (prepare step) with the same fixed box.
 Run on the laptop, from the repo root, with Studio's backend environment (pyrealsense2, opencv):
 
     PYTHONPATH=src uv run --no-sync --project third_party/physical-ai-studio/application/backend \
-        python -m hackjunction2026.defect.capture_inspection [--list-cameras | --set-crops | ...]
+        python -m hackjunction2026.defect.capture.capture_inspection [--list-cameras | --set-crops | ...]
 
 (scripts/capture_inspection.sh does exactly this.) Stop recording / Run model / camera preview
 in Studio first: only one program can use a camera. No robot motion happens in this tool.
@@ -39,8 +43,8 @@ import cv2
 import numpy as np
 import yaml
 
-from hackjunction2026.defect.cameras import FakeCamera, RealSenseColor, WebcamCamera, list_realsense
-from hackjunction2026.defect.crops import Box, CheckResult, check_view, cut
+from hackjunction2026.defect.capture.cameras import FakeCamera, RealSenseColor, WebcamCamera, list_realsense
+from hackjunction2026.defect.cropping.crops import Box, CheckResult, check_view, cut
 
 ROLES = ("top", "side")
 NAME_RE = re.compile(r"[^a-z0-9]+")
@@ -102,6 +106,7 @@ class Session:
     brick: str = ""
     label: str = "good"
     note: str = ""
+    defect_views: list[str] = field(default_factory=list)  # empty = all views
     position: str = "pre"
     cycle: int = 0
     records: list[dict] = field(default_factory=list)
@@ -144,7 +149,7 @@ class Session:
     def set_label(self, label: str) -> None:
         self.label = label
         if label == "good":
-            self.note = ""
+            self.note, self.defect_views = "", []
         self.resume()
 
     def save(self, frames: dict, checks: dict[str, CheckResult], check_enabled: bool) -> dict:
@@ -152,6 +157,7 @@ class Session:
         rec = {
             "time": time.strftime("%Y-%m-%dT%H:%M:%S"), "brick": self.brick, "label": self.label,
             "cycle": self.cycle, "position": self.position, "defect_note": self.note or None,
+            "defect_views": (self.defect_views or None) if self.label == "defect" else None,
             "files": {}, "region": {}, "box_in_region": {}, "camera": {}, "frame": {}, "frame_size": {},
             "check_enabled": check_enabled,
             "check": {r: {"ok": c.ok, "reason": c.reason, "brick_fraction": round(c.brick_fraction, 4),
@@ -193,6 +199,7 @@ class Session:
         self.manifest.write_text("".join(json.dumps(r) + "\n" for r in self.records))
         self.brick, self.label, self.cycle, self.position = rec["brick"], rec["label"], rec["cycle"], rec["position"]
         self.note = rec["defect_note"] or ""
+        self.defect_views = rec.get("defect_views") or []
         return rec
 
     def counts(self) -> dict[str, int]:
@@ -263,6 +270,36 @@ def ask(prompt: str) -> str:
     return input()
 
 
+def all_views(cfg: dict) -> list[str]:
+    return [v for pos in ("pre", "post") for v in cfg["views"][pos].values()]
+
+
+def parse_views(text: str, cfg: dict) -> list[str]:
+    """'side_FR, top_pre' -> ['side_FR', 'top_pre']; empty -> [] (= all views). Unknown names: error."""
+    names = [t.strip() for t in text.replace(";", ",").split(",") if t.strip()]
+    valid = all_views(cfg)
+    lower = {v.lower(): v for v in valid}
+    out = []
+    for n in names:
+        if n.lower() not in lower:
+            msg = f"unknown view {n!r}; valid: {', '.join(valid)}"
+            raise ValueError(msg)
+        out.append(lower[n.lower()])
+    return out
+
+
+def ask_defect(session: Session) -> None:
+    session.note = ask("defect note (e.g. 'scratch on F'): ").strip()
+    valid = ", ".join(all_views(session.cfg))
+    while True:
+        try:
+            session.defect_views = parse_views(
+                ask(f"which views show it? comma list of {valid} (Enter = all): "), session.cfg)
+            return
+        except ValueError as exc:
+            print(exc)
+
+
 # --------------------------------------------------------------------------- modes
 def mode_list_cameras() -> None:
     devices = list_realsense()
@@ -307,7 +344,11 @@ def make_session(args: argparse.Namespace, cfg: dict, crops: dict, cams: dict, e
     if not session.brick:
         sys.exit("empty brick name")
     if session.label == "defect":
-        session.note = args.note or ask("defect note (e.g. 'scratch top'): ").strip()
+        if args.note is not None or args.defect_views is not None:
+            session.note = args.note or ""
+            session.defect_views = parse_views(args.defect_views or "", cfg)
+        else:
+            ask_defect(session)
     return session
 
 
@@ -335,7 +376,9 @@ def mode_interactive(session: Session, cams: dict) -> None:
             (f"brick {session.brick}   label {session.label.upper()}   cycle {session.cycle:03d}   "
              f"next {session.position.upper()} ({views['top']} + {views['side']})   "
              f"done: good {counts['good']} / defect {counts['defect']} cycles"),
-            f"note: {session.note or '-'}   check {'ON' if check_enabled else 'OFF'}   {message}",
+            f"note: {session.note or '-'}"
+            + (f" (views: {', '.join(session.defect_views) or 'all'})" if session.label == "defect" else "")
+            + f"   check {'ON' if check_enabled else 'OFF'}   {message}",
             "SPACE save   b brick   g/d good/defect   f note   c check   u undo   q quit",
         ]
         cv2.imshow(WINDOW, render(frames, session.crops, checks, lines, cfg["save_margin"]))
@@ -371,12 +414,18 @@ def mode_interactive(session: Session, cams: dict) -> None:
                 message = f"brick {name}, cycle {session.cycle:03d} {session.position.upper()}"
         elif key in (ord("g"), ord("d")):
             session.set_label("good" if key == ord("g") else "defect")
-            if session.label == "defect" and not session.note:
-                session.note = ask("defect note (e.g. 'scratch top'): ").strip()
+            if session.label == "defect":
+                ask_defect(session)
             message = f"label {session.label}"
         elif key == ord("f"):
-            session.note = ask("defect note: ").strip()
-            message = "note set"
+            if session.label != "defect":
+                message = "notes are for defects: press d first"
+                continue
+            if not at_start:
+                message = "finish the cycle first (POST), or undo"
+                continue
+            ask_defect(session)
+            message = "defect note set"
     cv2.destroyAllWindows()
     c = session.counts()
     print(f"session {session.root}: {c['good']} good + {c['defect']} defect complete cycles")
@@ -395,7 +444,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--session", help="session folder name (default: date_time); reuse a name to continue")
     p.add_argument("--brick", help="brick name, e.g. 2x2red (asked if missing)")
     p.add_argument("--label", choices=("good", "defect"), default="good")
-    p.add_argument("--note", help="defect note")
+    p.add_argument("--note", help="defect note, e.g. 'scratch on F'")
+    p.add_argument("--defect-views", help="views that show the defect, e.g. 'side_FR' (default: all)")
     p.add_argument("--once", action="store_true",
                    help="save the next position (PRE, or POST of an unfinished cycle) without the window, exit")
     args = p.parse_args(argv)
@@ -409,6 +459,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.no_check:
         cfg["check"]["enabled"] = False
     test_mode = args.fake or args.webcam is not None
+    if args.defect_views:
+        try:
+            parse_views(args.defect_views, cfg)
+        except ValueError as exc:
+            sys.exit(str(exc))
     if not args.once:
         require_gui()  # before cameras and the session folder are touched
     cams = open_cameras(cfg, args.fake, args.webcam)

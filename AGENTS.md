@@ -74,7 +74,8 @@ Rules:
 - Physical AI Studio lives in `third_party/physical-ai-studio` (git clone of the `junction2026`
   branch, **not committed**, see README). Its backend and UI have their own lockfiles; use
   `uv sync` / `npm install` there, never `pip install` into its env (ADR 0003).
-- Anomalib gets its own venv (its PyTorch must not clash with Studio's).
+- Anomalib never goes into Studio's env (its PyTorch must not clash with Studio's). It is the
+  `anomalib` uv extra of this repo: `uv sync --extra capture --extra anomalib` (ADR 0009).
 - Project tools: `uv run scripts/<tool>.py` from the repo root.
 - Serial ports: use `/dev/serial/by-id/...` from `configs/hardware.yaml`, never `/dev/ttyACM*`
   (numbering changes on replug).

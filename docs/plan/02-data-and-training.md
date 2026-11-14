@@ -7,7 +7,7 @@ We collect five kinds of data:
 
 | Dataset | Used by | Tool | Where it lives (never in git) |
 | --- | --- | --- | --- |
-| A. Inspection images (good + defect) | Anomalib generalized model | `hackjunction2026.defect.capture_inspection` (`scripts/capture_inspection.sh`) | `captures/anomalib/raw/` |
+| A. Inspection images (good + defect) | Anomalib generalized model | `hackjunction2026.defect.capture.capture_inspection` (`scripts/capture_inspection.sh`) | `captures/anomalib/raw/` |
 | B. Teleoperation episodes: pick | ACT pick policy (step 1) | Physical AI Studio recording UI | Studio storage; export LeRobot v3 copy to `datasets/` |
 | E. Teleoperation episodes: place, with language | SmolVLA place policy (step 6) | Physical AI Studio recording UI | same |
 | C. Waypoints (teach poses) | scripted 180° spin; fallback place | `scripts/record_waypoints.py` | `configs/waypoints.yaml` (small, OK in git) |
@@ -38,7 +38,7 @@ first (AGENTS.md safety rules). Re-record if the inspection guide, bowls or came
 
 ### How to capture (semi-automatic)
 
-Tool: `src/hackjunction2026/defect/capture_inspection.py` (written 2026-11-14, tested with
+Tool: `src/hackjunction2026/defect/capture/capture_inspection.py` (written 2026-11-14, tested with
 `--fake` cameras only; usage in the README). It shows both D415s live and saves only on SPACE:
 
 1. A person puts a brick into the L-shape (any allowed orientation; upside down sometimes).
@@ -162,7 +162,13 @@ If one view is weak (e.g. missing studs on tops), split **only that view** into 
 
 ### 1. Anomalib: locally on the Arc iGPU (no Modal, costs nothing)
 
-Run in `anomalib-env` ([03-setup.md](03-setup.md#4-anomalib-environment)).
+**Implemented (2026-11-14, tested on mock data only):** `src/hackjunction2026/defect/training/`:
+`common.py` (shared: dataset → train → static batch-1 export FP16 + INT8 → evaluate → `run.json`),
+one file per scenario (`train_padim.py`, `train_patchcore.py`, `train_efficientad.py`),
+`evaluate.py` (every export, per view and per cycle, threshold sweep, error heatmaps, broken-export
+check) and `compare.py`. The dataset comes from `cropping/make_dataset.py`. Commands: README,
+"Anomalib training". Environment: the repo `.venv` ([03-setup.md](03-setup.md#4-anomalib-environment)).
+The snippet below is the original sketch.
 
 ```python
 from anomalib.data import Folder

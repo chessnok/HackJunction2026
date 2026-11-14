@@ -1,5 +1,5 @@
 # Inspection cameras and capture settings for the Anomalib dataset.
-# Used by: python -m hackjunction2026.defect.capture_inspection (see README "Anomalib dataset").
+# Used by: python -m hackjunction2026.defect.capture.capture_inspection (see README "Anomalib dataset").
 # Facts about the cameras live in docs/hardware.md; keep serials in sync with configs/hardware.yaml.
 
 cameras:

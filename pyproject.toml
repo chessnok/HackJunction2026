@@ -5,7 +5,7 @@ description = "Junction 2026 Intel Physical AI Challenge: SO-101 inspection and 
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "numpy>=2.5.4",
+    "numpy>=2",
     "pyserial>=3.5",
 ]
 
@@ -18,6 +18,32 @@ capture = [
     "pyyaml>=6",
     "pyrealsense2>=2.56; sys_platform == 'linux'",
 ]
+# Anomalib training (hackjunction2026.defect.training). Version required by the organisers (slide 8).
+# PyTorch comes from the Intel XPU index (Arc iGPU on the station laptop; also runs on CPU elsewhere).
+anomalib = [
+    "anomalib[openvino,xpu]==2.7.0",
+    # Listed directly so [tool.uv.sources] below applies (uv sources only affect direct dependencies).
+    "torch>=2.10",
+    "torchvision>=0.25",
+    "triton-xpu",
+]
+
+[tool.uv]
+# The station laptop and our dev machines are Linux; the XPU wheels only exist for Linux / Windows.
+environments = ["sys_platform == 'linux'"]
+# torch 2.15+xpu needs triton-xpu; anomalib[xpu] also lists the old pytorch-triton-xpu (for torch
+# <= 2.9). Both install a `triton` package, so drop the old one (impossible marker = never installed).
+override-dependencies = ["pytorch-triton-xpu; sys_platform == 'never'"]
+
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-xpu" }
+torchvision = { index = "pytorch-xpu" }
+triton-xpu = { index = "pytorch-xpu" }
 
 [build-system]
 requires = ["hatchling"]
