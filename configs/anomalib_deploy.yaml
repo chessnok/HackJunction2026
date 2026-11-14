@@ -5,12 +5,14 @@ run_id: 20261114-081831_patchcore_bricks_z14t
 model_xml: exports/anomalib/20261114-081831_patchcore_bricks_z14t/fp16/weights/openvino/model.xml
 device: NPU              # GPU is held by the VLM server; latency per crop in ADR 0006
 threshold: 0.521         # normalized pred_score; exact 5 %-rule value 0.5205 (0.52 would also flag a good brick at 0.5205)
-# Second vote (ADR 0006 follow-up; the VLM was dropped): supervised "mark visible" classifier, OR-ed per
-# crop with PatchCore. 1 ms per crop on the NPU. Strict threshold = no false positive on good snapshot crops
-# out of fold; PatchCore OR classifier: 94 % brick recall, 6 % false alarms (50 defective / 34 good bricks).
+# Second vote (ADR 0006 follow-up 2; the VLM was dropped): supervised "mark visible" classifier, resnet18
+# fine-tuned on a Modal T4 (scripts/mark_classifier_modal.py), OR-ed per crop with PatchCore; 1 ms per crop
+# on the NPU. Strict threshold = no false positive on good snapshot crops out of fold. On 50 defective /
+# 34 good test bricks: PatchCore OR classifier 92 % recall, 3 % false alarms (classifier alone: crop AUROC
+# 0.96). Frozen-feature alternative: outputs/mark_classifier/20261114-085214_resnet18lr_bricks_z14t, 0.9984.
 classifier:
-  model_xml: outputs/mark_classifier/20261114-085214_resnet18lr_bricks_z14t/model.xml
-  threshold: 0.9984
+  model_xml: outputs/mark_classifier/20261114-093822_finetune_bricks_z14t/model.xml
+  threshold: 0.9834
   device: NPU
 crop:                    # must match the training dataset (captures/anomalib/dataset/bricks_z14t/dataset.json)
   size: 256

@@ -163,7 +163,17 @@ Checks:
   strokes on dark bricks (+150): 0.872, OR 90 % / 3 % strict but **98 % / 9 %** at the 5 % point (baseline
   98 % / 18 %); CLAHE on luminance: 0.841, OR 90 % / 6 %. None beats the baseline overall; the dark-stroke
   variant gives a better high-recall point (selected post hoc on 34 good bricks: confirm on new data).
-  RESULTS_FT
+  PatchCore on CLAHE crops (`bricks_z14c`, run `20261114-092306_patchcore_bricks_z14c`): brick AUROC 0.919
+  vs 0.943, recall at the 5 %-brick rule 68 % vs 84 %: worse.
+- **Fine-tuning the classifier helps** (all resnet18 layers, `scripts/mark_classifier_modal.py`, Modal T4,
+  ephemeral app `hj-mark-classifier-ft`, 8.5 MB of brick-only JPEG crops, 5 folds by brick, 8 epochs,
+  538 s; run `outputs/mark_classifier/20261114-093822_finetune_bricks_z14t`): crop AUROC **0.962** (frozen
+  0.881), brick AUROC **0.973** (0.935); at 0 % crop FPR crop / brick recall 62 / 72 % (43 / 66 %); at 5 %:
+  87 / 94 % (71 / 88 %). IR 1.0 ms per crop on the NPU. OR with PatchCore at its strict threshold 0.9834:
+  **92 % recall, 3 % false alarms** (frozen strict: 94 % / 6 %); with thresholds tuned on these 34 good
+  bricks both reach 94 % / 3-6 % and 98 % / 9-12 %: the OR is limited by bricks on which neither model
+  sees a mark, i.e. by the data. Deployed: fine-tuned classifier at 0.9834 (better per crop, so expected
+  to generalise better; confirm on new captures).
 - **Data is the real lever. Capture checklist** (Studio state snapshots, Space key, `defective` flag):
   - [ ] Resolution: D415 colour at **1920x1080** (Studio allows width <= 1920; colour-only output; USB 3
         port needed): the brick grows ~2.3x (70 → ~160 px), marks from ~2 px to ~4-5 px. Fallback 1280x720
