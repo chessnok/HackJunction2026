@@ -54,6 +54,7 @@ class Track:
 
 
 MERGE_MM = 40.0  # same-colour detections closer than this are one brick (split by the jaws)
+PAIR_ANY_COLOR_MM = 30.0  # top and floor views this close are one brick even if their colours differ
 START_FRAMES = 15  # a real brick is on the sheet when the episode starts (dataset assumption)
 MIN_LATE_TRACK_FRAC = 0.25  # ... or it is seen for at least this share of the episode
 MAX_HOLD_FRAMES = 45  # keep an unseen brick at its last position for 1.5 s, then drop it
@@ -124,10 +125,12 @@ def annotate_episode(ds: Dataset, frame: Frame, ep: int, step: int = 1, min_trac
             C = np.full((len(T), len(F)), 1e6)
             for i, (bt, xt) in enumerate(T):
                 for j, (bf, xf) in enumerate(F):
-                    if not colors_compatible(bt.color, bf.color):
+                    d = np.linalg.norm(xt - xf)
+                    # a two-colour brick can show a different part to each camera (top: yellow,
+                    # floor: blue): colour-incompatible views still pair when they are this close
+                    if not colors_compatible(bt.color, bf.color) and d >= PAIR_ANY_COLOR_MM:
                         continue
                     X, err = triangulate(P["top"], P["floor"], bt.center, bf.center)
-                    d = np.linalg.norm(xt - xf)
                     # either the plane estimates agree or the two rays meet (lifted brick)
                     if d < 80 or (err < 25 and -250 < X[2] < 0):
                         C[i, j] = min(d, err * 3)
@@ -140,7 +143,8 @@ def annotate_episode(ds: Dataset, frame: Frame, ep: int, step: int = 1, min_trac
             X, err = triangulate(P["top"], P["floor"], bt.center, bf.center)
             lifted = X[2] < -(BRICK_CENTRE_HEIGHT_MM + LIFT_MM) and err < 25
             xy = X[:2] if lifted else 0.5 * (xt + xf)
-            color = bt.color if bt.area >= bf.area else bf.color
+            big, small = (bt, bf) if bt.area >= bf.area else (bf, bt)
+            color = "+".join(big.colors + [c for c in small.colors if c not in big.colors])
             objs.append({"xy": xy, "color": color, "top": (bt, xt), "floor": (bf, xf), "z": X[2], "tri_err": err,
                          "lifted": bool(lifted), "source": "top+floor"})
         for i, (bt, xt) in enumerate(T):
@@ -188,9 +192,19 @@ def annotate_episode(ds: Dataset, frame: Frame, ep: int, step: int = 1, min_trac
             m = {i: k for i, k in zip(ri, ki) if C[i, k] < 1e6}
         else:
             m = {}
+        taken = set(m.values())
         for i, o in enumerate(objs):
+            near = [k for k, t in enumerate(tracks) if np.linalg.norm(o["xy"] - t.xy) < MERGE_MM]
             if i in m:
                 tr = tracks[m[i]]
+            elif near:
+                # same brick as an existing track (colour seen differently, or a duplicate view)
+                free = [k for k in near if k not in taken]
+                if not free:
+                    ids.append(None)
+                    continue
+                tr = tracks[free[0]]
+                taken.add(free[0])
             else:
                 tr = Track(len(tracks), o["color"], o["xy"])
                 tracks.append(tr)

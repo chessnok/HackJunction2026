@@ -114,12 +114,15 @@ Use: `hackjunction2026.perception.scene.Frame.load(path)`, then `to_table(cam, e
 Per-frame fusion and tracking (`annotate.py`): every detection becomes a table point (bottom-centre
 of the box → plane → moved 16 mm, half a 2×2 Duplo, away from that camera). Top and floor
 detections are paired by colour and either plane distance < 80 mm or meeting rays (triangulated
-box centres). A paired brick's position is the mean of the two plane estimates, or the triangulated
+box centres); views closer than 30 mm pair whatever their colour (a stacked two-colour brick can
+show only its yellow part to one camera and only its blue part to the other; the pair gets both
+colours). A paired brick's position is the mean of the two plane estimates, or the triangulated
 point when the brick is lifted (centre > 27 mm above the table; resting bricks triangulate at
 13-18 mm). Same-colour detections within 40 mm merge. Tracks: nearest neighbour in the table plane,
-same colour, gate 120 mm; a track is kept if it exists within the first 15 frames or covers ≥ 25 % of
-the episode (dataset assumption: every brick is on the paper when recording starts); an unseen
-track is held at its last position for at most 45 frames (1.5 s).
+same colour, gate 120 mm; a detection within 40 mm of an existing track never starts a new one; a
+track is kept if it exists within the first 15 frames or covers ≥ 25 % of the episode (dataset
+assumption: every brick is on the paper when recording starts); an unseen track is held at its
+last position for at most 45 frames (1.5 s).
 
 ## Ground truth and evaluation
 
