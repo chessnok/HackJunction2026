@@ -1,0 +1,8 @@
+# Human corrections to the automatic cut points of scripts/grasp_merge.py (OLD dataset 431a71f7).
+# One line per OLD episode: episode,cut_frame   where cut_frame is a frame index of that episode
+# (the first frame kept) or "skip" (leave the episode out of the merged dataset).
+# Re-run: scripts/grasp_merge.py cuts && scripts/grasp_merge.py clips && scripts/grasp_merge.py build ...
+# (docs/datasets/grasp-merged.md). Example:
+#   12,140
+#   40,skip
+episode,cut_frame

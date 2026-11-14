@@ -13,6 +13,7 @@ third_party/
 # Data and artifacts: never commit
 data/
 datasets/
+!docs/datasets/
 captures/
 outputs/
 exports/

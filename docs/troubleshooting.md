@@ -13,6 +13,21 @@ Template:
 - Refs: ADRs, log entries, upstream issues
 ```
 
+## T-023. LeRobot's streaming encoder silently drops frames when an offline conversion outruns it
+
+- Date: 2026-11-14 · Status: Workaround (found in the code before it bit; not observed as a failure)
+- Symptom: none at first. Writing a dataset offline with `LeRobotDataset.create(...,
+  streaming_encoding=True)` + `add_frame` (lerobot 0.6.0 in Studio's backend venv, PyAV 15.1):
+  decoding source video is much faster than SVT-AV1 encoding, the per-camera queue
+  (`encoder_queue_maxsize`, default 30, Studio 60) fills, and `StreamingVideoEncoder.feed_frame` drops
+  the frame after a 0.1 s `put` timeout with only `Encoder queue full for <key>, dropped N frame(s)`.
+  The video then has fewer frames than the parquet rows.
+- Cause: the streaming encoder is built for live recording, where dropping beats blocking.
+- Fix: for offline conversion set `encoder_queue_maxsize` above the longest episode (queues are created
+  per episode, so a whole episode fits; memory about 5 MB per frame for the three cameras), and fail
+  if `dataset.writer._streaming_encoder._dropped_frames` is non-zero after `save_episode()`
+  (`src/hackjunction2026/grasp_merge/build.py`). Validate video frames = rows per episode afterwards.
+- Refs: ADR 0012, `docs/datasets/grasp-merged.md`.
 ## T-022. Studio discards a recorded episode ("recording fell 654 ms behind") while Anomalib trains
 
 - Date: 2026-11-14 · Status: Workaround

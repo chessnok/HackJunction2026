@@ -267,6 +267,21 @@ $PY scripts/perception_register_robot.py 431a71f7                         # robo
 $PY scripts/perception_eval.py --methods cv,gripper                        # accuracy vs hand-made GT
 ```
 
+## Merged grasp dataset (NEW grasp-only + grasp tails of OLD)
+
+Criterion, numbers, review clips and the full recipe: [docs/datasets/grasp-merged.md](docs/datasets/grasp-merged.md).
+Read-only on the source datasets; outputs in `captures/merge_review/` (gitignored). Human corrections
+to the cut points go to `configs/grasp_merge_overrides.csv` (`episode,cut_frame` or `episode,skip`).
+
+```bash
+PY=third_party/physical-ai-studio/application/backend/.venv/bin/python
+export PYTHONPATH=src
+nice -n 19 $PY scripts/grasp_merge.py cuts                          # cut per OLD episode -> cuts.csv / cuts.json
+nice -n 19 $PY scripts/grasp_merge.py clips                         # H.264 review clips (top camera) + index.json
+nice -n 19 $PY scripts/grasp_merge.py build --name <new name>       # merged LeRobot v3 dataset, then validate
+nice -n 19 $PY scripts/grasp_merge.py import captures/merge_review/dataset/<new name>   # Studio import API
+```
+
 ## Local VLM: OpenVINO Model Server on the iGPU (brick judge, localization)
 
 A local vision-language model behind an OpenAI-compatible API: OVMS 2026.4.1, native (no Docker), on
