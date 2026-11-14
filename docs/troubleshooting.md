@@ -13,6 +13,23 @@ Template:
 - Refs: ADRs, log entries, upstream issues
 ```
 
+## T-017. `so101_goto.py goto "-9.5,..."` fails: a target vector starting with a minus sign
+
+- Date: 2026-11-14 · Status: Workaround (found offline; the argparse behaviour was reproduced with a copy of the
+  `goto` parser, `so101_goto.py` itself was not run)
+- Symptom: `$PY scripts/so101_goto.py goto "-9.49,-20.97,39.33,76.84,-25.19,93.18" --go` exits with
+  `so101_goto.py goto: error: the following arguments are required: target`. A first value >= 0
+  (`goto "0,-20,30,40,0,10"`, the README example) works.
+- Cause: argparse treats an argument that starts with `-` as an option unless it looks like a plain
+  negative number (`-9.49` would pass, `-9.49,-20.97,...` does not), so the positional `target` is
+  missing. A negative shoulder_pan is common: `observe` has pan -12.76, and bricks on the robot's left
+  need pan < 0.
+- Fix: end the options with `--` before the vector, flags first:
+  `$PY scripts/so101_goto.py goto --go -- "-9.49,-20.97,39.33,76.84,-25.19,93.18"`.
+  `scripts/pick_above.py plan` prints the command in this form; a test parses it with the same
+  argparse layout.
+- Refs: ADR 0007, README "Hover above a brick", log 2026-11-14
+
 ## T-015. Local training on the Arc iGPU hangs at step 0: GPU page fault ("Engine memory CAT error")
 
 - Date: 2026-11-14 · Status: Open

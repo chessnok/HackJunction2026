@@ -5,8 +5,9 @@ values (from IK) that put the gripper over each brick, as an operator would in t
 
 from __future__ import annotations
 
+import argparse
 import json
-import re
+import shlex
 
 import numpy as np
 import pytest
@@ -25,6 +26,24 @@ from hackjunction2026.kinematics import (
 CAL = Calibration.from_file(pa.FOLLOWER_CAL)
 BRICKS = {"red": (420, 330), "blue": (640, 330), "lime": (280, 400), "orange": (760, 470),
           "yellow": (520, 560), "green": (560, 420)}
+
+
+def _goto_target(line: str) -> str:
+    """Parse a printed so101_goto command with the same argparse layout as scripts/so101_goto.py's
+    goto subcommand (positional target + flags) and return the target."""
+    argv = shlex.split(line.split("#")[0])
+    argv = argv[argv.index("goto"):]
+    ap = argparse.ArgumentParser(exit_on_error=False)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    g = sub.add_parser("goto", exit_on_error=False)
+    g.add_argument("target")
+    g.add_argument("--speed", type=float, default=20.0)
+    g.add_argument("--track-error", type=float, default=12.0)
+    g.add_argument("--go", action="store_true")
+    g.add_argument("--yes", action="store_true")
+    args = ap.parse_args(argv)
+    assert args.go
+    return args.target
 
 
 def _h_true():
@@ -85,9 +104,8 @@ def test_calib_fit_then_plan(setup, capsys):
 
     pa.main(["plan", "--image", str(setup["img"]), "--homography", str(setup["out"]), "--brick", "blue"])
     out = capsys.readouterr().out
-    m = re.search(r'goto "([-\d.,]+)" --go', out)
-    assert m, out
-    target = np.array([float(v) for v in m.group(1).split(",")])
+    move = next(line for line in out.splitlines() if "--go" in line and "so101_goto.py" in line)
+    target = np.array([float(v) for v in _goto_target(move).split(",")])
     tp = ik.tool_pose(normalized_to_urdf(target, CAL), "jaw_centre")
     x_true, y_true = tm.apply_homography(setup["h"], np.array(BRICKS["blue"], float))
     assert np.hypot(tp["position"][0] - x_true, tp["position"][1] - y_true) < 4.0  # homography + 1 mm noise
@@ -99,6 +117,11 @@ def test_calib_fit_then_plan(setup, capsys):
     th_long = tm.TableHomography.load(setup["out"])
     side = th_long.yaw_deg(BRICKS["blue"], 0.0)
     assert min(ik.axis_angle_diff_deg(yaw, side), ik.axis_angle_diff_deg(yaw, side + 90)) < 2.0
+
+    # a brick on the robot's left needs a negative shoulder_pan: the printed command must still parse
+    pa.main(["plan", "--image", str(setup["img"]), "--homography", str(setup["out"]), "--brick", "red"])
+    move = next(line for line in capsys.readouterr().out.splitlines() if "--go" in line and "so101_goto" in line)
+    assert float(_goto_target(move).split(",")[0]) < 0  # the case that needs "--" (T-017)
 
 
 def test_plan_refuses_low_hover_and_unreachable(setup, capsys):

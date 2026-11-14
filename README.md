@@ -167,7 +167,8 @@ robot base on the table or recalibrating the arm):
    It refuses when the arm is not in the calibrated pose (more than 1.5 units off), the brick is out
    of reach, a joint would leave its range, or the move would bring an arm point within 30 mm of
    the table.
-3. Run the printed `... so101_goto.py goto "<6 values>" --go` (hands clear), check that the gripper
+3. Run the printed `... so101_goto.py goto --go -- "<6 values>"` (hands clear; the `--` is needed
+   when the first value is negative, T-017), check that the gripper
    hangs straight down above the brick with the brick between the jaws, and note the offset in mm.
 4. Go back with `... so101_goto.py goto observe --go` before the next `plan`: the path check assumes
    the move starts in `observe`.

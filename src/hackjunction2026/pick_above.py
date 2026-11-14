@@ -628,8 +628,9 @@ def cmd_plan(args) -> None:
     if not hp.ok:
         raise SystemExit(f"REFUSED: {hp.reason}")
     print("\nMove (human, hands clear; Studio environment closed; arm still in the observe pose):")
-    print(f"  {STUDIO_PY} scripts/so101_goto.py goto \"{goto_arg(hp.target)}\"        # dry run")
-    print(f"  {STUDIO_PY} scripts/so101_goto.py goto \"{goto_arg(hp.target)}\" --go   # move")
+    # "--" ends the options: a vector starting with a minus sign is otherwise taken for an option (T-017)
+    print(f"  {STUDIO_PY} scripts/so101_goto.py goto -- \"{goto_arg(hp.target)}\"        # dry run")
+    print(f"  {STUDIO_PY} scripts/so101_goto.py goto --go -- \"{goto_arg(hp.target)}\"   # move")
 
 
 def cmd_reach(args) -> None:
