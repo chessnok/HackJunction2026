@@ -251,9 +251,10 @@ def main() -> None:
     s.add_argument("target", help="saved pose name or 6 comma-separated normalized values")
     motion_args(s)
     s.set_defaults(fn=cmd_goto)
-    s = sub.add_parser("raise", help="move one joint 'up' by a fraction of its range (default: motor 2, 1/3)")
+    s = sub.add_parser("raise", help="move one joint 'up' by a fraction of its range (default: motor 2, 1/9)")
     s.add_argument("--joint", default="shoulder_lift", choices=m.JOINTS[:5])
-    s.add_argument("--frac", type=float, default=1 / 3)
+    s.add_argument("--frac", type=float, default=1 / 9,
+                   help="default 1/9 of the range (about 22 units); 1/3 was too much on the real arm")
     s.add_argument("--of", choices=["range", "value"], default="range",
                    help="fraction of the joint's full range (200 units) or of its current value")
     motion_args(s)

@@ -66,7 +66,7 @@ def move_linear(
     hz: float = 50.0,
     track_error: float = 12.0,
     track_time: float = 0.3,
-    settle_error: float = 3.0,
+    settle_error: float = 5.0,  # loaded joints sag 2-4 units under gravity on the real arm
 ) -> RunResult:
     """q(t) = q0 + (q1 - q0) * t / T. Stops and holds if the arm lags more than ``track_error``
     units for ``track_time`` s (excluding the gripper, which may be holding an object) or on Ctrl+C."""
