@@ -1,0 +1,90 @@
+description: Wrist camera pixel (u, v) -> table XY in mm, robot base frame (hackjunction2026.kinematics). Valid
+  ONLY with the arm in the pose below and the camera at this image size. Written by scripts/pick_above.py calib-fit.
+pose: observe
+pose_joints:
+  shoulder_pan: -13.64
+  shoulder_lift: -96.3
+  elbow_flex: 51.14
+  wrist_flex: 96.67
+  wrist_roll: -58.69
+  gripper: 96.76
+image_size:
+- 1024
+- 768
+point: jaw_centre
+date: '2026-11-14T10:28:06-08:00'
+H:
+- - -0.08226134674
+  - -0.4279825622
+  - 342.6101529
+- - -0.3961834119
+  - 0.01482433578
+  - 201.6214367
+- - -0.0003923876789
+  - 5.936816393e-05
+  - 1.0
+stats:
+  n: 6
+  inliers: 5
+  rms_mm: 3.0
+  max_mm: 4.8
+  loo_rms_mm: 24.6
+  loo_max_mm: 37.6
+  observe_spread_units: 0.89
+points:
+- pixel:
+  - 689.6
+  - 320.8
+  table_xy:
+  - 196.6
+  - -87.6
+  residual_mm: 2.51
+  inlier: true
+  colour: blue
+- pixel:
+  - 491.7
+  - 265.8
+  table_xy:
+  - 227.8
+  - 8.4
+  residual_mm: 4.8
+  inlier: true
+  colour: blue
+- pixel:
+  - 346.4
+  - 320.2
+  table_xy:
+  - 202.2
+  - 79.9
+  residual_mm: 2.34
+  inlier: true
+  colour: blue
+- pixel:
+  - 737.7
+  - 240.7
+  table_xy:
+  - 249.1
+  - -120.7
+  residual_mm: 2.39
+  inlier: true
+  colour: blue
+- pixel:
+  - 508.0
+  - 162.1
+  table_xy:
+  - 284.7
+  - 5.3
+  residual_mm: 2.13
+  inlier: true
+  colour: blue
+- pixel:
+  - 333.4
+  - 279.2
+  table_xy:
+  - 249.9
+  - 107.4
+  residual_mm: 37.74
+  inlier: false
+  colour: blue
+note: 'scripts/calib_wrist_homography.py: the robot placed one brick at each point; table XY = FK jaw centre of
+  the measured place pose.'
