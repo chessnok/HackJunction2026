@@ -285,13 +285,14 @@ frame, upscales it to 448 px and sends the crops in one request (ADR 0008). The 
 `{"is_broken": boolean}` by the server (JSON schema, constrained decoding), temperature 0.
 
 ```bash
-P=configs/brick_judge_prompt_explicit.txt   # recommended prompt, see ADR 0005; default = the team's verbatim prompt
-uv run scripts/brick_judge.py --snapshot 20261114-051059-914 --prompt-file $P   # one Studio snapshot
-uv run scripts/brick_judge.py top.png floor.png arm.png --prompt-file $P        # any photos = one scene
-uv run scripts/brick_judge.py --csv --eval --prompt-file $P                     # all snapshots vs their label
-uv run scripts/brick_judge.py --all --eval --mode per-image --prompt-file $P    # one request per crop, OR (votes per camera)
+P=configs/brick_judge_prompt_explicit.txt   # recommended prompt (ADR 0005); the default is the team's verbatim prompt
+# chosen config (ADR 0005): crops, one request per camera crop, OR -> 43/50 defective, 3/58 FP, ~6.4 s per brick
+uv run scripts/brick_judge.py --snapshot 20261114-051059-914 --prompt-file $P --mode per-image
+uv run scripts/brick_judge.py top.png floor.png arm.png --prompt-file $P --mode per-image   # any photos
+uv run scripts/brick_judge.py --csv --eval --prompt-file $P --mode per-image   # all snapshots vs label
 uv run scripts/brick_judge.py --all --view frames                               # full frames instead of crops
 uv run scripts/brick_judge.py --all --no-vlm --save-crops captures/vlm/crops    # only the colour crops
+scripts/vlm_eval.sh <tag>   # full eval of the served model (an hour of GPU: not while recording)
 ```
 
 ### API for other tools (e.g. object localization)
@@ -299,8 +300,8 @@ uv run scripts/brick_judge.py --all --no-vlm --save-crops captures/vlm/crops    
 `POST http://127.0.0.1:8000/v3/chat/completions`, OpenAI chat format. The served model name is the
 model's directory name; `GET http://127.0.0.1:8000/v3/models` lists it. Send images as base64 data URLs.
 A `response_format` JSON schema is enforced by constrained decoding. `usage.prompt_tokens` counts text
-tokens only. Qwen3-VL answers boxes as `bbox_2d` = [x1, y1, x2, y2] normalized to 0-1000 (its training
-format; the accuracy check on our frames is still running, ADR 0005).
+tokens only. Qwen3-VL answers boxes as `bbox_2d` = [x1, y1, x2, y2] normalized to 0-1000 (measured on
+81 frames: IoU median 0.87-0.91 against hand-checked boxes, centre error about 2 px, about 5.5 s per box).
 
 ```python
 import base64, json, urllib.request
