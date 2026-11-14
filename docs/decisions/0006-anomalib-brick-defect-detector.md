@@ -40,7 +40,7 @@
   `configs/defect_mark_labels.csv` (note `user review ...`; `true` / `false` / `exclude`) override
   it. Crops of defective bricks go to `test/defect` (visible) or `test/defect_clean` (not visible), so
   per-crop recall is measured only on crops that show the mark. Brick-level metrics use every crop (OR).
-- **Decision rule:** brick is defective if max(normalized score over its crops) > **0.52**,
+- **Decision rule:** brick is defective if max(normalized score over its crops) > **0.521** (exact value 0.5205; do not round to 0.52),
   the lowest threshold with <= 5 % false alarms per good-snapshot brick (uses good bricks only, so
   recall at it is not tuned on defects).
 - **Device:** NPU, FP16 IR: 70 ms per crop. GPU 14-22 ms but shared with the VLM server; CPU 360 ms
@@ -96,6 +96,36 @@ Checks:
   snapshots from 05:00-05:10, 4 threads): brick AUROC 0.978, crop 0.863, recall 88 % brick / 55 % crop
   at 0.493, 2-fold false alarms 17 %. Superseded by the z14t run (time-stratified test, Argon + user
   labels).
+
+### Follow-up: augmentation, a supervised classifier, fusion (08:50-09:10)
+
+- **Supervised mark classifier** (`training/mark_classifier.py`, run
+  `outputs/mark_classifier/20261114-085214_resnet18lr_bricks_z14t`): frozen ImageNet resnet18 (avg + max
+  pooled layer3/layer4) on the NPU + logistic regression; trained on mark-visible crops (99 real + 203
+  SYNTHETIC strokes) vs good / mark-free crops, each ×6 with hflip, rot90, rot270, colour jitter, blur.
+  5-fold CV grouped by snapshot, out-of-fold scores, 58 good + 50 defective snapshot bricks:
+  crop AUROC 0.881 (PatchCore 0.835), brick AUROC 0.935 (PatchCore 0.943); at 0 % crop FPR: crop
+  recall 43 %, brick 66 %; at 5 % crop FPR (threshold 0.774): crop 71 %, brick 88 %, 10 % false alarms
+  per good brick. Exported as one IR: **1.0 ms per crop on the NPU**. Not a clear win over PatchCore
+  alone; it is a cheap extra vote.
+- **Fusion, brick-level OR** (`training/fusion.py`; 50 defective + 34 good test snapshots; PatchCore at
+  0.521, classifier out-of-fold, Qwen3-VL-8B scene verdicts from `crops-or-v3.jsonl`):
+
+| detectors (OR) | recall | false alarms |
+| --- | --- | --- |
+| PatchCore | 84 % | 3 % |
+| classifier (strict, thr 0.998) / (5 % FPR, thr 0.774) | 66 % / 88 % | 3 % / 15 % |
+| Qwen3-VL | 86 % | 9 % |
+| PatchCore + classifier (strict) | 94 % | 6 % |
+| PatchCore + Qwen3-VL | 96 % | 9 % |
+| PatchCore + classifier (strict) + Qwen3-VL | 98 % | 12 % |
+| PatchCore + classifier (5 %) | 98 % | 18 % |
+
+  The one brick no combination catches is `061820-859` (dark blue; its only mark-visible crop per
+  Argon is the one the user excluded).
+- **Augmented normals for PatchCore** (`cropping/augment_normals.py`, `bricks_z14ta`): see the
+  log for the result. `layers=[layer1, layer2]` was not run (4x the patches per image, about 16x
+  the coreset time on 2 CPU threads) and `bricks_z24t` was not trained (deadline).
 
 ## Alternatives considered
 
