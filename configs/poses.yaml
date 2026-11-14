@@ -22,13 +22,13 @@ observe:
   note: home pose for brick detection (wrist camera sees the whole sheet). Read from Studio's teleop session (port held by Studio) as shoulder_lift -99.83, wrist_flex 98.78; both pulled in to -97.0 / 97.0 (about 3 deg) because goto keeps 3 units from the calibrated range ends (mechanical stops).
 photo:
   joints:
-    shoulder_pan: -8.62
-    shoulder_lift: 75.27
-    elbow_flex: -96.37
-    wrist_flex: 97.0
-    wrist_roll: -55.77
-    gripper: 45.97
+    shoulder_pan: -8.55
+    shoulder_lift: 51.63
+    elbow_flex: -40.66
+    wrist_flex: 80.44
+    wrist_roll: -27.73
+    gripper: 3.02
   from: follower
-  saved: '2026-11-14T09:34:32'
-  snapshot: 20261114-093432-502
-  note: place-and-photograph spot for the sort cycle (release the brick here, then raise). Read from Studio's teleop session via a state snapshot; wrist_flex was 99.11, pulled in to 97.0 (goto keeps 3 units from the range ends).
+  saved: '2026-11-14T09:36:15'
+  snapshot: 20261114-093615-465
+  note: place-and-photograph spot for the sort cycle (release the brick here, then raise). Read from Studio's teleop session via a state snapshot, all joints as measured (wrist_roll / motor 5 matters, keep it). Replaces the 09:34 version.
