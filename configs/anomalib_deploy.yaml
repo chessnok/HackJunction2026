@@ -1,0 +1,14 @@
+# Deployed Anomalib brick detector (ADR 0006). Read by hackjunction2026.defect.runtime and
+# scripts/brick_anomaly.py. Model files are not in git (exports/ is ignored): rebuild them with
+# scripts/brick_retrain.sh or copy exports/anomalib/<run_id>/ from the robot laptop.
+run_id: 20261114-070921_patchcore_bricks_z14
+model_xml: exports/anomalib/20261114-070921_patchcore_bricks_z14/fp16/weights/openvino/model.xml
+device: NPU              # GPU is held by the VLM server; NPU 71 ms / crop, GPU 22 ms, CPU see ADR 0006
+threshold: 0.493         # normalized pred_score; lowest value with <= 5 % false alarms per good-snapshot brick
+crop:                    # must match the training dataset (captures/anomalib/dataset/<name>/dataset.json)
+  size: 256
+  zoom: 1.4
+  whiten: true
+  fill: [255, 255, 255]
+  hull_grow: 0.04
+  feather_px: 2

@@ -36,5 +36,5 @@ wandb/
 .vscode/
 .DS_Store
 
-# OpenVINO compiled-model cache (GPU/NPU)
+# OpenVINO compile cache (anomalib OpenVINOInferencer writes it into the working directory)
 openvino_cache/

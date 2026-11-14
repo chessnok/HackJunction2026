@@ -13,6 +13,46 @@ Template:
 - Refs: ADRs, log entries, upstream issues
 ```
 
+## T-020. Anomalib export prints `RuntimeError: ... No Adapter To Version $17 for Pad` but works
+
+- Date: 2026-11-14 · Status: Workaround (harmless)
+- Symptom: during `training.train_padim` / `train_patchcore` export (anomalib 2.7.0, torch 2.15.0+xpu,
+  onnx 1.23.2, onnxscript 0.7.2) the log shows a full traceback ending in
+  `RuntimeError: /project/onnx/version_converter/BaseConverter.h:63: adapter_lookup: Assertion
+  'false' failed: No Adapter To Version $17 for Pad`, then `Setting ONNX exporter to use operator set
+  version 18 because the requested opset_version 14 is a lower ...`.
+- Cause: the dynamo ONNX exporter tries to down-convert to opset 14, fails, logs the traceback and keeps
+  opset 18. OpenVINO reads opset 18.
+- Fix: none needed; the run continues and writes `exports/anomalib/<run>/fp16/.../model.xml`. Check the
+  `[padim] export fp16: ...` line, not the traceback. (PaDiM INT8 still comes out broken: constant score.)
+
+## T-019. PatchCore coreset selection would take over an hour on the CPU
+
+- Date: 2026-11-14 · Status: Workaround
+- Symptom: `training.train_patchcore --dataset bricks_v1s --accelerator cpu` (869 train crops, 256x256,
+  `wide_resnet50_2` layer2+3, coreset 0.01): `Selecting Coreset Indices.: 2% | 167/8897 [01:26<1:20:23,
+  1.81it/s]`, process RSS 8.9 GB, load average 12.8 while Studio was recording. Stopped by hand.
+- Cause: every greedy coreset step scans all 869 x 1024 = 890k patch features (random projection about
+  340 dims) with 4 niced threads; the number of steps is 1 % of 890k.
+- Fix: fewer training crops (`brick_crops.py --max-train 400`, about 470 with snapshots) and a smaller
+  coreset (`train_patchcore --coreset 0.005`), so about 2400 cheaper steps. Do not use `pkill -f` with a
+  pattern that is also in the calling shell's command line (it kills the shell, exit 144, see T-010).
+- Refs: ADR 0006.
+
+## T-018. Gemini API returns 404 for `gemini-pro-latest` and `gemini-3.1-pro-preview`
+
+- Date: 2026-11-14 · Status: Fixed
+- Symptom: `scripts/label_crops_gemini.py` (google-genai 1.x, default client) → `HTTP 404: 404 NOT_FOUND.
+  models/gemini-3.1-pro-preview is not found for API version v1, or is not supported for
+  generateContent`; same for `gemini-pro-latest`. `gemini-2.5-pro` → `404 ... This model
+  models/gemini-2.5-pro is no longer available to new users. Please update your code to use
+  models/gemini-3.1-pro-preview`. `client.models.list()` does not list either Pro alias.
+- Cause: the client called the `v1` API; preview and `-latest` models are served on `v1beta` only.
+- Fix: `genai.Client(api_key=..., http_options=types.HttpOptions(api_version="v1beta"))`.
+  `gemini-pro-latest` then resolves to `gemini-3.1-pro-preview` (`response.model_version`), about 4-9 s
+  per crop. Never put the key in a URL; it is read from `.env` and sent by the SDK as a header.
+- Refs: ADR 0006, `scripts/label_crops_gemini.py`.
+
 ## T-017. `so101_goto.py goto "-9.5,..."` fails: a target vector starting with a minus sign
 
 - Date: 2026-11-14 · Status: Workaround (found offline; the argparse behaviour was reproduced with a copy of the

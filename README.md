@@ -111,6 +111,41 @@ Code: `src/hackjunction2026/defect/{capture,cropping,training}/`. Runs: `outputs
 (`run.json`, `eval.json`, `errors/`); models: `exports/anomalib/<run>/{fp16,int8_ptq}/weights/openvino/model.xml`.
 Training uses the Intel GPU (XPU) when available, else CPU. Exports are static batch 1.
 
+## Anomalib on brick crops from the three cameras (ADR 0006, ADR 0008)
+
+Bricks are found by colour on the white sheet in the `top`, `floor` and `arm` frames, cut as a square of
+2.4x the brick, background whitened, 256x256. One crop = one model input; a brick is defective if ANY
+crop scores above the threshold. Real defects are the state snapshots flagged `defective`; Gemini
+labels each crop "mark visible?" so only crops that show the mark count as `test/defect`.
+
+**Environment:** Anomalib lives in its own env `anomalib-env/` (anomalib 2.7.0, torch 2.15.0+xpu,
+openvino 2026.4.1, ~7.9 GB) so it never locks the project `.venv`. Every anomalib command needs
+`UV_PROJECT_ENVIRONMENT=$PWD/anomalib-env`; never run `uv sync` / `uv run --extra anomalib` without
+it (that starts the 8 GB install into `.venv` again and blocks everyone's `uv run`).
+
+```bash
+export UV_PROJECT_ENVIRONMENT=$PWD/anomalib-env OMP_NUM_THREADS=4 MKL_NUM_THREADS=4
+STUDIO_PY=third_party/physical-ai-studio/application/backend/.venv/bin/python   # has av + pyarrow
+# 1. crops: dataset episodes (train/test split by episode) + every snapshot (test), + SYNTHETIC eval set
+nice -n 19 $STUDIO_PY scripts/brick_crops.py --name bricks_v1s --dataset 431a71f7 --snapshots 0fd76ff2 \
+    --snapshot-train-frac 0.5 --synthetic
+# 2. per-crop labels with Gemini (AI_STUDIO_API_KEY in .env; only masked brick crops are sent; cached)
+uv run --no-project --script scripts/label_crops_gemini.py --dataset bricks_v1s --apply
+# 3. train + evaluate on CPU (T-015), then the synthetic set and the other devices
+nice -n 19 scripts/anomalib.sh training.train_patchcore --dataset bricks_v1s --accelerator cpu --num-workers 2
+nice -n 19 scripts/anomalib.sh training.evaluate --run <run_id> --dataset bricks_v1s-synth
+nice -n 19 scripts/anomalib.sh training.evaluate --run <run_id> --device NPU
+scripts/anomalib.sh training.brick_report --runs <run_id> [...]     # → outputs/anomalib/brick_report.md
+# 4. run it: one JSON line per scene (OR over crops), heatmaps optional; model/threshold/device from
+#    configs/anomalib_deploy.yaml (openvino + opencv only: anomalib-env or Studio's env)
+anomalib-env/bin/python scripts/brick_anomaly.py --heatmaps --snapshot 20261114-051059-914
+anomalib-env/bin/python scripts/brick_anomaly.py --benchmark CPU,GPU,NPU --bench-crops captures/anomalib/dataset/bricks_v1s/test/good
+```
+
+Retrain in one command (e.g. on inspection-pose recordings): `scripts/brick_retrain.sh <name> patchcore --
+--dataset <id> --snapshots 0fd76ff2 [--pose inspect]`. Labels: Gemini per crop, manual spot checks in
+`configs/defect_mark_labels.csv`.
+
 ## Moving the follower to saved poses (`scripts/so101_goto.py`)
 
 Simplest possible move: `delta = target - current`, every joint moves linearly so all arrive
