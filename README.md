@@ -148,6 +148,18 @@ anomalib-env/bin/python scripts/brick_anomaly.py --benchmark CPU,GPU,NPU --bench
 Retrain in one command (e.g. on inspection-pose recordings): `scripts/brick_retrain.sh <name> patchcore --
 --dataset <id> --snapshots 0fd76ff2 [--pose inspect]`.
 
+Extra vote and fusion (ADR 0006 follow-up): a supervised "mark visible" classifier (resnet18 trunk on the
+NPU + logistic regression, 1 ms / crop, 5-fold CV by snapshot) and a brick-level OR table:
+
+```bash
+PYTHONPATH=src anomalib-env/bin/python -m hackjunction2026.defect.training.mark_classifier --dataset bricks_z14t --device NPU
+PYTHONPATH=src anomalib-env/bin/python -m hackjunction2026.defect.training.fusion \
+    --patchcore outputs/anomalib/runs/<run>/scores_fp16_NPU.csv --patchcore-threshold 0.521 \
+    --classifier outputs/mark_classifier/<run>/oof_scores.csv --classifier-threshold 0.998 \
+    --vlm captures/vlm/eval/qwen8-int8/crops-or-v3.jsonl
+PYTHONPATH=src anomalib-env/bin/python -m hackjunction2026.defect.cropping.augment_normals --src bricks_z14t --name bricks_z14ta
+```
+
 Labels, highest priority first: rows of `configs/defect_mark_labels.csv` whose note starts with
 `user review` (`true` / `false`, or `exclude` = drop the crop from every split); then
 `gemini-4-argon` (cached per crop in `captures/anomalib/labels/gemini_responses.jsonl`). The other
