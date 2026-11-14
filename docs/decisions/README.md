@@ -10,3 +10,4 @@ Numbers are never reused. To change a decision, write a new ADR and mark the old
 | [0002](0002-no-ros2-stationary-arm-blueprint-on-host.md) | Do not base the project on the ROS 2 Stationary Arm blueprint | Accepted |
 | [0003](0003-run-studio-natively-from-upstream-lockfiles.md) | Run Studio natively from upstream lockfiles, not Docker or PyPI | Accepted |
 | [0004](0004-patch-studio-for-realsense-rgbd-recording.md) | Patch Studio to record RealSense color + depth (`hj/realsense-rgbd`) | Proposed |
+| [0008](0008-defect-decision-any-vote-on-zoomed-crops.md) | Defective if any camera or any detector says so, on zoomed brick crops | Accepted |
