@@ -46,7 +46,7 @@ CPU (load average 10–14); expect lower numbers on an idle laptop.
 | Qwen3-VL-8B int8 | verbatim | 3 crops | one request | 3.9 s | 0/58 | 15/49 | 2/20 |
 | Qwen3-VL-8B int8 | explicit | 3 crops | one request | 2.4 s | 0/58 | 38/49 | 19/20 |
 | Qwen3-VL-8B int8 | explicit | 1 crop × 3 | per crop, OR | 1.9 s per crop, 6.4 s per scene | 3/58 | 42/49 | 20/20 |
-| Qwen3-VL-8B int8 | explicit | 3 full frames | one request | about 13 s | (paused at 82/127, see Consequences) | | |
+| Qwen3-VL-8B int8 | explicit | 3 full frames | one request | 12.4 s | 0/47 | 22/43 | (not reached) |
 | Qwen3-VL-8B int8 | explicit | 3 frames + 3 crops | one request | (pending) | | | |
 | gemma-4-26b-a4b int4 | | | | (downloading) | | | |
 | gemma-4-31B int4 / int8 | | | | (not downloaded) | | | |
@@ -56,6 +56,8 @@ CPU (load average 10–14); expect lower numbers on an idle laptop.
   field before `is_broken` (`--reason`) did not help (1/37 on a probe set). The explicit prompt
   (`configs/brick_judge_prompt_explicit.txt`: a mark is a line, arc, cross, dot or scribble; studs,
   holes, shadows, edges are not) fixes it.
+- Full frames vs crops, same 90 scenes (the frames run stopped at 90/127, see Consequences): crops
+  find 33/43 real defective bricks, frames 22/43, both 0/47 false positives; crops are 5× faster.
 - Misses with the explicit prompt are mostly blue bricks (black on blue, low contrast). The 3 false
   positives of the per-crop OR are all wrist crops with a black speck on the paper next to the brick.
 - Per crop, scored against the Gemini crop labels (`captures/anomalib/dataset/bricks_z14/index.csv`,
