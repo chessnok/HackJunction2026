@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -96,7 +97,9 @@ def evaluate_export(run: dict, run_dir: Path, root: Path, rows: list[dict], comp
     from anomalib.deploy import OpenVINOInferencer
 
     t0 = time.time()
-    inf = OpenVINOInferencer(path=xml, device=device)
+    # The CPU plugin uses every core by default; cap it (the laptop records datasets at the same time).
+    cfg = {"INFERENCE_NUM_THREADS": int(os.environ.get("OV_CPU_THREADS", "4"))} if device == "CPU" else None
+    inf = OpenVINOInferencer(path=xml, device=device, config=cfg)
     compile_s = time.time() - t0
     lat, scored = [], []
     for r in rows:

@@ -36,13 +36,17 @@ def ov_core():
 
 class BrickAnomalyDetector:
     def __init__(self, xml: str | Path, device: str = "CPU", threshold: float = 0.5,
-                 crop: CropConfig | None = None, seg: SegConfig | None = None, name: str = ""):
+                 crop: CropConfig | None = None, seg: SegConfig | None = None, name: str = "",
+                 cpu_threads: int = 4):
         self.xml, self.device, self.threshold = Path(xml), device, float(threshold)
         self.crop, self.seg = crop or CropConfig(), seg or SegConfig()
         self.name = name or self.xml.parent.as_posix()
         core = ov_core()
+        config = {"PERFORMANCE_HINT": "LATENCY"}
+        if device == "CPU":
+            config["INFERENCE_NUM_THREADS"] = cpu_threads  # all cores by default; Studio records alongside
         t0 = time.time()
-        self.compiled = core.compile_model(str(self.xml), device)
+        self.compiled = core.compile_model(str(self.xml), device, config)
         self.compile_s = time.time() - t0
         self.input = self.compiled.inputs[0]
         shape = list(self.input.get_partial_shape().get_min_shape())
