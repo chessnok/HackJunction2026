@@ -272,6 +272,10 @@ class Mover:
             own = min(check_straight_move(q, q, self.cal, samples=2, min_clearance_mm=-1e9).end_clearance_mm
                       for q in (start, target))  # into or out of the taught low pose
             clearance = min(clearance, own - 3.0)
+        # never refuse a move because of where the arm already is: the path may start as low as the current
+        # pose (e.g. just lifted off the photo spot with a sagging, loaded shoulder) but never go below it
+        here = check_straight_move(start, start, self.cal, samples=2, min_clearance_mm=-1e9).end_clearance_mm
+        clearance = min(clearance, here - 3.0)
         pc = check_straight_move(start, target, self.cal, min_clearance_mm=clearance)
         if not pc.ok:
             raise StopCycle(f"{what}: {pc.describe()}")
