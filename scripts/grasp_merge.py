@@ -34,6 +34,16 @@ CAPTURES = Path("/home/intel/dev/captures")
 OUT = CAPTURES / "merge_review"
 
 
+def features(args: argparse.Namespace, ds: str, pdir: str):
+    """Per-frame features of one dataset and its robot-to-table registration."""
+    from hackjunction2026.grasp_merge import cuts as C
+
+    pdir = Path(pdir)
+    rt = json.loads((pdir / f"robot_to_table_{ds}.json").read_text())
+    bricks = C.resting_bricks(pd.read_parquet(pdir / f"objects_{ds}.parquet"), rt, C.Params().brick_frames)
+    return C.frame_features(pd.read_parquet(Path(args.arm_dir) / f"arm_{ds}.parquet"), bricks), rt
+
+
 def cmd_cuts(args: argparse.Namespace) -> None:
     from hackjunction2026.grasp_merge import cuts as C
 
@@ -41,14 +51,8 @@ def cmd_cuts(args: argparse.Namespace) -> None:
     old_root, new_root = DATASETS / args.old, DATASETS / args.new
     fps = json.loads((old_root / "meta/info.json").read_text())["fps"]
     eps_old, eps_new = C.episode_table(old_root), C.episode_table(new_root)
-
-    def feats(ds: str, pdir: Path):
-        rt = json.loads((pdir / f"robot_to_table_{ds}.json").read_text())
-        bricks = C.resting_bricks(pd.read_parquet(pdir / f"objects_{ds}.parquet"), rt, p.brick_frames)
-        return C.frame_features(pd.read_parquet(Path(args.arm_dir) / f"arm_{ds}.parquet"), bricks), rt
-
-    f_new, rt_new = feats(args.new, Path(args.new_perception))
-    f_old, rt_old = feats(args.old, Path(args.old_perception))
+    f_new, rt_new = features(args, args.new, args.new_perception)
+    f_old, rt_old = features(args, args.old, args.old_perception)
     ref = C.new_reference(f_new, eps_new, p)
     overrides = C.read_overrides(Path(args.overrides))
     rows = C.compute_cuts(f_old, eps_old, ref, p, fps, overrides)
@@ -71,6 +75,46 @@ def cmd_cuts(args: argparse.Namespace) -> None:
     print(f"wrote {args.out}/cuts.csv, cuts.json")
 
 
+def cmd_clips(args: argparse.Namespace) -> None:
+    from hackjunction2026.grasp_merge.clips import make_clips
+
+    cuts_doc = json.loads((Path(args.out) / "cuts.json").read_text())
+    f_old, _ = features(args, args.old, args.old_perception)
+    eps = {int(x) for x in args.episodes.split(",")} if args.episodes else None
+    folder = Path(args.out) / ("clips" if args.camera == "top" else f"clips_{args.camera}")
+    doc = make_clips(DATASETS / args.old, cuts_doc, f_old, folder, camera=args.camera, crf=args.crf,
+                     threads=args.threads, max_load=args.max_load, max_wait_s=args.max_wait, episodes=eps,
+                     max_kb=args.max_kb)
+    sizes = [e["clip_bytes"] for e in doc["episodes"] if e["clip_bytes"]]
+    print(f"{len(sizes)} clips, {sum(sizes) / 1e6:.1f} MB, largest {max(sizes) / 1e3:.0f} kB -> {folder}")
+
+
+def cmd_build(args: argparse.Namespace) -> None:
+    from hackjunction2026.grasp_merge import cuts as C
+    from hackjunction2026.grasp_merge.build import build
+    from hackjunction2026.grasp_merge.validate import validate
+
+    cuts_doc = json.loads((Path(args.out) / "cuts.json").read_text())
+    current = {str(k): v for k, v in C.read_overrides(Path(args.overrides)).items()}
+    if current != cuts_doc.get("overrides", {}):
+        sys.exit(f"{args.overrides} changed since cuts.json was written: run 'grasp_merge.py cuts' first")
+    dst = Path(args.dest) if args.dest else Path(args.out) / "dataset" / args.name
+    prov = build(DATASETS / args.new, DATASETS / args.old, cuts_doc, Path(args.out) / "work", dst, args.name,
+                 threads=args.threads, max_load=args.max_load, max_wait_s=args.max_wait, keep_work=args.keep_work)
+    print(f"merged dataset: {dst} ({prov['episodes']} episodes, {prov['frames']} frames)")
+    if not args.no_validate:
+        res = validate(dst, Path(args.out))
+        if not res["ok"]:
+            sys.exit(1)
+
+
+def cmd_validate(args: argparse.Namespace) -> None:
+    from hackjunction2026.grasp_merge.validate import validate
+
+    res = validate(Path(args.dataset), Path(args.out))
+    sys.exit(0 if res["ok"] else 1)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--old", default=OLD)
@@ -80,10 +124,36 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sc = sub.add_parser("cuts", help="cut point per OLD episode -> cuts.csv, cuts.json")
-    sc.add_argument("--arm-dir", default=str(CAPTURES / "perception/B"), help="arm_<dataset>.parquet (FK)")
-    sc.add_argument("--old-perception", default=str(CAPTURES / "perception/A"))
-    sc.add_argument("--new-perception", default=str(OUT / "perception"))
     sc.set_defaults(func=cmd_cuts)
+
+    sv = sub.add_parser("clips", help="H.264 review clip per OLD episode (top camera) + clips/index.json")
+    sv.add_argument("--camera", default="top", choices=["top", "arm"],
+                    help="top -> <out>/clips (no people); arm (wrist) -> <out>/clips_arm (may show people)")
+    sv.add_argument("--max-kb", type=float, help="size budget per clip (x264 bitrate cap), e.g. 250")
+    sv.add_argument("--episodes", help="comma list (default: all; index.json always lists all)")
+    sv.add_argument("--crf", type=int, default=26)
+    sv.add_argument("--threads", type=int, default=2, help="decoder and encoder threads")
+    sv.add_argument("--max-load", type=float, default=8.0, help="pause between episodes above this load")
+    sv.add_argument("--max-wait", type=float, default=180.0, help="longest pause per episode, s")
+    sv.set_defaults(func=cmd_clips)
+    for sp in (sc, sv):
+        sp.add_argument("--arm-dir", default=str(CAPTURES / "perception/B"), help="arm_<dataset>.parquet (FK)")
+        sp.add_argument("--old-perception", default=str(CAPTURES / "perception/A"))
+        sp.add_argument("--new-perception", default=str(OUT / "perception"))
+
+    sb = sub.add_parser("build", help="merged LeRobot v3 dataset from cuts.json, then validate")
+    sb.add_argument("--name", default="grasp-merged-2026-11-14")
+    sb.add_argument("--dest", help="output folder (default: <out>/dataset/<name>); must not exist")
+    sb.add_argument("--threads", type=int, default=2, help="SVT-AV1 threads per camera encoder (3 run in parallel)")
+    sb.add_argument("--max-load", type=float, default=8.0, help="pause between episodes above this load")
+    sb.add_argument("--max-wait", type=float, default=60.0, help="longest pause per episode, s")
+    sb.add_argument("--keep-work", action="store_true", help="keep the intermediate datasets in <out>/work")
+    sb.add_argument("--no-validate", action="store_true")
+    sb.set_defaults(func=cmd_build)
+
+    sa = sub.add_parser("validate", help="check a merged dataset against its sources")
+    sa.add_argument("dataset")
+    sa.set_defaults(func=cmd_validate)
 
     args = ap.parse_args()
     args.func(args)
