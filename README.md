@@ -146,8 +146,13 @@ anomalib-env/bin/python scripts/brick_anomaly.py --benchmark CPU,GPU,NPU --bench
 ```
 
 Retrain in one command (e.g. on inspection-pose recordings): `scripts/brick_retrain.sh <name> patchcore --
---dataset <id> --snapshots 0fd76ff2 [--pose inspect]`. Labels: Gemini per crop, manual spot checks in
-`configs/defect_mark_labels.csv`.
+--dataset <id> --snapshots 0fd76ff2 [--pose inspect]`.
+
+Labels, highest priority first: rows of `configs/defect_mark_labels.csv` whose note starts with
+`user review` (`true` / `false`, or `exclude` = drop the crop from every split); then
+`gemini-4-argon` (cached per crop in `captures/anomalib/labels/gemini_responses.jsonl`). The other
+rows of that CSV are agent spot checks, compared only (`--manual-wins` to apply them). Add a user
+correction as a new row and re-run step 2; no new Gemini calls are made for known crops.
 
 ## Moving the follower to saved poses (`scripts/so101_goto.py`)
 
