@@ -13,6 +13,7 @@ near_table_clearance_mm: 2.0
 gripper_open: 90.0
 gripper_close_target: 0.0
 empty_closed: 2.5          # closed on nothing (agent B: 2.57)
+ik_gripper: 22.6           # jaw value with a brick held (servo 6 reads 22.6 on the calibration bricks): IK aims the CLOSED jaw centre
 hold_min: 8.0              # stops above this when told to close -> holding a brick (UNTESTED; big brick ~30-34)
 load_hold_min: 150         # |Present_Load| (0.1 % of max torque) that also counts as holding (UNTESTED)
 squeeze: 6.0               # after the stop, command this far past it (firm grip; 3 let the brick slip on lift)

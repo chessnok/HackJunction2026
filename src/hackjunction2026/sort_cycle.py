@@ -68,6 +68,7 @@ class Config:
     gripper_open: float = 90.0
     gripper_close_target: float = 0.0
     empty_closed: float = 2.5        # gripper value when it closes on nothing (agent B: 2.57)
+    ik_gripper: float = 22.6         # jaw value with a brick held: the IK tool point is the CLOSED jaw centre
     hold_min: float = 8.0            # stopped above this when commanded closed -> holding (UNTESTED)
     load_hold_min: int = 150         # |Present_Load| (0.1 % units) above this also counts (UNTESTED)
     squeeze: float = 3.0             # after a stop, command only this much past the stop position
@@ -319,6 +320,30 @@ class Mover:
             raise StopCycle(f"IK: {sol.reason} at ({xy[0]:.0f}, {xy[1]:.0f}) mm, {z_above_table_mm:.0f} mm up")
         return sol.norm
 
+    def aim(self, xy, z_above_table_mm: float, yaw_deg: float, gripper: float, what: str, *,
+            near_table: bool = False, tries: int = 2, tol_mm: float = 3.0) -> np.ndarray:
+        """Solve IK for the CLOSED jaw centre (where a held brick sits; the calibration measured that point)
+        over ``xy``, move there with the jaws at ``gripper``, then correct for sag: FK of the MEASURED pose
+        vs the target, re-aim at target + error, up to ``tries`` corrections."""
+        goal = np.asarray(xy, float)
+        aim_xy = goal.copy()
+        q = None
+        for k in range(tries + 1):
+            sol = self.down_at(aim_xy, z_above_table_mm, yaw_deg, self.cfg.ik_gripper, self.arm.read())
+            sol[GRIPPER] = gripper
+            q = self.move(sol, what if k == 0 else f"{what} (sag correction {k})", near_table=near_table)
+            if self.dry_run:
+                return q
+            meas = self.arm.read()
+            meas[GRIPPER] = self.cfg.ik_gripper
+            err = goal - self.jaw(meas)[:2]
+            self.log("aim", what=what, k=k, err_mm=np.round(err, 1))
+            print(f"    aim error {np.hypot(*err):.1f} mm")
+            if float(np.hypot(*err)) <= tol_mm:
+                break
+            aim_xy = aim_xy + err
+        return q
+
     def jaw(self, q: np.ndarray) -> np.ndarray:
         return ik.tool_pose(normalized_to_urdf(np.asarray(q, float), self.cal))["position"]
 
@@ -566,8 +591,7 @@ class ScriptedGrasp:
         cfg = mv.cfg
         mv.gripper(cfg.gripper_open, "open")
         q = mv.arm.read()
-        down = mv.down_at(target.xy, cfg.grasp_mm, target.yaw_deg, cfg.gripper_open, q)
-        mv.move(down, "down to the brick", near_table=True)
+        mv.aim(target.xy, cfg.grasp_mm, target.yaw_deg, cfg.gripper_open, "down to the brick", near_table=True, tries=1)
         r = close_and_check(mv, "first grasp")
         lift = mv.arm.read()
         lift = mv.lifted(lift, cfg.hover_mm - cfg.grasp_mm, keep_roll=False)
@@ -576,6 +600,11 @@ class ScriptedGrasp:
             lift[GRIPPER] = cfg.gripper_open
         mv.move(lift, "lift", near_table=True)
         return r
+
+
+def mv_here(mv: Mover, q: np.ndarray) -> float:
+    """Lowest arm point of pose ``q`` above the table (mm)."""
+    return check_straight_move(q, q, mv.cal, samples=2, min_clearance_mm=-1e9).end_clearance_mm
 
 
 class ACTGrasp:
@@ -615,7 +644,7 @@ class ACTGrasp:
                 step[GRIPPER] = a[GRIPPER] - q[GRIPPER]              # the gripper is not speed-capped
                 cmd = q + step
                 if m.out_of_range(cmd) or not check_straight_move(q, cmd, mv.cal, samples=2,
-                                                                  min_clearance_mm=min(cfg.near_table_clearance_mm, -5.0)).ok:  # FK +-5 mm; the table stops a real collision
+                                                                  min_clearance_mm=min(cfg.near_table_clearance_mm, -5.0, mv_here(mv, q) - 3.0)).ok:  # FK +-5 mm; the table stops a real collision
                     raise StopCycle("ACT: action refused (range or table clearance)")
                 arm.send(cmd)
                 st = arm.gripper_state() if a[GRIPPER] < cfg.hold_min else None
@@ -774,8 +803,8 @@ class Cycle:
                 return {"result": "no brick on the sheet"}
             for attempt in range(1, cfg.retries_per_brick + 1):
                 self.enter(S.HOVER)
-                hover = mv.down_at(target.xy, cfg.hover_mm, target.yaw_deg, cfg.gripper_open, mv.arm.read())
-                mv.move(hover, f"hover over the {target.colour} brick (try {attempt})")
+                hover = mv.aim(target.xy, cfg.hover_mm, target.yaw_deg, cfg.gripper_open,
+                               f"hover over the {target.colour} brick (try {attempt})")
                 self.enter(S.GRASP)
                 r = self.grasper.grasp(mv, target, hover)
                 self.log("grasp", attempt=attempt, ok=r.ok, reason=r.reason)
