@@ -38,7 +38,7 @@ def psnr(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def source_of(prov: dict, merged_ep: int) -> tuple[dict, int, int]:
-    """(part, source episode, first source frame) of a merged episode."""
+    """(part, source episode, first source frame) of a merged episode (its last frame: ``part["ends"]``)."""
     for part in prov["parts"]:
         a, b = part["merged_episodes"]
         if a <= merged_ep <= b:
@@ -141,7 +141,9 @@ def validate(root: Path, out_dir: Path, n_decode: int = 12, seed: int = 0, log=p
             sroot = Path(part["source"])
             src_cache[part["source"]] = (read_data(sroot), read_episodes_meta(sroot))
         sdata, smeta = src_cache[part["source"]]
-        s = sdata[sdata.episode_index == src_ep].sort_values("frame_index").iloc[start:]
+        end = part.get("ends", {}).get(str(src_ep))
+        s = sdata[sdata.episode_index == src_ep].sort_values("frame_index").iloc[
+            start:None if end is None else int(end) + 1]
         same = (len(s) == len(d)
                 and np.array_equal(np.stack(s["observation.state"]), np.stack(d["observation.state"]))
                 and np.array_equal(np.stack(s["action"]), np.stack(d["action"]))

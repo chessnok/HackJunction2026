@@ -32,7 +32,8 @@ Criterion (numbers in docs/datasets/grasp-merged.md):
 6. For review only: ``alt_cut_frame`` = the same rule over all frames before the close, gripper
    ignored (where the arm hovered if the jaws opened only during the descent).
 
-The tail ``[cut_frame, length)`` is kept. Flags mark episodes a human should look at.
+The tail ``[cut_frame, end_frame]`` is kept (inclusive; ``end_frame`` is the episode's last frame
+unless a human override trims the end). Flags mark episodes a human should look at.
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ FLAG_HELP = {
     "no_brick": "no camera brick position; distance taken from the FK tip at the close",
     "brick_moved": "the brick's resting position and the FK tip at the close differ by more than 40 mm",
     "short_tail": "fewer than 45 frames (1.5 s) kept",
+    "ends_before_close": "end_frame is before the close: the kept range contains no grasp",
 }
 
 
@@ -214,7 +216,7 @@ def choose_cut(e: pd.DataFrame, ref: dict, p: Params) -> dict:
             "auto_flags": flags, "_d": d, "_s": s}
 
 
-def _metrics(e: pd.DataFrame, cut: int, d: np.ndarray, s: np.ndarray, close: int, ref: dict,
+def _metrics(e: pd.DataFrame, cut: int, end: int, d: np.ndarray, s: np.ndarray, close: int, ref: dict,
              p: Params) -> tuple[dict, list[str]]:
     r = e.iloc[cut]
     m = {"h_mm": float(r.h_mm), "d_mm": float(d[cut]), "gripper": float(r.gripper),
@@ -230,29 +232,50 @@ def _metrics(e: pd.DataFrame, cut: int, d: np.ndarray, s: np.ndarray, close: int
         flags.append("high_start")
     if m["d_mm"] > ref["d_mm"]["max"]:
         flags.append("far_start")
-    seg = e.h_mm.to_numpy(float)[cut:close]
+    seg = e.h_mm.to_numpy(float)[cut:min(close, end + 1)]
     low = np.flatnonzero(seg < p.low_descent_mm)
     if len(low) and (seg[low[0]:] > p.rise_mm).any():
         flags.append("multi_descent")
-    if len(e) - cut < p.short_tail_frames:
+    if end - cut + 1 < p.short_tail_frames:
         flags.append("short_tail")
+    if end < close:
+        flags.append("ends_before_close")
     return m, flags
 
 
 # ---------------------------------------------------------------- overrides
 
 
-def read_overrides(path: Path | None) -> dict[int, int | None]:
-    """``episode,cut_frame`` lines; ``cut_frame`` = an integer or ``skip``. ``#`` starts a comment."""
-    out: dict[int, int | None] = {}
+def parse_override(line: str) -> tuple[int, dict] | None:
+    """One overrides line -> ``(episode, {"cut": int | "auto" | "skip", "end": int | None})``.
+
+    Format ``episode,cut_frame[,end_frame]`` or ``episode,skip``: ``cut_frame`` is the first frame
+    kept or ``auto`` (keep the automatic cut), ``end_frame`` the last frame kept (inclusive,
+    optional: default the episode's last frame). ``#`` starts a comment; a header line is ignored.
+    """
+    line = line.split("#", 1)[0].strip()
+    if not line or line.lower().startswith("episode"):
+        return None
+    parts = [x.strip() for x in line.split(",")]
+    ep = int(parts[0])
+    val = parts[1].lower() if len(parts) > 1 else ""
+    if val == "skip":
+        return ep, {"cut": "skip", "end": None}
+    cut: int | str = "auto" if val in ("", "auto") else int(val)
+    end = int(parts[2]) if len(parts) > 2 and parts[2] else None
+    return ep, {"cut": cut, "end": end}
+
+
+def read_overrides(path: Path | None) -> dict[int, dict]:
+    """``{episode: {"cut": int | "auto" | "skip", "end": int | None}}`` from an overrides file
+    (format: ``parse_override``); a missing file means no overrides."""
+    out: dict[int, dict] = {}
     if path is None or not Path(path).exists():
         return out
     for line in Path(path).read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if not line or line.lower().startswith("episode"):
-            continue
-        ep, val = (x.strip() for x in line.split(",")[:2])
-        out[int(ep)] = None if val.lower() == "skip" else int(val)
+        parsed = parse_override(line)
+        if parsed:
+            out[parsed[0]] = parsed[1]
     return out
 
 
@@ -260,7 +283,8 @@ def read_overrides(path: Path | None) -> dict[int, int | None]:
 
 
 def compute_cuts(feat_old: pd.DataFrame, episodes_old: pd.DataFrame, ref: dict, p: Params, fps: float,
-                 overrides: dict[int, int | None] | None = None) -> list[dict]:
+                 overrides: dict[int, dict] | None = None) -> list[dict]:
+    """One row per OLD episode: the kept range ``[cut_frame, end_frame]`` (inclusive) and its metrics."""
     overrides = overrides or {}
     rows = []
     for ep, e in feat_old.groupby("episode_index"):
@@ -268,19 +292,24 @@ def compute_cuts(feat_old: pd.DataFrame, episodes_old: pd.DataFrame, ref: dict, 
         n = int(episodes_old.loc[ep, "length"])
         assert len(e) == n and (e.frame_index.to_numpy() == np.arange(n)).all(), f"episode {ep}: frames"
         auto = choose_cut(e, ref, p)
-        cut, source = auto["cut_frame"], "auto"
-        if ep in overrides:
-            if overrides[ep] is None:
+        cut, end, source = auto["cut_frame"], n - 1, "auto"
+        o = overrides.get(int(ep))
+        if o is not None:
+            if o["cut"] == "skip":
                 source = "skip"
             else:
-                cut, source = overrides[ep], "override"
-                if not 0 <= cut < n:
-                    raise ValueError(f"override for episode {ep}: cut_frame {cut} outside 0..{n - 1}")
-        m, cut_flags = _metrics(e, cut, auto["_d"], auto["_s"], auto["close_frame"], ref, p)
+                source = "override"
+                cut = cut if o["cut"] == "auto" else int(o["cut"])
+                end = end if o["end"] is None else int(o["end"])
+                if not 0 <= cut <= end <= n - 1:
+                    raise ValueError(f"override for episode {ep}: kept range [{cut}, {end}] not inside "
+                                     f"0..{n - 1} (cut_frame <= end_frame)")
+        m, cut_flags = _metrics(e, cut, end, auto["_d"], auto["_s"], auto["close_frame"], ref, p)
         flags = auto["auto_flags"] + cut_flags
-        kept = 0 if source == "skip" else n - cut
+        kept = 0 if source == "skip" else end - cut + 1
         row = {"episode": int(ep), "task": episodes_old.loc[ep, "task"], "length": n,
-               "cut_frame": int(cut), "cut_time_s": round(cut / fps, 3), "kept_frames": kept,
+               "cut_frame": int(cut), "cut_time_s": round(cut / fps, 3), "end_frame": int(end),
+               "end_time_s": round(end / fps, 3), "kept_frames": kept,
                "kept_s": round(kept / fps, 3), "auto_cut_frame": auto["cut_frame"], "source": source,
                "confidence": "high" if not flags else "low", "flags": flags,
                "alt_cut_frame": auto["alt_cut_frame"], "close_frame": auto["close_frame"],
@@ -304,7 +333,8 @@ def criterion_text(p: Params, ref: dict) -> str:
         f"Open = gripper >= {p.open_abs}. Final approach = "
         f"last open run (gaps < {p.run_gap} frames merged). Score = ((h - {h['median']:.1f}) / {h['std']:.1f})^2 "
         f"+ (max(0, d - {d['median']:.1f}) / {d['std']:.1f})^2. Cut = latest frame of the final approach "
-        f"with score <= best + {p.plateau}. Keep [cut, end)."
+        f"with score <= best + {p.plateau}. Keep [cut_frame, end_frame] (end_frame = the episode's last "
+        f"frame unless an override trims it)."
     )
 
 
@@ -317,7 +347,7 @@ def write_outputs(out_dir: Path, rows: list[dict], ref: dict, p: Params, extra: 
             "confidence", "flags", "h_mm", "d_mm", "gripper", "jaw_gap_mm", "score", "z_h", "z_d",
             "close_frame", "frames_after_close", "alt_cut_frame", "open_threshold", "gripper_peak",
             "n_open_runs", "auto_cut_frame",
-            *[f"state_{j}" for j in JOINTS], "brick_source"]
+            *[f"state_{j}" for j in JOINTS], "brick_source", "end_frame", "end_time_s"]
     with (out_dir / "cuts.csv").open("w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
         w.writeheader()

@@ -271,7 +271,8 @@ $PY scripts/perception_eval.py --methods cv,gripper                        # acc
 
 Criterion, numbers, review clips and the full recipe: [docs/datasets/grasp-merged.md](docs/datasets/grasp-merged.md).
 Read-only on the source datasets; outputs in `captures/merge_review/` (gitignored). Human corrections
-to the cut points go to `configs/grasp_merge_overrides.csv` (`episode,cut_frame` or `episode,skip`).
+to the cut points go to `configs/grasp_merge_overrides.csv` (`episode,cut_frame[,end_frame]` with
+`cut_frame` a frame or `auto`, `end_frame` the last frame kept; or `episode,skip`).
 
 ```bash
 PY=third_party/physical-ai-studio/application/backend/.venv/bin/python

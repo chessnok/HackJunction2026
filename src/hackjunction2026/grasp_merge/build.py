@@ -9,9 +9,9 @@ work folder:
    step re-encodes a file that mixes kept and dropped episodes; here it is swapped for a lossless
    stream copy (``stream_copy_ranges``): every kept episode starts on a keyframe (each episode is
    encoded on its own, g = 2), so its packets are copied unchanged with shifted timestamps.
-3. ``old_tails/ep<NNN>_cut<CCCC>``: each OLD episode from its cut frame to its end, one
-   single-episode dataset per (episode, cut), kept between builds: a rebuild after a changed
-   override encodes only the episodes whose cut changed. Written by LeRobot's own dataset writer
+3. ``old_tails/ep<NNN>_cut<CCCC>_end<EEEE>``: each OLD episode's kept frames ``[cut, end]``, one
+   single-episode dataset per (episode, cut, end), kept between builds: a rebuild after a changed
+   override encodes only the episodes whose range changed. Written by LeRobot's own dataset writer
    (``LeRobotDataset.create`` / ``add_frame`` / ``save_episode``, streaming encoder, the way Studio
    records), encoder rebuilt from OLD's ``info.json`` with LeRobot's ``encoder_config_from_video_info``
    (libsvtav1, yuv420p, g 2, crf 30, preset 12) and Studio's write arguments
@@ -190,9 +190,17 @@ def write_kwargs(info: dict, threads: int, queue: int) -> dict:
     return kw
 
 
-def tail_dir(cache: Path, episode: int, cut: int) -> Path:
-    """Cache folder of one OLD tail: a single-episode LeRobot dataset, keyed by episode and cut."""
-    return cache / f"ep{episode:03d}_cut{cut:04d}"
+def tail_dir(cache: Path, episode: int, cut: int, end: int) -> Path:
+    """Cache folder of one OLD tail: a single-episode LeRobot dataset of frames ``[cut, end]``."""
+    return cache / f"ep{episode:03d}_cut{cut:04d}_end{end:04d}"
+
+
+def _migrate_legacy(cache: Path, c: dict) -> None:
+    """Cache entries made before end trimming (``ep<NNN>_cut<CCCC>``) hold the tail up to the last frame."""
+    legacy = cache / f"ep{c['episode']:03d}_cut{c['cut_frame']:04d}"
+    new = tail_dir(cache, c["episode"], c["cut_frame"], c["length"] - 1)
+    if legacy.is_dir() and not new.exists():
+        legacy.rename(new)
 
 
 def _cached(d: Path, frames: int) -> bool:
@@ -205,7 +213,7 @@ def _cached(d: Path, frames: int) -> bool:
 
 def write_tail(old_root: Path, c: dict, dst: Path, kw: dict, info: dict, meta: pd.DataFrame, data: pd.DataFrame,
                threads: int) -> None:
-    """One OLD episode from its cut to its end as a single-episode dataset, through LeRobot's writer."""
+    """One OLD episode, frames ``[cut_frame, end_frame]``, as a single-episode dataset through LeRobot's writer."""
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     fps = float(info["fps"])
@@ -213,6 +221,7 @@ def write_tail(old_root: Path, c: dict, dst: Path, kw: dict, info: dict, meta: p
                 if k not in DEFAULT_KEYS}
     video_keys = [k for k, f in features.items() if f["dtype"] == "video"]
     ep, cut, n = c["episode"], c["cut_frame"], c["length"]
+    end = c.get("end_frame", n - 1)
     tmp = dst.with_name(dst.name + ".part")
     shutil.rmtree(tmp, ignore_errors=True)
     ds = LeRobotDataset.create(repo_id=f"grasp-merge/old-{ep:03d}", fps=int(fps), features=features, root=tmp,
@@ -221,12 +230,13 @@ def write_tail(old_root: Path, c: dict, dst: Path, kw: dict, info: dict, meta: p
         m = meta.loc[ep]
         rows = data[data.episode_index == ep].sort_values("frame_index")
         assert len(rows) == n and (rows.frame_index.to_numpy() == np.arange(n)).all(), f"OLD episode {ep}"
-        rows = rows.iloc[cut:]
+        rows = rows.iloc[cut:end + 1]
         gens = {}
         for k in video_keys:
             video = old_root / f"videos/{k}/chunk-{int(m[f'videos/{k}/chunk_index']):03d}" \
                 / f"file-{int(m[f'videos/{k}/file_index']):03d}.mp4"
-            gens[k] = episode_frames(video, float(m[f"videos/{k}/from_timestamp"]), n, fps, None, threads, start=cut)
+            gens[k] = episode_frames(video, float(m[f"videos/{k}/from_timestamp"]), end + 1, fps, None, threads,
+                                     start=cut)
         for fi, st, ac in zip(rows.frame_index, rows["observation.state"], rows["action"], strict=True):
             frame = {"observation.state": np.asarray(st, np.float32), "action": np.asarray(ac, np.float32),
                      "task": c["task"]}
@@ -246,7 +256,7 @@ def write_tail(old_root: Path, c: dict, dst: Path, kw: dict, info: dict, meta: p
             raise RuntimeError(f"OLD episode {ep}: encoder dropped frames {dropped}")
     finally:
         ds.finalize()
-    if not _cached(tmp, n - cut):
+    if not _cached(tmp, end - cut + 1):
         raise RuntimeError(f"OLD episode {ep}: tail dataset inconsistent: {consistency(tmp)}")
     shutil.rmtree(dst, ignore_errors=True)
     tmp.rename(dst)
@@ -256,7 +266,9 @@ def ensure_tails(old_root: Path, cuts: list[dict], cache: Path, threads: int = 2
                  max_wait_s: float = 180.0, log=print) -> tuple[list[Path], list[int]]:
     """Cache folders of every kept OLD tail, in episode order; encodes only the missing ones."""
     keep = [c for c in cuts if c["source"] != "skip"]
-    dirs = [tail_dir(cache, c["episode"], c["cut_frame"]) for c in keep]
+    for c in keep:
+        _migrate_legacy(cache, c)
+    dirs = [tail_dir(cache, c["episode"], c["cut_frame"], c.get("end_frame", c["length"] - 1)) for c in keep]
     todo = [c for c, d in zip(keep, dirs, strict=True) if not _cached(d, c["kept_frames"])]
     log(f"OLD tails: {len(keep) - len(todo)} cached in {cache}, {len(todo)} to encode")
     if todo:
@@ -269,8 +281,9 @@ def ensure_tails(old_root: Path, cuts: list[dict], cache: Path, threads: int = 2
         for c in todo:
             waited = wait_for_load(max_load, max_wait_s, log)
             t0 = time.time()
-            write_tail(old_root, c, tail_dir(cache, c["episode"], c["cut_frame"]), kw, info, meta, data, threads)
-            log(f"  OLD ep {c['episode']:3d}: frames {c['cut_frame']}..{c['length'] - 1} -> {c['kept_frames']} "
+            end = c.get("end_frame", c["length"] - 1)
+            write_tail(old_root, c, tail_dir(cache, c["episode"], c["cut_frame"], end), kw, info, meta, data, threads)
+            log(f"  OLD ep {c['episode']:3d}: frames {c['cut_frame']}..{end} -> {c['kept_frames']} "
                 f"frames, {time.time() - t0:.1f} s" + (f" (waited {waited:.0f} s for load)" if waited > 1 else ""))
         log(f"  encoded {len(todo)} tails in {time.time() - t_all:.0f} s")
     return dirs, [c["episode"] for c in todo]
@@ -293,7 +306,8 @@ def seed_cache(merged_root: Path, cache: Path, log=print) -> int:
     n_all = ds.meta.total_episodes
     added = 0
     for i, src_ep in zip(range(a, b + 1), part["source_episodes"], strict=True):
-        d = tail_dir(cache, src_ep, int(part["cuts"][str(src_ep)]))
+        cut = int(part["cuts"][str(src_ep)])
+        d = tail_dir(cache, src_ep, cut, cut + int(meta.loc[i, "length"]) - 1)
         if _cached(d, int(meta.loc[i, "length"])):
             continue
         tmp = d.with_name(d.name + ".part")
@@ -361,12 +375,13 @@ def build(new_root: Path, old_root: Path, cuts_doc: dict, work: Path, dst: Path,
                            "reason": f"shorter than {min_len} frames" if i in short else "--new-exclude"}
                           for i in drop],
              "snapshot": new_counts, "video": "stream copy (lossless)"},
-            {"source": str(old_root), "dataset": old_root.name, "role": "OLD, tail [cut_frame, end)",
+            {"source": str(old_root), "dataset": old_root.name, "role": "OLD, frames [cut_frame, end_frame]",
              "merged_episodes": [new_counts["info_episodes"] - len(drop), merged["info_episodes"] - 1],
              "source_episodes": [c["episode"] for c in kept], "frames": old_frames,
              "encoded_this_build": encoded, "cache": str(cache),
              "skipped": [c["episode"] for c in cuts_doc["episodes"] if c["source"] == "skip"],
              "cuts": {str(c["episode"]): c["cut_frame"] for c in kept},
+             "ends": {str(c["episode"]): c.get("end_frame", c["length"] - 1) for c in kept},
              "video": "re-encoded with the source encoder settings (LeRobot writer)"},
         ],
         "criterion": cuts_doc["criterion"], "overrides": cuts_doc.get("overrides", {}),
