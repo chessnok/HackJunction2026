@@ -24,7 +24,7 @@ Agents and humans: read [AGENTS.md](AGENTS.md) first.
 | `configs/hardware.yaml` | Stable device addresses used by code |
 | `configs/inspection.yaml` | Inspection cameras (D415 serials), exposure, crop and capture settings |
 | `src/hackjunction2026/` | Our Python package: Feetech bus helper; `defect/` = Anomalib dataset capture (later: training, detector) |
-| `scripts/` | Command-line tools (`so101_probe.py`, `so101_move.py`) |
+| `scripts/` | Command-line tools (`so101_probe.py`, `so101_move.py`, `arm_fk.py`) |
 | `third_party/` | Upstream checkouts, **not committed** |
 
 ## Setup (laptop: Ubuntu 26.04, native, no Docker)
@@ -104,6 +104,16 @@ $PY scripts/so101_goto.py where                      # both arms' poses, read-on
 $PY scripts/so101_goto.py save pick_1 --from leader  # move the leader by hand, save its pose
 $PY scripts/so101_goto.py goto pick_1                # show from / to / delta / time
 $PY scripts/so101_goto.py goto pick_1 --go           # move (asks to confirm), default 20 units/s
+```
+
+### Arm positions from recorded joints (`scripts/arm_fk.py`, offline)
+
+Forward kinematics of the follower from Studio's normalized joint values (no robot connection).
+Conventions and validation: [docs/perception/B-arm-kinematics.md](docs/perception/B-arm-kinematics.md).
+
+```bash
+uv run scripts/arm_fk.py pose 0 -99.2 62.7 77.6 -56.9 13.5     # keypoints (mm) for one joint vector
+uv run --with pyarrow scripts/arm_fk.py annotate 431a71f7       # every frame -> captures/perception/B/arm_<id>.parquet
 ```
 
 ## Status
