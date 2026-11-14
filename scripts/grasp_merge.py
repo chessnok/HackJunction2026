@@ -100,12 +100,21 @@ def cmd_build(args: argparse.Namespace) -> None:
         sys.exit(f"{args.overrides} changed since cuts.json was written: run 'grasp_merge.py cuts' first")
     dst = Path(args.dest) if args.dest else Path(args.out) / "dataset" / args.name
     prov = build(DATASETS / args.new, DATASETS / args.old, cuts_doc, Path(args.out) / "work", dst, args.name,
-                 threads=args.threads, max_load=args.max_load, max_wait_s=args.max_wait, keep_work=args.keep_work)
-    print(f"merged dataset: {dst} ({prov['episodes']} episodes, {prov['frames']} frames)")
+                 threads=args.threads, max_load=args.max_load, max_wait_s=args.max_wait, keep_work=args.keep_work,
+                 cache=Path(args.cache),
+                 new_exclude=tuple(int(x) for x in args.new_exclude.split(",")) if args.new_exclude else ())
+    print(f"merged dataset: {dst} ({prov['episodes']} episodes, {prov['frames']} frames; "
+          f"OLD tails encoded in this build: {prov['parts'][1]['encoded_this_build']})")
     if not args.no_validate:
         res = validate(dst, Path(args.out))
         if not res["ok"]:
             sys.exit(1)
+
+
+def cmd_seed(args: argparse.Namespace) -> None:
+    from hackjunction2026.grasp_merge.build import seed_cache
+
+    seed_cache(Path(args.dataset), Path(args.cache))
 
 
 def cmd_import(args: argparse.Namespace) -> None:
@@ -160,10 +169,18 @@ def main() -> None:
     sb.add_argument("--dest", help="output folder (default: <out>/dataset/<name>); must not exist")
     sb.add_argument("--threads", type=int, default=2, help="SVT-AV1 threads per camera encoder (3 run in parallel)")
     sb.add_argument("--max-load", type=float, default=8.0, help="pause between episodes above this load")
-    sb.add_argument("--max-wait", type=float, default=60.0, help="longest pause per episode, s")
+    sb.add_argument("--max-wait", type=float, default=20.0, help="longest pause per episode, s")
     sb.add_argument("--keep-work", action="store_true", help="keep the intermediate datasets in <out>/work")
     sb.add_argument("--no-validate", action="store_true")
+    sb.add_argument("--new-exclude", help="comma list of NEW episodes to leave out (besides those < 15 frames)")
     sb.set_defaults(func=cmd_build)
+
+    ss = sub.add_parser("seed-cache", help="split the OLD tails of a merged dataset into the tail cache (lossless)")
+    ss.add_argument("dataset")
+    ss.set_defaults(func=cmd_seed)
+    for sp in (sb, ss):
+        sp.add_argument("--cache", default=str(OUT / "work/old_tails"),
+                        help="one dataset per (OLD episode, cut), reused between builds (default: %(default)s)")
 
     sa = sub.add_parser("validate", help="check a merged dataset against its sources")
     sa.add_argument("dataset")
