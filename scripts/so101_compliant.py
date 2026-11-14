@@ -41,13 +41,22 @@ def main() -> None:
         sys.exit(f"{port} is in use by {', '.join(users)}")
     ids = [int(x) for x in args.ids.split(",")]
 
+    def ignore_signals() -> None:
+        # A second SIGTERM (e.g. uv forwarding the one sent to its process group) must not
+        # interrupt the restore in `finally`.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+
     def stop(*_):
+        ignore_signals()
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, stop)
 
     with Bus(port) as bus:
-        original = {i: bus.read(i, "torque_limit") or 1000 for i in ids}
+        # Restore to the servo's power-on torque limit (EEPROM max_torque), not to whatever the RAM
+        # limit was at start: a previous interrupted run may have left it lowered.
+        original = {i: bus.read(i, "max_torque") or 1000 for i in ids}
         goal = {}
         for i in ids:
             pos = bus.read(i, "pos")
@@ -73,6 +82,7 @@ def main() -> None:
         except KeyboardInterrupt:
             pass
         finally:
+            ignore_signals()
             for i in ids:  # restore full torque and hold the current pose
                 pos = bus.read(i, "pos")
                 if pos is not None:
