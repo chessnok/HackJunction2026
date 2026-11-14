@@ -254,10 +254,15 @@ class Mover:
         lowest point may sit at or a few mm "below" the table in FK (FK is good to about 5 mm), so the path may
         go as low as that pose itself minus 3 mm, but no lower."""
         target = np.asarray(target, float)
-        if problems := m.out_of_range(target):
-            raise StopCycle(f"{what}: target out of range: {'; '.join(problems)}")
         start = self.arm.read()
         joints_move = float(np.abs(target[:5] - start[:5]).max()) > 0.5
+        problems = m.out_of_range(target)
+        if not joints_move:
+            # gripper only: the arm joints are the measured pose, which may sag past the range margin under
+            # gravity (observe: lift -97 commanded, -99.2 measured); only the gripper target is checked then
+            problems = [pr for pr in problems if pr.startswith("gripper")]
+        if problems:
+            raise StopCycle(f"{what}: target out of range: {'; '.join(problems)}")
         clearance = self.cfg.near_table_clearance_mm if near_table else self.cfg.travel_clearance_mm
         if not joints_move:
             # gripper only: the arm stays put and a jaw cannot pass through the table (it would stall on it),
