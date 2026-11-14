@@ -23,9 +23,13 @@ Run from the repo root (uv reads the inline dependencies above; the project env 
                                                                            #   test/defect or test/defect_clean
   uv run scripts/label_crops_gemini.py --dataset bricks_v1 --which all     # also every dataset-episode crop
   ... --model gemini-3.1-pro-preview --concurrency 3
-configs/defect_mark_labels.csv holds manual spot-check labels (true/false/unsure); they are compared
-with Gemini, and beat it only with --manual-wins. Good-brick crops that Gemini flags are only
-reported, never moved.
+configs/defect_mark_labels.csv holds manual labels (crop_id, mark_visible, note):
+  - note starting with "user review": the user's corrections. They ALWAYS beat Gemini.
+    true / false sets the crop's label; exclude drops the crop from every split (excluded/review/).
+  - other rows: agent spot checks (true / false / unsure), compared with Gemini; they beat it only
+    with --manual-wins.
+With --apply, good-brick train crops that Gemini flags (and the user did not clear) go to
+excluded/flagged/; flagged good test crops are only reported.
 """
 
 from __future__ import annotations
@@ -176,10 +180,42 @@ class Labeler:
         return {"error": "gave up after retries"}
 
 
+def compare_models(rows: list[dict], cache: dict, lab: Labeler, other: str) -> None:
+    """Agreement of --model with `other` (both from the cache), per class (good/defect) and camera."""
+    pairs = []
+    for r in rows:
+        a_rec = cache.get(r["_key"])
+        b_rec = cache.get(r["_key"].replace(f"|{lab.model}|", f"|{other}|"))
+        if a_rec and b_rec:
+            pairs.append((r, a_rec["response"], b_rec["response"]))
+    if not pairs:
+        print(f"compare: no crop labelled by both {lab.model} and {other}")
+        return
+    print(f"\nagreement {lab.model} vs {other} on {len(pairs)} crops (mark visible yes/no):")
+    print(f"  {'class':7s} {'camera':6s} {'n':>4s} {'agree':>6s} {'both yes':>9s} {'only ' + lab.model[:10]:>16s} "
+          f"{'only ' + other[:10]:>16s}")
+    for label in ("good", "defect"):
+        for cam in ("top", "floor", "arm", "all"):
+            sel = [(r, x, y) for r, x, y in pairs if r["label"] == label and (cam == "all" or r["view"] == cam)]
+            if not sel:
+                continue
+            agree = sum(x["mark_visible"] == y["mark_visible"] for _, x, y in sel)
+            both = sum(x["mark_visible"] and y["mark_visible"] for _, x, y in sel)
+            only_a = sum(x["mark_visible"] and not y["mark_visible"] for _, x, y in sel)
+            only_b = sum(y["mark_visible"] and not x["mark_visible"] for _, x, y in sel)
+            print(f"  {label:7s} {cam:6s} {len(sel):4d} {100 * agree / len(sel):5.0f}% {both:9d} {only_a:16d} {only_b:16d}")
+    print("  disagreements:")
+    for r, x, y in pairs:
+        if x["mark_visible"] != y["mark_visible"]:
+            print(f"    {r['crop_id']} ({r['label']}): {lab.model}={x['mark_visible']} ({x['confidence']}: {x['where']!r}), "
+                  f"{other}={y['mark_visible']} ({y['confidence']}: {y['where']!r})")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dataset", required=True, help="name under captures/anomalib/dataset/")
-    p.add_argument("--model", default="gemini-pro-latest")
+    p.add_argument("--model", default="gemini-4-argon",
+                   help="label model (default gemini-4-argon; fallback gemini-3.1-pro-preview = gemini-pro-latest)")
     p.add_argument("--which", choices=("snapshots", "defect", "test", "all"), default="snapshots",
                    help="snapshots: every crop of every state snapshot (default); defect: defective bricks only; "
                         "test: every test crop; all: every crop")
@@ -188,6 +224,7 @@ def main() -> None:
     p.add_argument("--apply", action="store_true", help="move defective-brick crops by their per-crop label")
     p.add_argument("--manual-wins", action="store_true",
                    help="with --apply: a true/false label in configs/defect_mark_labels.csv beats Gemini")
+    p.add_argument("--compare", help="another model name in the cache: print agreement per class and camera")
     a = p.parse_args()
 
     root = Path("captures/anomalib/dataset") / a.dataset
@@ -237,19 +274,34 @@ def main() -> None:
             if done % 20 == 0 or flag != "-":
                 print(f"[{done}/{len(jobs)} {time.time() - t0:.0f} s] {rec['crop_id']} ({rec['label']}): {flag}", flush=True)
 
-    overrides = {}
+    # Manual labels: rows whose note starts with "user review" are the user's corrections and always
+    # beat Gemini (values true / false / exclude). Other rows are the agent's spot checks: compared
+    # with Gemini, and used for placement only with --manual-wins.
+    overrides, user_review = {}, {}
     if OVERRIDES.exists():
         with open(OVERRIDES, newline="") as f:
-            overrides = {o["crop_id"]: o["mark_visible"].strip().lower() for o in csv.DictReader(f)}
+            for o in csv.DictReader(f):
+                v = o["mark_visible"].strip().lower()
+                overrides[o["crop_id"]] = v
+                if (o.get("note") or "").strip().lower().startswith("user review"):
+                    user_review[o["crop_id"]] = v
 
-    flagged_good, moved = [], 0
+    if a.compare:
+        compare_models(rows, cache, lab, a.compare)
+
+    flagged_good, moved, flips = [], 0, []
     for r in rows:
+        # gemini_* columns hold the labels of --model only (never a mix of models)
+        r.update(gemini_mark_visible="", gemini_confidence="", gemini_where="", gemini_model="")
         rec = cache.get(r.pop("_key", None) or "")
+        user = user_review.get(r["crop_id"])
         if rec:
             resp = rec["response"]
             r.update(gemini_mark_visible=str(bool(resp["mark_visible"])).lower(), gemini_confidence=resp["confidence"],
                      gemini_where=resp["where"], gemini_model=rec.get("model_version") or rec["model_requested"])
-            if r["label"] == "good" and resp["mark_visible"]:
+            if user in ("true", "false") and user != r["gemini_mark_visible"]:
+                flips.append(r)
+            if r["label"] == "good" and resp["mark_visible"] and user != "false":
                 flagged_good.append(r)
                 if a.apply and r["split"] == "train":
                     # Never train on a crop that may show a mark: park it in excluded/ (not read by training).
@@ -260,11 +312,28 @@ def main() -> None:
                     moved += 1
         if r["crop_id"] in overrides:
             r["manual_mark_visible"] = overrides[r["crop_id"]]
+        if a.apply and user == "exclude" and r["split"] != "excluded":
+            # The user says the brick is not visible in this view: drop the crop from every split.
+            new = f"excluded/review/{Path(r['path']).name}"
+            (root / new).parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(root / r["path"], root / new)
+            r.update(path=new, split="excluded", cls="excluded_by_review", mark_label_source="user review")
+            moved += 1
+            continue
+        if a.apply and r["label"] == "good" and user == "true" and r["split"] == "train":
+            new = f"excluded/review/{Path(r['path']).name}"  # a good brick with a mark: never train on it
+            (root / new).parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(root / r["path"], root / new)
+            r.update(path=new, split="excluded", cls="marked_good_by_review", mark_label_source="user review")
+            moved += 1
+            continue
         if a.apply and r["label"] == "defect":
-            if a.manual_wins and overrides.get(r["crop_id"]) in ("true", "false"):
+            if user in ("true", "false"):
+                vis, src = user == "true", "user review"
+            elif a.manual_wins and overrides.get(r["crop_id"]) in ("true", "false"):
                 vis, src = overrides[r["crop_id"]] == "true", "manual"
             elif r.get("gemini_mark_visible"):
-                vis, src = r["gemini_mark_visible"] == "true", "gemini"
+                vis, src = r["gemini_mark_visible"] == "true", r["gemini_model"]
             else:
                 continue
             cls = "defect" if vis else "defect_clean"
@@ -283,6 +352,11 @@ def main() -> None:
     labelled = [r for r in rows if r.get("gemini_mark_visible")]
     print(f"\ncrops with a Gemini label: {len(labelled)} (models: "
           f"{sorted({r['gemini_model'] for r in labelled})})")
+    n_user = sum(v in ("true", "false") for v in user_review.values())
+    print(f"user-review labels: {len(user_review)} ({n_user} true/false, "
+          f"{sum(v == 'exclude' for v in user_review.values())} exclude); they flip {len(flips)} {a.model} labels:")
+    for r in flips:
+        print(f"  {r['crop_id']} ({r['label']}): {a.model}={r['gemini_mark_visible']} -> user={user_review[r['crop_id']]}")
     defect = [r for r in rows if r["label"] == "defect"]
     vis = [r for r in defect if r.get("gemini_mark_visible") == "true"]
     print(f"defective-brick crops: {len(defect)}, Gemini says mark visible in {len(vis)}")

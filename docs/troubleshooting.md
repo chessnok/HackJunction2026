@@ -13,6 +13,22 @@ Template:
 - Refs: ADRs, log entries, upstream issues
 ```
 
+## T-022. Studio discards a recorded episode ("recording fell 654 ms behind") while Anomalib trains
+
+- Date: 2026-11-14 · Status: Workaround
+- Symptom: about 07:39 (laptop clock) Studio discarded the team's episode with "recording fell 654 ms
+  behind" while PatchCore (`training.train_patchcore --dataset bricks_z24`, `nice -n 19`,
+  `OMP_NUM_THREADS=4`, `--num-workers 2`) ran on the CPU. The process tree averaged about 3.5 cores
+  despite nice 19; load average 9-12 on 16 threads with the VLM server and a crop build also running.
+- Cause: nice only lowers priority. Feature extraction, coreset selection and the data-loader
+  workers still compete for cores and memory bandwidth with Studio's camera and encoder threads.
+- Fix / workaround: while anyone records, train with `--threads 2 --num-workers 0` (torch threads,
+  added to `training/common.py`), `OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OV_CPU_THREADS=2` (the last
+  one caps OpenVINO CPU evaluation), and run one heavy job at a time. Better: train when nobody records.
+- Gotcha: to stop a pipeline whose child was paused with SIGSTOP, do not kill its parent shell. The
+  child's process group becomes orphaned, the kernel sends it SIGHUP + SIGCONT, and the paused child
+  dies (this lost the `bricks_z24` run after its coreset step).
+- Refs: ADR 0006, T-019.
 ## T-021. OVMS loads gemma-4 but disables `/v3/chat/completions` ("Chat template is not compatible with minja")
 
 - Date: 2026-11-14 · Status: Workaround

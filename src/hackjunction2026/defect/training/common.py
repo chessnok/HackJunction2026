@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import time
 import traceback
@@ -47,6 +48,9 @@ def parse_args(name: str, argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--no-export", action="store_true", help="skip OpenVINO export (and evaluation)")
     p.add_argument("--eval-device", default="CPU", help="OpenVINO device for evaluate.py (CPU, GPU, NPU)")
     p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--threads", type=int, default=int(os.environ.get("OMP_NUM_THREADS", "4")),
+                   help="torch CPU threads (default $OMP_NUM_THREADS or 4). Studio drops recordings when the "
+                        "CPU is busy: use 2 (and --num-workers 0) while the team records")
     return p.parse_args(argv)
 
 
@@ -91,6 +95,9 @@ def run_scenario(name: str, build_model: Callable[[int], Any], *, batch_size: in
     if not (root / "train" / "good").is_dir():
         msg = f"{root}/train/good not found: build it with python -m hackjunction2026.defect.cropping.make_dataset"
         raise SystemExit(msg)
+    import torch
+
+    torch.set_num_threads(args.threads)
     accelerator = pick_accelerator(args.accelerator)
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}_{name}_{args.dataset}" + (f"_{args.tag}" if args.tag else "")
     run_dir, export_dir = RUNS_DIR / run_id, EXPORTS_DIR / run_id
