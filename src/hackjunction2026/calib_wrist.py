@@ -125,6 +125,15 @@ class Calib:
             self.mv.gripper(self.cfg.gripper_open, "open again")
         raise sc.StopCycle(f"{what}: no hold after {self.cfg.retries_per_brick} tries: put the brick back by hand")
 
+    def check_still_holding(self, what: str) -> None:
+        """After a lift: the jaws must still stop on the brick, else it slipped out (user saw this at point 0)."""
+        if self.mv.dry_run:
+            return
+        st = self.mv.arm.gripper_state()
+        self.c.log("hold_after_lift", what=what, pos=st.pos, load=st.load, status=st.status)
+        if st.pos < self.cfg.hold_min:
+            raise sc.StopCycle(f"{what}: the brick slipped out after the lift (gripper {st.pos:.1f}): put it back by hand")
+
     def take_from_photo(self) -> None:
         mv, photo = self.mv, self.c.poses["photo"].copy()
         photo[sc.GRIPPER] = self.cfg.gripper_open
@@ -132,6 +141,7 @@ class Calib:
         mv.approach(photo, "photo spot")
         self.grasp_here("grasp at the photo spot")
         mv.move(mv.lifted(mv.arm.read(), self.cfg.approach_mm), "lift from the photo spot", near_table=True, taught=True)
+        self.check_still_holding("lift from the photo spot")
 
     def place_and_look(self, i: int, p: Point) -> None:
         mv, cfg = self.mv, self.cfg
@@ -160,6 +170,13 @@ class Calib:
             b = max(bricks, key=lambda b: b.area_px)
             rec.update(pixel=[float(b.centroid[0]), float(b.centroid[1])], colour=b.colour, area_px=b.area_px)
             self.c.save(f"point{i}_detect", tm.annotate(frame, det))
+            prev = self.pairs[-1] if self.pairs else None
+            if not self.mv.dry_run and prev is not None and np.hypot(*(np.subtract(rec["pixel"], prev["pixel"]))) < 25 \
+                    and np.hypot(*(np.subtract(rec["place_xy"], prev["place_xy"]))) > 30:
+                print(f"  point {i}: the brick did not move in the image since point {prev['i']}: pair dropped")
+                rec["dropped"] = "brick did not move"
+                self.c.log("pair", **rec)
+                raise sc.StopCycle(f"point {i}: the brick was not carried here (still at point {prev['i']}?)")
             self.pairs.append(rec)
             print(f"  point {i}: placed at ({xy[0]:.0f}, {xy[1]:.0f}) mm -> pixel ({b.centroid[0]:.0f}, {b.centroid[1]:.0f})")
         else:
@@ -174,6 +191,7 @@ class Calib:
         mv.move(dwn_open, f"point {i}: down to grasp", near_table=True)
         self.grasp_here(f"point {i}: grasp")
         mv.move(mv.lifted(mv.arm.read(), cfg.hover_mm - cfg.grasp_mm, keep_roll=False), f"point {i}: lift", near_table=True)
+        self.check_still_holding(f"point {i}: lift")
 
     def return_to_photo(self) -> None:
         mv, photo = self.mv, self.c.poses["photo"].copy()

@@ -293,9 +293,9 @@ class Mover:
             self.arm.send(target)
             return self.arm.read()
         # going up (jaw >= 10 mm higher at the end): a loaded shoulder may stop a few units short under gravity,
-        # which only leaves the arm a little lower than planned, so allow 8 units there; 5 everywhere else
+        # which only leaves the arm a little lower than planned: 10 units there, 8 elsewhere (user: +-1 cm is fine)
         up = float(self.jaw(target)[2] - self.jaw(start)[2]) >= 10.0
-        r = m.move_linear(self.arm.send, self.arm.read, start, target, v, settle_error=8.0 if up else 5.0)
+        r = m.move_linear(self.arm.send, self.arm.read, start, target, v, settle_error=10.0 if up else 8.0)
         self.log("moved", what=what, ok=r.ok, reason=r.reason, final=r.final, worst_error=round(r.worst_error, 2))
         if not r.ok:
             raise StopCycle(f"{what}: {r.reason}")

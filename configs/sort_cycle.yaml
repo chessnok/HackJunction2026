@@ -2,7 +2,7 @@
 # Units: joints in Studio normalized units (-100..100, gripper 0..100), heights in mm above the table.
 poses: {observe: observe, photo: photo, bowl_good: bowl_good, bowl_defect: bowl_defect}  # names in poses.yaml
 hover_mm: 60.0             # jaw centre above the table over the brick before the grasp
-grasp_mm: 12.0             # jaw centre above the table when closing on a brick on the sheet (UNTESTED)
+grasp_mm: 5.0              # jaw centre above the table when closing: low, so the jaws hold the brick body (user: go lower)
 approach_mm: 50.0          # pre-pose above a taught low pose (photo spot, bowls)
 raise_mm: 80.0             # straight up after a release, so the cameras see the brick (user requirement)
 travel_speed: 10.0         # units/s; capped at 10 for arm joints in code
@@ -15,8 +15,8 @@ gripper_close_target: 0.0
 empty_closed: 2.5          # closed on nothing (agent B: 2.57)
 hold_min: 8.0              # stops above this when told to close -> holding a brick (UNTESTED; big brick ~30-34)
 load_hold_min: 150         # |Present_Load| (0.1 % of max torque) that also counts as holding (UNTESTED)
-squeeze: 3.0               # after the stop, command only this far past it (keeps the load low)
-hold_torque_limit: 300     # gripper RAM Torque_Limit (addr 48) while closing / holding (UNTESTED)
+squeeze: 6.0               # after the stop, command this far past it (firm grip; 3 let the brick slip on lift)
+hold_torque_limit: 500     # gripper RAM Torque_Limit (addr 48) while closing / holding (300 let the brick slip)
 retries_per_brick: 3
 locate: auto               # wrist (needs configs/table_homography.yaml) | top (configs/top_camera.yaml, 3-4 cm off) | auto
 homography: configs/table_homography.yaml
