@@ -1,0 +1,48 @@
+{
+  "serial": "5B91030613",
+  "calibration": {
+    "shoulder_pan": {
+      "id": 1,
+      "drive_mode": 0,
+      "homing_offset": 1642,
+      "range_min": 748,
+      "range_max": 3431
+    },
+    "shoulder_lift": {
+      "id": 2,
+      "drive_mode": 0,
+      "homing_offset": 1550,
+      "range_min": 870,
+      "range_max": 3251
+    },
+    "elbow_flex": {
+      "id": 3,
+      "drive_mode": 0,
+      "homing_offset": 1494,
+      "range_min": 840,
+      "range_max": 3054
+    },
+    "wrist_flex": {
+      "id": 4,
+      "drive_mode": 0,
+      "homing_offset": 1908,
+      "range_min": 825,
+      "range_max": 3142
+    },
+    "wrist_roll": {
+      "id": 5,
+      "drive_mode": 0,
+      "homing_offset": 975,
+      "range_min": 189,
+      "range_max": 3992
+    },
+    "gripper": {
+      "id": 6,
+      "drive_mode": 0,
+      "homing_offset": -1144,
+      "range_min": 1685,
+      "range_max": 2961
+    }
+  },
+  "fetched": "2026-11-14T07:11:18"
+}
