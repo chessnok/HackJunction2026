@@ -1,0 +1,1441 @@
+From 6d2e0d910829dc2827bc73a93b0904660376299f Mon Sep 17 00:00:00 2001
+From: Junction 2026 team <junction2026@localhost>
+Date: Sat, 14 Nov 2026 07:21:44 -0800
+Subject: [PATCH 1/4] feat(training): optional early stopping on val/loss
+
+A job can now ask to stop once val/loss has not improved for
+early_stopping_patience epochs in a row (optionally by more than
+early_stopping_min_delta). It is off by default.
+
+- TrainingJobSpec and the train job payload gain both fields. Early
+  stopping needs val_split > 0; a min_delta without a patience is
+  dropped. Both fields are left out of the serialized spec and of the
+  stored payload while early stopping is off (exclude_if), so an
+  ordinary spec still validates on a trainer built before the feature,
+  and a stored job still loads in a Studio without it (both models
+  forbid unknown fields).
+- training.early_stopping.ValLossEarlyStopping wraps Lightning's
+  EarlyStopping (monitor val/loss, mode min, strict=False). It tracks the
+  best epoch, which is the one ModelCheckpoint publishes, so export is
+  unchanged.
+- SnapFlow: early stopping watches the flow-matching phase only. val/loss
+  is not comparable across the phase boundary, and stopping in phase 1
+  would skip distillation. When patience runs out in phase 1, the stop
+  is withdrawn, the boundary moves to the next epoch and the epoch
+  budget shrinks: distillation starts from the best flow-matching
+  checkpoint and still runs its full snapflow_distill_epochs.
+- The run writes early_stopping.json into the model directory. It
+  travels in the model artifact, so the worker reads it after a local or
+  remote run and completes the job with a message such as
+  "Training finished: stopped early after epoch 12 of 30; best epoch 9
+  (val/loss 0.5194)". On an early stop the runner also reports that line
+  at 99 % before checkpointing and export.
+- The model's training summary shows the early-stopping settings.
+
+Tests cover the spec and payload fields, the callback wiring, and real
+(tiny) Lightning runs: a plateau, min_delta, a non-finite val/loss,
+progress staying in range, a cancellation, and the SnapFlow hand-over
+with the library's SnapFlowPhaseCallback.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ application/backend/src/schemas/job.py        |  45 +++
+ application/backend/src/schemas/model.py      |   2 +
+ .../backend/src/services/model_service.py     |   4 +
+ .../src/services/training_backends/local.py   |   2 +
+ .../backend/src/training/early_stopping.py    | 175 ++++++++++++
+ application/backend/src/training/job.py       | 235 ++++++++++++++++
+ .../backend/src/workers/training_worker.py    |   7 +-
+ application/backend/tests/old_trainer.py      |  45 +++
+ application/backend/tests/schemas/test_job.py |  48 +++-
+ .../services/test_local_training_backend.py   |  15 +
+ .../tests/services/test_model_service.py      |  17 ++
+ .../tests/training/test_early_stopping.py     | 257 ++++++++++++++++++
+ .../backend/tests/training/test_job.py        | 223 +++++++++++++++
+ .../tests/workers/test_training_worker.py     |  53 +++-
+ 14 files changed, 1121 insertions(+), 7 deletions(-)
+ create mode 100644 application/backend/src/training/early_stopping.py
+ create mode 100644 application/backend/tests/old_trainer.py
+ create mode 100644 application/backend/tests/training/test_early_stopping.py
+
+diff --git a/application/backend/src/schemas/job.py b/application/backend/src/schemas/job.py
+index 7510fdbe..a0aa7003 100644
+--- a/application/backend/src/schemas/job.py
++++ b/application/backend/src/schemas/job.py
+@@ -255,6 +255,30 @@ class TrainJobPayloadBase(BaseModel):
+             "max_epochs teacher run. Ignored when snapflow_enabled is false."
+         ),
+     )
++    # Left out of the stored payload while early stopping is off, so a job
++    # created by this version still loads in a Studio without the feature
++    # (payloads forbid unknown fields).
++    early_stopping_patience: int | None = Field(
++        default=None,
++        ge=1,
++        le=10_000,
++        exclude_if=lambda value: value is None,
++        description=(
++            "Stop training once val/loss has not improved for this many epochs in a row; null (default) "
++            "trains for the full max_epochs. Needs val_split > 0. The published model is the best epoch "
++            "either way. With SnapFlow, only the flow-matching phase is stopped early; distillation then "
++            "starts at once and runs its full snapflow_distill_epochs."
++        ),
++    )
++    early_stopping_min_delta: float | None = Field(
++        default=None,
++        ge=0.0,
++        exclude_if=lambda value: value is None,
++        description=(
++            "Smallest val/loss decrease that counts as an improvement; null means 0 (any decrease). "
++            "Ignored unless early stopping is on."
++        ),
++    )
+ 
+     @model_validator(mode="after")
+     def validate_lora(self) -> "TrainJobPayloadBase":
+@@ -295,6 +319,27 @@ class TrainJobPayloadBase(BaseModel):
+             raise ValueError(msg)
+         return self
+ 
++    @model_validator(mode="after")
++    def validate_early_stopping(self) -> "TrainJobPayloadBase":
++        """Reject early stopping without a validation split; drop a min_delta that has no effect.
++
++        Returns:
++            The validated payload.
++
++        Raises:
++            ValueError: If early stopping is on with ``val_split`` 0.
++        """
++        if self.early_stopping_patience is None:
++            self.early_stopping_min_delta = None
++            return self
++        if self.val_split <= 0:
++            msg = (
++                "Early stopping watches val/loss, which needs a validation split: "
++                "set val_split above 0 or turn early stopping off."
++            )
++            raise ValueError(msg)
++        return self
++
+     @property
+     def snapflow_start_epoch(self) -> int | None:
+         """Epoch at which distillation begins, or None when it is disabled.
+diff --git a/application/backend/src/schemas/model.py b/application/backend/src/schemas/model.py
+index fc7702f1..9833df6e 100644
+--- a/application/backend/src/schemas/model.py
++++ b/application/backend/src/schemas/model.py
+@@ -221,6 +221,8 @@ class TrainingSummary(BaseModel):
+     lora_use_dora: bool | None = None
+     snapflow_enabled: bool | None = None
+     snapflow_distill_epochs: int | None = None
++    early_stopping_patience: int | None = None
++    early_stopping_min_delta: float | None = None
+ 
+ 
+ class ModelDetailResponse(BaseModel):
+diff --git a/application/backend/src/services/model_service.py b/application/backend/src/services/model_service.py
+index c6bc0eda..5c0f3784 100644
+--- a/application/backend/src/services/model_service.py
++++ b/application/backend/src/services/model_service.py
+@@ -105,4 +105,8 @@ class ModelService:
+             lora_use_dora=payload.lora_use_dora if lora_enabled else None,
+             snapflow_enabled=payload.snapflow_enabled,
+             snapflow_distill_epochs=snapflow_distill_epochs,
++            early_stopping_patience=payload.early_stopping_patience,
++            early_stopping_min_delta=(
++                (payload.early_stopping_min_delta or 0.0) if payload.early_stopping_patience is not None else None
++            ),
+         )
+diff --git a/application/backend/src/services/training_backends/local.py b/application/backend/src/services/training_backends/local.py
+index c0d9f3bb..0ebd985b 100644
+--- a/application/backend/src/services/training_backends/local.py
++++ b/application/backend/src/services/training_backends/local.py
+@@ -127,6 +127,8 @@ def build_spec(context: TrainingContext) -> TrainingJobSpec:
+         lora_dropout=payload.lora_dropout,
+         lora_use_dora=payload.lora_use_dora,
+         snapflow_start_epoch=payload.snapflow_start_epoch,
++        early_stopping_patience=payload.early_stopping_patience,
++        early_stopping_min_delta=payload.early_stopping_min_delta or 0.0,
+         device_type=str(device.type) if device else None,
+         device_index=device.index if device else None,
+         image_key_reorder_map=payload.image_key_reorder_map,
+diff --git a/application/backend/src/training/early_stopping.py b/application/backend/src/training/early_stopping.py
+new file mode 100644
+index 00000000..e5b00c61
+--- /dev/null
++++ b/application/backend/src/training/early_stopping.py
+@@ -0,0 +1,175 @@
++# Copyright (C) 2026 Intel Corporation
++# SPDX-License-Identifier: Apache-2.0
++
++"""Early stopping on ``val/loss`` for a Studio training run.
++
++Imports Lightning at module level, so :mod:`training.job` imports this module
++only for a run that asks for early stopping.
++"""
++
++from __future__ import annotations
++
++import logging
++import math
++from typing import TYPE_CHECKING, Any
++
++from lightning.pytorch.callbacks import EarlyStopping
++
++from training.job import EarlyStoppingSummary
++
++if TYPE_CHECKING:
++    import lightning.pytorch as pl
++
++logger = logging.getLogger(__name__)
++
++MONITOR = "val/loss"
++"""The metric early stopping watches: the same one ``ModelCheckpoint`` ranks
++epochs by, so the epoch it stops after is judged by what gets published."""
++
++
++class ValLossEarlyStopping(EarlyStopping):
++    """Lightning's ``EarlyStopping`` on ``val/loss``, aware of SnapFlow and able to report what it did.
++
++    On top of the stock callback it remembers the epoch with the lowest
++    ``val/loss`` (the epoch ``ModelCheckpoint`` publishes) for
++    :meth:`summary`.
++
++    On a SnapFlow run it watches the flow-matching phase only:
++
++    - ``val/loss`` is not comparable across the phase boundary (which is also
++      why ``SnapFlowPhaseCallback`` resets ``ModelCheckpoint``'s best there), so
++      no check runs during distillation.
++    - Stopping during flow matching would skip distillation altogether. When
++      patience runs out in that phase, the stop is withdrawn and the phase
++      boundary moves to the next epoch instead: distillation starts from the
++      best flow-matching checkpoint (``SnapFlowPhaseCallback`` restores it) and
++      still runs its full number of epochs, and the trainer's epoch budget
++      shrinks by the flow-matching epochs that were skipped.
++
++    A run whose validation never logs ``val/loss`` trains to the end instead
++    of failing (``strict=False``); Lightning warns about it.
++
++    Args:
++        patience: Validation epochs without improvement before stopping.
++        min_delta: Smallest ``val/loss`` decrease that counts as an improvement.
++        snapflow_callback: The run's ``SnapFlowPhaseCallback``, or None.
++    """
++
++    def __init__(self, *, patience: int, min_delta: float = 0.0, snapflow_callback: Any = None) -> None:
++        super().__init__(
++            monitor=MONITOR,
++            mode="min",
++            patience=patience,
++            min_delta=min_delta,
++            strict=False,
++            verbose=True,
++        )
++        self._requested_min_delta = min_delta
++        self._snapflow = snapflow_callback
++        self._planned_max_epochs: int | None = None
++        self._planned_flow_matching_epochs: int | None = (
++            snapflow_callback.start_epoch if snapflow_callback is not None else None
++        )
++        self.best_epoch: int | None = None
++        """Zero-based epoch with the lowest finite ``val/loss`` (in the watched phase)."""
++        self.best_val_loss: float | None = None
++        self.stopped_after_epoch: int | None = None
++        """One-based epoch after which early stopping ended the run (or the flow-matching phase)."""
++        self.stop_reason: str | None = None
++
++    def setup(self, trainer: pl.Trainer, pl_module: pl.LightningModule, stage: str) -> None:
++        """Remember the planned epoch budget before a SnapFlow hand-over can shrink it."""
++        super().setup(trainer, pl_module, stage)
++        if self._planned_max_epochs is None:
++            self._planned_max_epochs = trainer.max_epochs
++
++    def on_validation_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
++        """Track the best epoch, then let Lightning check (when it checks after validation)."""
++        if self._is_distilling(trainer):
++            return
++        if not trainer.sanity_checking:
++            self._track_best(trainer)
++        stop_was_requested = trainer.should_stop
++        super().on_validation_end(trainer, pl_module)
++        self._after_check(trainer, stop_was_requested)
++
++    def on_train_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
++        """Let Lightning check (when it checks at epoch end, Studio's case)."""
++        if self._is_distilling(trainer):
++            return
++        stop_was_requested = trainer.should_stop
++        super().on_train_epoch_end(trainer, pl_module)
++        self._after_check(trainer, stop_was_requested)
++
++    def _is_distilling(self, trainer: pl.Trainer) -> bool:
++        return self._snapflow is not None and trainer.current_epoch >= self._snapflow.start_epoch
++
++    def _track_best(self, trainer: pl.Trainer) -> None:
++        value = trainer.callback_metrics.get(MONITOR)
++        if value is None:
++            return
++        loss = float(value)
++        if math.isfinite(loss) and (self.best_val_loss is None or loss < self.best_val_loss):
++            self.best_val_loss = loss
++            self.best_epoch = trainer.current_epoch
++
++    def _after_check(self, trainer: pl.Trainer, stop_was_requested: bool) -> None:
++        """Record a stop this callback just decided; on a SnapFlow run, turn it into a phase change.
++
++        Args:
++            trainer: The active trainer.
++            stop_was_requested: ``trainer.should_stop`` before the check. A stop
++                requested by someone else (cancellation) is left alone.
++        """
++        if stop_was_requested or not trainer.should_stop:
++            return
++        reason = getattr(self, "stopping_reason", None)
++        reason_name = reason.name.lower() if reason is not None and hasattr(reason, "name") else None
++        epochs_done = trainer.current_epoch + 1
++
++        if self._snapflow is None:
++            self.stopped_after_epoch = epochs_done
++            self.stop_reason = reason_name
++            return
++
++        # SnapFlow: end the flow-matching phase, not the run.
++        trainer.should_stop = False
++        boundary = self._snapflow.start_epoch
++        if epochs_done >= boundary:
++            return  # Flow matching ends after this epoch anyway.
++        distillation_epochs = (trainer.max_epochs or boundary) - boundary
++        self._snapflow.start_epoch = epochs_done
++        trainer.fit_loop.max_epochs = epochs_done + distillation_epochs
++        self.stopped_after_epoch = epochs_done
++        self.stop_reason = reason_name
++        logger.info(
++            "Early stopping ended flow matching after epoch %d of %d; distilling for %d epochs from epoch %d",
++            epochs_done,
++            boundary,
++            distillation_epochs,
++            epochs_done + 1,
++        )
++
++    def summary(self, trainer: pl.Trainer) -> EarlyStoppingSummary:
++        """Describe what early stopping did, for :data:`training.job.EARLY_STOPPING_SUMMARY_NAME`.
++
++        Args:
++            trainer: The trainer, after ``fit`` returned.
++
++        Returns:
++            The summary, with 1-based epoch numbers.
++        """
++        max_epochs = self._planned_max_epochs if self._planned_max_epochs is not None else (trainer.max_epochs or 0)
++        flow_matching_epochs = self._planned_flow_matching_epochs
++        return EarlyStoppingSummary(
++            patience=self.patience,
++            min_delta=self._requested_min_delta,
++            max_epochs=max_epochs,
++            epochs_trained=trainer.current_epoch,
++            stopped_after_epoch=self.stopped_after_epoch,
++            reason=self.stop_reason,
++            best_epoch=self.best_epoch + 1 if self.best_epoch is not None else None,
++            best_val_loss=self.best_val_loss,
++            flow_matching_epochs=flow_matching_epochs,
++            distillation_epochs=max_epochs - flow_matching_epochs if flow_matching_epochs is not None else None,
++        )
+diff --git a/application/backend/src/training/job.py b/application/backend/src/training/job.py
+index dfae8620..42307d11 100644
+--- a/application/backend/src/training/job.py
++++ b/application/backend/src/training/job.py
+@@ -85,6 +85,29 @@ PEFT_POLICIES = frozenset({"pi05", "molmoact2"})
+ """Policies whose ``Config`` mixes in ``physicalai.policies.mixins.peft.PeftConfigMixin`` and
+ support LoRA/DoRA fine-tuning."""
+ 
++EARLY_STOPPING_SUMMARY_NAME = "early_stopping.json"
++"""What early stopping did, written into ``output_dir`` beside the checkpoint
++whenever a run has early stopping enabled. It travels inside the model
++artifact, so Studio reads the same file after a local, Modal, AWS Batch, or
++remote-trainer run (see :func:`read_early_stopping_summary`)."""
++
++EARLY_STOPPING_UNSUPPORTED_MESSAGE = (
++    "The remote trainer does not support early stopping: it runs trainer code from before the feature "
++    "existed. Redeploy or update the trainer (for Modal: deploy the trainer again from this Studio), "
++    "or train without early stopping."
++)
++"""Shown instead of the raw validation error an older trainer returns for the
++early-stopping fields (see :func:`explain_trainer_rejection`)."""
++
++
++def _is_unset(value: object) -> bool:
++    """Serialization filter: the early-stopping fields are sent only when early stopping is on."""
++    return value is None
++
++
++def _is_zero(value: float) -> bool:
++    return value == 0.0
++
+ 
+ class RunOptions(BaseModel):
+     """Runtime-only controls which are not part of the training payload."""
+@@ -178,6 +201,25 @@ class TrainingJobSpec(BaseModel):
+         default=False,
+         description="Use DoRA (Weight-Decomposed LoRA) instead of plain LoRA. Ignored unless lora_enabled.",
+     )
++    # Both early-stopping fields are left out of the serialized spec while early
++    # stopping is off, so a spec without it still validates on a trainer that
++    # predates the feature (this model forbids unknown fields).
++    early_stopping_patience: int | None = Field(
++        default=None,
++        ge=1,
++        exclude_if=_is_unset,
++        description=(
++            "Stop when val/loss has not improved for this many validation epochs in a row. "
++            "None disables early stopping. Needs val_split > 0. On a SnapFlow run it applies to the "
++            "flow-matching phase only: stopping it starts distillation early."
++        ),
++    )
++    early_stopping_min_delta: float = Field(
++        default=0.0,
++        ge=0.0,
++        exclude_if=_is_zero,
++        description="Smallest val/loss decrease that counts as an improvement. Ignored unless early stopping is on.",
++    )
+     run_options: RunOptions = Field(default_factory=RunOptions)
+ 
+     @model_validator(mode="after")
+@@ -232,6 +274,138 @@ class TrainingJobSpec(BaseModel):
+             raise ValueError(msg)
+         return self
+ 
++    @model_validator(mode="after")
++    def validate_early_stopping(self) -> TrainingJobSpec:
++        """Reject early stopping without a validation split; drop a min_delta that has no effect.
++
++        Returns:
++            The validated spec.
++
++        Raises:
++            ValueError: If early stopping is on but no episodes are held out
++                for the ``val/loss`` it monitors.
++        """
++        if self.early_stopping_patience is None:
++            # Ignored without early stopping; zeroed so it is not sent over the wire either.
++            self.early_stopping_min_delta = 0.0
++            return self
++        if self.val_split <= 0:
++            msg = (
++                "Early stopping watches val/loss, which needs a validation split: "
++                "set val_split above 0 or turn early stopping off."
++            )
++            raise ValueError(msg)
++        return self
++
++
++class EarlyStoppingSummary(BaseModel):
++    """What early stopping did in one run (contents of :data:`EARLY_STOPPING_SUMMARY_NAME`).
++
++    Epoch numbers are 1-based, as a person counts them. On a SnapFlow run
++    early stopping watches the flow-matching phase only; ``stopped_after_epoch``
++    then ends that phase, and distillation still runs its full budget
++    (``distillation_epochs``) right after it.
++
++    Example:
++        >>> summary = EarlyStoppingSummary(
++        ...     patience=3, min_delta=0.0, max_epochs=30, epochs_trained=12,
++        ...     stopped_after_epoch=12, best_epoch=9, best_val_loss=0.5194,
++        ... )
++        >>> summary.message
++        'stopped early after epoch 12 of 30; best epoch 9 (val/loss 0.5194)'
++    """
++
++    model_config = ConfigDict(extra="ignore")
++
++    patience: int
++    min_delta: float
++    max_epochs: int = Field(description="Planned epoch budget, distillation included.")
++    epochs_trained: int = Field(description="Epochs that actually ran, distillation included.")
++    stopped_after_epoch: int | None = Field(
++        default=None,
++        description="Last epoch trained before early stopping ended the run (or phase); None if it never did.",
++    )
++    reason: str | None = Field(default=None, description="Lightning's stopping reason, e.g. 'patience_exhausted'.")
++    best_epoch: int | None = Field(default=None, description="Epoch with the lowest val/loss in the watched phase.")
++    best_val_loss: float | None = None
++    flow_matching_epochs: int | None = Field(
++        default=None, description="SnapFlow runs: planned flow-matching epochs before distillation."
++    )
++    distillation_epochs: int | None = Field(default=None, description="SnapFlow runs: distillation epochs.")
++
++    @property
++    def stopped_early(self) -> bool:
++        return self.stopped_after_epoch is not None
++
++    @property
++    def message(self) -> str | None:
++        """One line for the job status, or None when early stopping never triggered."""
++        if self.stopped_after_epoch is None:
++            return None
++        best = (
++            f"best epoch {self.best_epoch} (val/loss {self.best_val_loss:.4g})"
++            if self.best_epoch is not None and self.best_val_loss is not None
++            else "no finite val/loss"
++        )
++        cause = "; val/loss was not finite" if self.reason == "non_finite_metric" else ""
++        if self.distillation_epochs is not None:
++            planned = self.flow_matching_epochs if self.flow_matching_epochs is not None else self.max_epochs
++            return (
++                f"flow matching stopped early after epoch {self.stopped_after_epoch} of {planned}{cause}; "
++                f"{best}; then distilled for {self.distillation_epochs} epochs"
++            )
++        return f"stopped early after epoch {self.stopped_after_epoch} of {self.max_epochs}{cause}; {best}"
++
++
++def read_early_stopping_summary(model_dir: Path | str) -> EarlyStoppingSummary | None:
++    """Read a finished model's early-stopping summary.
++
++    Returns:
++        The summary, or None when the run had early stopping off or the file is
++        missing or unreadable (logged; a summary is informational only).
++    """
++    path = Path(model_dir) / EARLY_STOPPING_SUMMARY_NAME
++    if not path.is_file():
++        return None
++    try:
++        return EarlyStoppingSummary.model_validate_json(path.read_text())
++    except (OSError, ValueError):
++        logger.warning("Ignoring unreadable early-stopping summary %s", path, exc_info=True)
++        return None
++
++
++def completion_message(model_dir: Path | str) -> str:
++    """Status line for a successfully finished training job.
++
++    Returns:
++        ``"Training finished"``, extended with what early stopping did when it
++        ended the run (or its flow-matching phase) early.
++    """
++    summary = read_early_stopping_summary(model_dir)
++    detail = summary.message if summary is not None else None
++    return f"Training finished: {detail}" if detail else "Training finished"
++
++
++def explain_trainer_rejection(error_text: str | None) -> str | None:
++    """Recognize an older trainer rejecting the early-stopping fields of a spec.
++
++    A trainer that predates early stopping validates the spec with
++    ``extra="forbid"`` and fails with a generic pydantic error naming the
++    field. That only happens when early stopping is on, since the fields are
++    not serialized otherwise.
++
++    Args:
++        error_text: The trainer's failure message or HTTP error body.
++
++    Returns:
++        :data:`EARLY_STOPPING_UNSUPPORTED_MESSAGE` for that rejection, else None.
++    """
++    if not error_text or "early_stopping_" not in error_text:
++        return None
++    if "extra_forbidden" in error_text or "Extra inputs are not permitted" in error_text:
++        return EARLY_STOPPING_UNSUPPORTED_MESSAGE
++    return None
++
+ 
+ def build_policy(spec: TrainingJobSpec, *, resume_from: Path | str | None = None) -> Policy:
+     """Construct the policy a spec describes.
+@@ -364,6 +538,13 @@ def run_training_job(
+     picks, so the exported artifact (and therefore inference) always matches
+     the checkpoint a distilled model ships.
+ 
++    When ``spec.early_stopping_patience`` is set, training ends once
++    ``val/loss`` has not improved for that many epochs, and
++    :data:`EARLY_STOPPING_SUMMARY_NAME` records what happened. The published
++    checkpoint is still the best epoch, as with any run. On a SnapFlow run an
++    early stop ends only the flow-matching phase; distillation then starts at
++    the next epoch and runs its full budget.
++
+     Cancellation is cooperative. ``should_stop`` is polled throughout training
+     via :class:`~physicalai.train.callbacks.ProgressReportingCallback`; when it
+     returns True this function stops after the fit loop unwinds and returns
+@@ -428,6 +609,9 @@ def run_training_job(
+         snapflow_callback = _build_snapflow_callback(spec)
+         if snapflow_callback is not None:
+             callbacks.append(snapflow_callback)
++        early_stopping_callback = _build_early_stopping_callback(spec, snapflow_callback)
++        if early_stopping_callback is not None:
++            callbacks.append(early_stopping_callback)
+ 
+         trainer = Trainer(
+             logger=CSVLogger(cache_dir.parent, name=cache_dir.stem),
+@@ -447,6 +631,8 @@ def run_training_job(
+             logger.info("Training canceled; skipping checkpoint and export")
+             return
+ 
++        if early_stopping_callback is not None:
++            _record_early_stopping(early_stopping_callback, trainer, cache_dir, report)
+         _finalize_checkpoints(trainer, cache_dir, snapflow_callback=snapflow_callback)
+         _publish(cache_dir, output_dir)
+ 
+@@ -476,6 +662,55 @@ def _build_snapflow_callback(spec: TrainingJobSpec) -> Any:
+     )
+ 
+ 
++def _build_early_stopping_callback(spec: TrainingJobSpec, snapflow_callback: Any) -> Any:
++    """Build the early-stopping callback a spec asks for.
++
++    Args:
++        spec: The training configuration.
++        snapflow_callback: This run's ``SnapFlowPhaseCallback``, or None. When
++            given, early stopping watches the flow-matching phase only (see
++            :class:`training.early_stopping.ValLossEarlyStopping`).
++
++    Returns:
++        A :class:`~training.early_stopping.ValLossEarlyStopping`, or None when
++        early stopping is off.
++    """
++    if spec.early_stopping_patience is None:
++        return None
++
++    from training.early_stopping import ValLossEarlyStopping
++
++    logger.info(
++        "Early stopping on val/loss: patience %d, min_delta %g%s",
++        spec.early_stopping_patience,
++        spec.early_stopping_min_delta,
++        " (flow-matching phase only)" if snapflow_callback is not None else "",
++    )
++    return ValLossEarlyStopping(
++        patience=spec.early_stopping_patience,
++        min_delta=spec.early_stopping_min_delta,
++        snapflow_callback=snapflow_callback,
++    )
++
++
++def _record_early_stopping(callback: Any, trainer: Any, cache_dir: Path, report: ReportFn) -> None:
++    """Write the early-stopping summary into the model directory and report an early stop.
++
++    Best-effort: the summary is informational, so a failure to build or write
++    it is logged and never fails a run that trained successfully.
++    """
++    try:
++        summary: EarlyStoppingSummary = callback.summary(trainer)
++        (cache_dir / EARLY_STOPPING_SUMMARY_NAME).write_text(summary.model_dump_json(indent=2))
++    except Exception:
++        logger.warning("Could not record the early-stopping summary", exc_info=True)
++        return
++    if summary.message is not None:
++        logger.info("Early stopping: %s", summary.message)
++        # Training is over; what is left (checkpoint, export) reports from 99 on.
++        report(99, summary.message[0].upper() + summary.message[1:], {})
++
++
+ def _load_policy_from_checkpoint(spec: TrainingJobSpec, checkpoint: Path) -> Policy:
+     """Restore a policy from a checkpoint, applying ``spec.compile_model``.
+ 
+diff --git a/application/backend/src/workers/training_worker.py b/application/backend/src/workers/training_worker.py
+index 759d489f..4e3e5157 100644
+--- a/application/backend/src/workers/training_worker.py
++++ b/application/backend/src/workers/training_worker.py
+@@ -30,6 +30,7 @@ from services.training_backends import (
+ )
+ from services.training_service import TrainingTrackingDispatcher
+ from settings import get_settings
++from training.job import completion_message
+ from workers.base import ProcessWorker
+ 
+ if TYPE_CHECKING:
+@@ -222,7 +223,11 @@ class TrainingWorker(ProcessWorker[None]):
+         else:
+             async with get_async_db_session_ctx() as session:
+                 job = await JobService(session, RemoteTrainerService(session)).update_job_status(
+-                    job_id=job.id, status=JobStatus.COMPLETED, message="Training finished"
++                    # Says so when early stopping ended the run (read from the model directory,
++                    # where every backend leaves the summary).
++                    job_id=job.id,
++                    status=JobStatus.COMPLETED,
++                    message=completion_message(model.path),
+                 )
+                 model = await ModelService(session).create_model(model)
+             self.queue.put((EventType.MODEL_UPDATE, model))
+diff --git a/application/backend/tests/old_trainer.py b/application/backend/tests/old_trainer.py
+new file mode 100644
+index 00000000..69bde6fb
+--- /dev/null
++++ b/application/backend/tests/old_trainer.py
+@@ -0,0 +1,45 @@
++# Copyright (C) 2026 Intel Corporation
++# SPDX-License-Identifier: Apache-2.0
++
++"""A stand-in for a trainer that predates early stopping.
++
++A deployed trainer (a Modal app, an AWS Batch image, a remote trainer service)
++runs whatever version of :class:`training.TrainingJobSpec` it was built with,
++and that model forbids unknown fields. These helpers rebuild the spec as it was
++before the early-stopping fields existed, so tests can check what such a
++trainer accepts and how it fails.
++"""
++
++from __future__ import annotations
++
++from pydantic import BaseModel, ConfigDict, ValidationError, create_model
++
++from training import TrainingJobSpec
++
++EARLY_STOPPING_FIELDS = ("early_stopping_patience", "early_stopping_min_delta")
++
++
++def pre_early_stopping_spec_model() -> type[BaseModel]:
++    """``TrainingJobSpec`` without its early-stopping fields, forbidding unknown fields like the real one."""
++    fields = {
++        name: (field.annotation, field)
++        for name, field in TrainingJobSpec.model_fields.items()
++        if name not in EARLY_STOPPING_FIELDS
++    }
++    return create_model(  # type: ignore[call-overload]
++        "TrainingJobSpec", __config__=ConfigDict(extra="forbid"), **fields
++    )
++
++
++def old_trainer_rejection(spec_json: str) -> str | None:
++    """Validate a serialized spec the way an old trainer does.
++
++    Returns:
++        ``str(ValidationError)`` -- what the batch worker writes into its
++        failed ``status.json`` -- or None when the old trainer accepts the spec.
++    """
++    try:
++        pre_early_stopping_spec_model().model_validate_json(spec_json)
++    except ValidationError as exc:
++        return str(exc)
++    return None
+diff --git a/application/backend/tests/schemas/test_job.py b/application/backend/tests/schemas/test_job.py
+index 307074e3..a25accee 100644
+--- a/application/backend/tests/schemas/test_job.py
++++ b/application/backend/tests/schemas/test_job.py
+@@ -16,7 +16,7 @@ from uuid import uuid4
+ import pytest
+ from pydantic import ValidationError
+ 
+-from schemas.job import LocalTrainJobPayload, RemoteTrainJobPayload, TrainingTarget
++from schemas.job import LocalTrainJobPayload, RemoteTrainJobPayload, TrainingTarget, TrainJobPayloadAdapter
+ 
+ 
+ def _base_kwargs() -> dict:
+@@ -192,3 +192,49 @@ class TestTrainingOptions:
+ 
+     def test_image_augmentation_can_be_enabled(self) -> None:
+         assert LocalTrainJobPayload(**_base_kwargs(), augment_images=True).augment_images is True
++
++
++class TestEarlyStopping:
++    """Opt-in, validated at submission, and invisible in stored payloads while off."""
++
++    def test_early_stopping_is_off_by_default(self) -> None:
++        payload = LocalTrainJobPayload(**_base_kwargs())
++
++        assert (payload.early_stopping_patience, payload.early_stopping_min_delta) == (None, None)
++
++    def test_a_payload_without_early_stopping_is_stored_without_its_fields(self) -> None:
++        """Payloads forbid unknown fields, so a stored job must still load in a Studio without the feature."""
++        stored = LocalTrainJobPayload(**_base_kwargs()).model_dump(mode="json")
++
++        assert "early_stopping_patience" not in stored
++        assert "early_stopping_min_delta" not in stored
++
++    @pytest.mark.parametrize("payload_class", [LocalTrainJobPayload, RemoteTrainJobPayload])
++    def test_an_early_stopping_payload_round_trips(self, payload_class: type) -> None:
++        extra = {"remote_trainer_id": uuid4()} if payload_class is RemoteTrainJobPayload else {}
++        payload = payload_class(**_base_kwargs(), early_stopping_patience=5, early_stopping_min_delta=0.001, **extra)
++
++        stored = payload.model_dump(mode="json")
++
++        assert (stored["early_stopping_patience"], stored["early_stopping_min_delta"]) == (5, 0.001)
++        assert TrainJobPayloadAdapter.validate_python(stored) == payload
++
++    def test_min_delta_is_optional(self) -> None:
++        payload = LocalTrainJobPayload(**_base_kwargs(), early_stopping_patience=5)
++
++        assert payload.early_stopping_min_delta is None
++        assert "early_stopping_min_delta" not in payload.model_dump(mode="json")
++
++    def test_min_delta_without_patience_is_dropped(self) -> None:
++        payload = LocalTrainJobPayload(**_base_kwargs(), early_stopping_min_delta=0.5)
++
++        assert payload.early_stopping_min_delta is None
++
++    def test_early_stopping_without_a_validation_split_is_rejected(self) -> None:
++        with pytest.raises(ValidationError, match="needs a validation split"):
++            LocalTrainJobPayload(**_base_kwargs(), val_split=0.0, early_stopping_patience=5)
++
++    @pytest.mark.parametrize("invalid", [{"early_stopping_patience": 0}, {"early_stopping_min_delta": -1.0}])
++    def test_out_of_range_values_are_rejected(self, invalid: dict) -> None:
++        with pytest.raises(ValidationError):
++            LocalTrainJobPayload(**{**_base_kwargs(), "early_stopping_patience": 5, **invalid})
+diff --git a/application/backend/tests/services/test_local_training_backend.py b/application/backend/tests/services/test_local_training_backend.py
+index 5a1d754a..679d4578 100644
+--- a/application/backend/tests/services/test_local_training_backend.py
++++ b/application/backend/tests/services/test_local_training_backend.py
+@@ -192,6 +192,21 @@ class TestBuildSpec:
+         assert spec.snapflow_start_epoch == 8
+         assert spec.max_epochs == 11
+ 
++    def test_an_ordinary_run_has_no_early_stopping(self, tmp_path):
++        spec = build_spec(_context(tmp_path, _payload()))
++
++        assert (spec.early_stopping_patience, spec.early_stopping_min_delta) == (None, 0.0)
++
++    def test_early_stopping_settings_are_forwarded(self, tmp_path):
++        spec = build_spec(_context(tmp_path, _payload(early_stopping_patience=4, early_stopping_min_delta=0.01)))
++
++        assert (spec.early_stopping_patience, spec.early_stopping_min_delta) == (4, 0.01)
++
++    def test_an_unset_min_delta_means_any_improvement_counts(self, tmp_path):
++        spec = build_spec(_context(tmp_path, _payload(early_stopping_patience=4)))
++
++        assert (spec.early_stopping_patience, spec.early_stopping_min_delta) == (4, 0.0)
++
+ 
+ class TestLocalTrainingBackend:
+     @pytest.mark.anyio
+diff --git a/application/backend/tests/services/test_model_service.py b/application/backend/tests/services/test_model_service.py
+index e5b8f933..8953fca6 100644
+--- a/application/backend/tests/services/test_model_service.py
++++ b/application/backend/tests/services/test_model_service.py
+@@ -224,6 +224,23 @@ def test_get_training_summary_carries_lora_fields_when_enabled() -> None:
+     )
+ 
+ 
++def test_get_training_summary_omits_early_stopping_when_disabled() -> None:
++    summary = ModelService.get_training_summary(_make_train_job())
++
++    assert summary is not None
++    assert (summary.early_stopping_patience, summary.early_stopping_min_delta) == (None, None)
++
++
++@pytest.mark.parametrize(("min_delta", "expected"), [(None, 0.0), (0.01, 0.01)])
++def test_get_training_summary_carries_early_stopping_when_enabled(min_delta: float | None, expected: float) -> None:
++    summary = ModelService.get_training_summary(
++        _make_train_job(early_stopping_patience=5, early_stopping_min_delta=min_delta)
++    )
++
++    assert summary is not None
++    assert (summary.early_stopping_patience, summary.early_stopping_min_delta) == (5, expected)
++
++
+ class TestSnapFlowFlag:
+     """`snapflow_enabled` tells the models list which checkpoints are distilled.
+ 
+diff --git a/application/backend/tests/training/test_early_stopping.py b/application/backend/tests/training/test_early_stopping.py
+new file mode 100644
+index 00000000..efd80115
+--- /dev/null
++++ b/application/backend/tests/training/test_early_stopping.py
+@@ -0,0 +1,257 @@
++# Copyright (C) 2026 Intel Corporation
++# SPDX-License-Identifier: Apache-2.0
++
++"""Early stopping in real (tiny) Lightning runs.
++
++The model's ``val/loss`` is scripted per epoch, so a plateau, a too-small
++improvement, or a rise during SnapFlow distillation happens exactly where a
++test puts it. Everything else is the real thing: Lightning's fit loop, its
++``ModelCheckpoint``, the library's ``ProgressReportingCallback`` and
++``SnapFlowPhaseCallback``.
++"""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING
++
++import lightning.pytorch as pl
++import pytest
++import torch
++from lightning.pytorch.callbacks import ModelCheckpoint
++from physicalai.train.callbacks import ProgressReportingCallback, SnapFlowPhaseCallback
++from torch.utils.data import DataLoader, TensorDataset
++
++from training.early_stopping import ValLossEarlyStopping
++from training.job import EarlyStoppingSummary
++
++if TYPE_CHECKING:
++    from pathlib import Path
++
++
++class _ScriptedValLoss(pl.LightningModule):
++    """Trains a real (tiny) layer but reports a scripted val/loss for each epoch."""
++
++    def __init__(self, val_losses: list[float]) -> None:
++        super().__init__()
++        self.layer = torch.nn.Linear(2, 1)
++        self.val_losses = val_losses
++
++    def training_step(self, batch: list[torch.Tensor], _batch_idx: int) -> torch.Tensor:
++        return self.layer(batch[0]).pow(2).mean()
++
++    def validation_step(self, _batch: list[torch.Tensor], _batch_idx: int) -> None:
++        loss = self.val_losses[min(self.current_epoch, len(self.val_losses) - 1)]
++        self.log("val/loss", torch.tensor(loss))
++
++    def configure_optimizers(self) -> torch.optim.Optimizer:
++        return torch.optim.SGD(self.parameters(), lr=0.01)
++
++    def train_dataloader(self) -> DataLoader:
++        return DataLoader(TensorDataset(torch.randn(8, 2)), batch_size=4)
++
++    def val_dataloader(self) -> DataLoader:
++        return DataLoader(TensorDataset(torch.randn(4, 2)), batch_size=4)
++
++
++class _DistillableScriptedValLoss(_ScriptedValLoss):
++    """Accepts ``enable_snapflow`` like the flow-matching policies, recording when it happened."""
++
++    def __init__(self, val_losses: list[float]) -> None:
++        super().__init__(val_losses)
++        self.distillation_started_at: int | None = None
++
++    def enable_snapflow(self, *, alpha: float, lambda_: float, num_inference_steps: int) -> None:
++        self.distillation_started_at = self.current_epoch
++
++
++def _fit(
++    model: pl.LightningModule,
++    tmp_path: Path,
++    *,
++    max_epochs: int,
++    patience: int,
++    min_delta: float = 0.0,
++    snapflow_start_epoch: int | None = None,
++    report: list[int] | None = None,
++    stop_after_steps: int | None = None,
++) -> tuple[pl.Trainer, ValLossEarlyStopping]:
++    """Fit ``model`` with the callbacks ``run_training_job`` uses."""
++    checkpoint = ModelCheckpoint(dirpath=tmp_path, filename="model", save_top_k=1, monitor="val/loss", mode="min")
++    progress: list[int] = report if report is not None else []
++    trainer_ref: list[pl.Trainer] = []
++
++    def should_stop() -> bool:
++        return stop_after_steps is not None and trainer_ref[0].global_step >= stop_after_steps
++
++    callbacks: list[pl.Callback] = [
++        checkpoint,
++        ProgressReportingCallback(
++            report=lambda value, _message, _extra: progress.append(value), should_stop=should_stop
++        ),
++    ]
++    snapflow = None
++    if snapflow_start_epoch is not None:
++        snapflow = SnapFlowPhaseCallback(start_epoch=snapflow_start_epoch, checkpoint_prefix="snapflow-")
++        callbacks.append(snapflow)
++    early_stopping = ValLossEarlyStopping(patience=patience, min_delta=min_delta, snapflow_callback=snapflow)
++    callbacks.append(early_stopping)
++
++    trainer = pl.Trainer(
++        max_epochs=max_epochs,
++        callbacks=callbacks,
++        accelerator="cpu",
++        devices=1,
++        logger=False,
++        enable_progress_bar=False,
++        enable_model_summary=False,
++        num_sanity_val_steps=0,
++        check_val_every_n_epoch=1,
++        default_root_dir=tmp_path,
++    )
++    trainer_ref.append(trainer)
++    trainer.fit(model)
++    return trainer, early_stopping
++
++
++class TestPlainRun:
++    def test_a_plateau_stops_the_run_after_patience_epochs(self, tmp_path: Path) -> None:
++        # Best at epoch 3 (0.7); epochs 4 and 5 do not beat it.
++        model = _ScriptedValLoss([1.0, 0.8, 0.7, 0.7, 0.75, 0.6, 0.5])
++
++        trainer, callback = _fit(model, tmp_path, max_epochs=20, patience=2)
++
++        assert trainer.current_epoch == 5
++        summary = callback.summary(trainer)
++        assert isinstance(summary, EarlyStoppingSummary)
++        assert summary.model_dump() == {
++            "patience": 2,
++            "min_delta": 0.0,
++            "max_epochs": 20,
++            "epochs_trained": 5,
++            "stopped_after_epoch": 5,
++            "reason": "patience_exhausted",
++            "best_epoch": 3,
++            "best_val_loss": pytest.approx(0.7),
++            "flow_matching_epochs": None,
++            "distillation_epochs": None,
++        }
++        assert summary.message == "stopped early after epoch 5 of 20; best epoch 3 (val/loss 0.7)"
++
++    def test_the_best_epoch_is_the_published_checkpoint(self, tmp_path: Path) -> None:
++        """The summary names the epoch ModelCheckpoint kept, which is what gets exported."""
++        model = _ScriptedValLoss([1.0, 0.8, 0.7, 0.7, 0.75])
++
++        trainer, callback = _fit(model, tmp_path, max_epochs=20, patience=2)
++
++        checkpoint = torch.load(tmp_path / "model.ckpt", map_location="cpu", weights_only=False)
++        assert checkpoint["epoch"] + 1 == callback.summary(trainer).best_epoch == 3
++
++    def test_improvements_below_min_delta_do_not_count(self, tmp_path: Path) -> None:
++        """Each epoch is a bit better, but never by 0.1, so patience runs out after 2 epochs."""
++        model = _ScriptedValLoss([1.0, 0.95, 0.92, 0.9, 0.85])
++
++        trainer, callback = _fit(model, tmp_path, max_epochs=20, patience=2, min_delta=0.1)
++
++        summary = callback.summary(trainer)
++        assert (summary.stopped_after_epoch, trainer.current_epoch) == (3, 3)
++        # The lowest val/loss still names the best epoch (it is the one checkpointed).
++        assert (summary.best_epoch, summary.best_val_loss) == (3, pytest.approx(0.92))
++        assert summary.min_delta == 0.1
++
++    def test_a_run_that_keeps_improving_trains_every_epoch(self, tmp_path: Path) -> None:
++        model = _ScriptedValLoss([1.0, 0.9, 0.8, 0.7])
++
++        trainer, callback = _fit(model, tmp_path, max_epochs=4, patience=2)
++
++        summary = callback.summary(trainer)
++        assert trainer.current_epoch == 4
++        assert summary.stopped_early is False
++        assert summary.message is None
++        assert (summary.epochs_trained, summary.best_epoch) == (4, 4)
++
++    def test_a_non_finite_val_loss_stops_the_run_and_says_why(self, tmp_path: Path) -> None:
++        model = _ScriptedValLoss([1.0, 0.8, float("nan")])
++
++        trainer, callback = _fit(model, tmp_path, max_epochs=20, patience=5)
++
++        summary = callback.summary(trainer)
++        assert (summary.stopped_after_epoch, summary.reason) == (3, "non_finite_metric")
++        assert (summary.best_epoch, summary.best_val_loss) == (2, pytest.approx(0.8))
++        assert summary.message is not None
++        assert "val/loss was not finite" in summary.message
++
++    def test_progress_stays_in_range_and_never_goes_back(self, tmp_path: Path) -> None:
++        """An early stop leaves progress where training stopped; the runner reports what follows."""
++        model = _ScriptedValLoss([1.0, 0.8, 0.8, 0.8])
++        progress: list[int] = []
++
++        _fit(model, tmp_path, max_epochs=10, patience=2, report=progress)
++
++        assert progress
++        assert all(0 <= value <= 100 for value in progress)
++        assert progress == sorted(progress)
++        # 4 of 10 epochs ran: no claim of completion before the job finishes.
++        assert max(progress) < 100
++
++    def test_a_cancellation_is_not_reported_as_an_early_stop(self, tmp_path: Path) -> None:
++        model = _ScriptedValLoss([1.0, 0.9, 0.8, 0.7, 0.6])
++
++        trainer, callback = _fit(model, tmp_path, max_epochs=5, patience=1, stop_after_steps=4)
++
++        assert trainer.current_epoch < 5
++        assert callback.summary(trainer).stopped_early is False
++
++
++class TestSnapFlowRun:
++    """Early stopping watches flow matching only; distillation always runs its full budget."""
++
++    def test_a_plateau_starts_distillation_early_and_distillation_runs_in_full(self, tmp_path: Path) -> None:
++        # Flow matching planned for 8 epochs, then 3 of distillation. Best at epoch 3, so patience 2
++        # ends flow matching after epoch 5. Distillation's val/loss rises (not comparable to flow
++        # matching's) and must not stop it.
++        model = _DistillableScriptedValLoss([1.0, 0.8, 0.7, 0.7, 0.7, 2.0, 3.0, 4.0])
++        progress: list[int] = []
++
++        trainer, callback = _fit(model, tmp_path, max_epochs=11, patience=2, snapflow_start_epoch=8, report=progress)
++
++        assert model.distillation_started_at == 5
++        assert trainer.current_epoch == 8
++        summary = callback.summary(trainer)
++        assert summary.model_dump() == {
++            "patience": 2,
++            "min_delta": 0.0,
++            "max_epochs": 11,
++            "epochs_trained": 8,
++            "stopped_after_epoch": 5,
++            "reason": "patience_exhausted",
++            "best_epoch": 3,
++            "best_val_loss": pytest.approx(0.7),
++            "flow_matching_epochs": 8,
++            "distillation_epochs": 3,
++        }
++        assert summary.message == (
++            "flow matching stopped early after epoch 5 of 8; best epoch 3 (val/loss 0.7); then distilled for 3 epochs"
++        )
++        # The distilled checkpoint is written beside the flow-matching one, as in a full run.
++        assert (tmp_path / "model.ckpt").is_file()
++        assert (tmp_path / "snapflow-model.ckpt").is_file()
++        assert all(0 <= value <= 100 for value in progress)
++        assert progress == sorted(progress)
++
++    def test_without_a_plateau_distillation_starts_as_planned(self, tmp_path: Path) -> None:
++        model = _DistillableScriptedValLoss([1.0, 0.9, 0.8, 5.0, 6.0])
++
++        trainer, callback = _fit(model, tmp_path, max_epochs=5, patience=1, snapflow_start_epoch=3)
++
++        assert model.distillation_started_at == 3
++        assert trainer.current_epoch == 5
++        assert callback.summary(trainer).stopped_early is False
++
++    def test_a_plateau_reached_in_the_last_flow_matching_epoch_changes_nothing(self, tmp_path: Path) -> None:
++        model = _DistillableScriptedValLoss([1.0, 0.9, 0.9, 0.9, 1.0, 1.0])
++
++        trainer, callback = _fit(model, tmp_path, max_epochs=6, patience=2, snapflow_start_epoch=4)
++
++        assert model.distillation_started_at == 4
++        assert trainer.current_epoch == 6
++        assert callback.summary(trainer).stopped_early is False
+diff --git a/application/backend/tests/training/test_job.py b/application/backend/tests/training/test_job.py
+index e9c99ed3..82858705 100644
+--- a/application/backend/tests/training/test_job.py
++++ b/application/backend/tests/training/test_job.py
+@@ -26,17 +26,24 @@ from unittest.mock import MagicMock, patch
+ import pytest
+ from physicalai.export import ExportablePolicyMixin, ExportBackend
+ from pydantic import SecretStr, ValidationError
++from tests.old_trainer import EARLY_STOPPING_FIELDS, old_trainer_rejection
+ 
+ from api.policies import _available_policy_classes
+ from training import RunOptions, TrainingJobSpec
+ from training.job import (
+     CHECKPOINT_NAME,
++    EARLY_STOPPING_SUMMARY_NAME,
++    EARLY_STOPPING_UNSUPPORTED_MESSAGE,
+     EXPORTS_DIRNAME,
+     PEFT_POLICIES,
+     PRETRAINED_BASE_CHECKPOINTS,
+     SNAPFLOW_CHECKPOINT_NAME,
++    EarlyStoppingSummary,
+     _load_policy_from_checkpoint,
+     build_policy,
++    completion_message,
++    explain_trainer_rejection,
++    read_early_stopping_summary,
+     resolve_checkpoint,
+     run_training_job,
+ )
+@@ -129,6 +136,124 @@ class TestTrainingJobSpec:
+             TrainingJobSpec(policy="pi05", max_epochs=5, snapflow_start_epoch=0)
+ 
+ 
++class TestEarlyStoppingSpec:
++    """Early stopping is opt-in, and a spec without it must still reach a trainer that predates it."""
++
++    def test_early_stopping_is_off_by_default(self) -> None:
++        spec = TrainingJobSpec(policy="act")
++
++        assert (spec.early_stopping_patience, spec.early_stopping_min_delta) == (None, 0.0)
++
++    def test_an_ordinary_spec_serializes_without_early_stopping_fields(self) -> None:
++        dumped = TrainingJobSpec(policy="act").model_dump(mode="json")
++
++        assert not set(EARLY_STOPPING_FIELDS) & set(dumped)
++
++    def test_an_ordinary_spec_validates_on_a_trainer_without_early_stopping(self) -> None:
++        """The Modal app, AWS Batch image, or trainer service may run older code."""
++        spec = TrainingJobSpec(policy="pi05", max_epochs=8, snapflow_start_epoch=5, lora_enabled=True)
++
++        assert old_trainer_rejection(spec.model_dump_json(exclude={"run_options"})) is None
++
++    def test_an_early_stopping_spec_is_rejected_by_such_a_trainer_and_explained(self) -> None:
++        """Never silently trained without it: the old trainer refuses, and Studio says why."""
++        spec = TrainingJobSpec(policy="act", early_stopping_patience=5)
++
++        rejection = old_trainer_rejection(spec.model_dump_json(exclude={"run_options"}))
++
++        assert rejection is not None
++        assert explain_trainer_rejection(rejection) == EARLY_STOPPING_UNSUPPORTED_MESSAGE
++
++    @pytest.mark.parametrize(
++        "error_text",
++        [
++            None,
++            "",
++            "CUDA out of memory",
++            "1 validation error for TrainingJobSpec\nlearning_rate\n  Extra inputs are not permitted",
++        ],
++    )
++    def test_other_failures_are_left_alone(self, error_text: str | None) -> None:
++        assert explain_trainer_rejection(error_text) is None
++
++    def test_an_early_stopping_spec_round_trips_through_json(self) -> None:
++        spec = TrainingJobSpec(policy="act", early_stopping_patience=4, early_stopping_min_delta=0.01)
++
++        dumped = spec.model_dump(mode="json")
++        assert (dumped["early_stopping_patience"], dumped["early_stopping_min_delta"]) == (4, 0.01)
++        assert TrainingJobSpec.model_validate_json(spec.model_dump_json()) == spec
++
++    def test_a_zero_min_delta_is_not_sent(self) -> None:
++        """0 is the default on both ends; leaving it out keeps the wire minimal."""
++        dumped = TrainingJobSpec(policy="act", early_stopping_patience=4).model_dump(mode="json")
++
++        assert dumped["early_stopping_patience"] == 4
++        assert "early_stopping_min_delta" not in dumped
++
++    def test_min_delta_without_patience_is_dropped(self) -> None:
++        """It has no effect without early stopping, so it must not make the spec unsendable to an old trainer."""
++        spec = TrainingJobSpec(policy="act", early_stopping_min_delta=0.5)
++
++        assert spec.early_stopping_min_delta == 0.0
++        assert old_trainer_rejection(spec.model_dump_json(exclude={"run_options"})) is None
++
++    def test_early_stopping_needs_a_validation_split(self) -> None:
++        with pytest.raises(ValidationError, match="needs a validation split"):
++            TrainingJobSpec(policy="act", val_split=0.0, early_stopping_patience=3)
++
++    def test_no_validation_split_is_fine_without_early_stopping(self) -> None:
++        assert TrainingJobSpec(policy="act", val_split=0.0).early_stopping_patience is None
++
++    @pytest.mark.parametrize("invalid", [{"early_stopping_patience": 0}, {"early_stopping_min_delta": -0.1}])
++    def test_out_of_range_early_stopping_values_are_rejected(self, invalid: dict) -> None:
++        with pytest.raises(ValidationError):
++            TrainingJobSpec(policy="act", **{"early_stopping_patience": 3, **invalid})
++
++
++class TestEarlyStoppingSummary:
++    @staticmethod
++    def _write(model_dir: Path, **fields: Any) -> None:
++        model_dir.mkdir(parents=True, exist_ok=True)
++        summary = EarlyStoppingSummary(patience=3, min_delta=0.0, max_epochs=30, epochs_trained=12, **fields)
++        (model_dir / EARLY_STOPPING_SUMMARY_NAME).write_text(summary.model_dump_json())
++
++    def test_a_model_without_a_summary_simply_finished(self, tmp_path: Path) -> None:
++        assert read_early_stopping_summary(tmp_path) is None
++        assert completion_message(tmp_path) == "Training finished"
++
++    def test_an_early_stop_is_named_in_the_completion_message(self, tmp_path: Path) -> None:
++        self._write(tmp_path, stopped_after_epoch=12, reason="patience_exhausted", best_epoch=9, best_val_loss=0.51943)
++
++        assert completion_message(tmp_path) == (
++            "Training finished: stopped early after epoch 12 of 30; best epoch 9 (val/loss 0.5194)"
++        )
++
++    def test_a_run_early_stopping_never_ended_simply_finished(self, tmp_path: Path) -> None:
++        self._write(tmp_path, best_epoch=30, best_val_loss=0.4)
++
++        assert completion_message(tmp_path) == "Training finished"
++
++    def test_a_snapflow_run_says_distillation_followed(self, tmp_path: Path) -> None:
++        self._write(
++            tmp_path,
++            stopped_after_epoch=6,
++            best_epoch=4,
++            best_val_loss=0.3,
++            flow_matching_epochs=27,
++            distillation_epochs=3,
++        )
++
++        assert completion_message(tmp_path) == (
++            "Training finished: flow matching stopped early after epoch 6 of 27; best epoch 4 (val/loss 0.3); "
++            "then distilled for 3 epochs"
++        )
++
++    def test_an_unreadable_summary_does_not_fail_the_job(self, tmp_path: Path) -> None:
++        (tmp_path / EARLY_STOPPING_SUMMARY_NAME).write_text("{not json")
++
++        assert completion_message(tmp_path) == "Training finished"
++
++
+ class TestBuildPolicy:
+     def test_studio_trainable_policy_constructors_accept_wizard_arguments(self) -> None:
+         """Bind Studio's actual kwargs to opt-in constructors without downloading weights."""
+@@ -695,6 +820,104 @@ class TestRunTrainingJob:
+ SNAPFLOW_SPEC = TrainingJobSpec(policy="pi05", max_epochs=8, snapflow_start_epoch=5)
+ 
+ 
++class TestEarlyStoppingRun:
++    """How ``run_training_job`` wires early stopping; the stopping itself is in test_early_stopping.py."""
++
++    @staticmethod
++    def _early_stopping_callback(trainer_class: MagicMock) -> Any | None:
++        from training.early_stopping import ValLossEarlyStopping
++
++        callbacks = trainer_class.call_args.kwargs["callbacks"]
++        return next((c for c in callbacks if isinstance(c, ValLossEarlyStopping)), None)
++
++    @staticmethod
++    def _stopped_summary() -> EarlyStoppingSummary:
++        return EarlyStoppingSummary(
++            patience=2,
++            min_delta=0.0,
++            max_epochs=20,
++            epochs_trained=7,
++            stopped_after_epoch=7,
++            reason="patience_exhausted",
++            best_epoch=5,
++            best_val_loss=0.25,
++        )
++
++    def test_an_ordinary_run_gets_no_early_stopping(self, tmp_path: Path) -> None:
++        from lightning.pytorch.callbacks import EarlyStopping
++
++        trainer_class = _run(TrainingJobSpec(policy="act"), tmp_path)
++
++        callbacks = trainer_class.call_args.kwargs["callbacks"]
++        assert not any(isinstance(callback, EarlyStopping) for callback in callbacks)
++        assert not (tmp_path / "model" / EARLY_STOPPING_SUMMARY_NAME).exists()
++
++    def test_early_stopping_watches_val_loss_with_the_spec_settings(self, tmp_path: Path) -> None:
++        spec = TrainingJobSpec(policy="act", early_stopping_patience=4, early_stopping_min_delta=0.01)
++
++        with patch("training.early_stopping.ValLossEarlyStopping.summary", return_value=self._stopped_summary()):
++            trainer_class = _run(spec, tmp_path)
++
++        callback = self._early_stopping_callback(trainer_class)
++        assert callback is not None
++        assert (callback.monitor, callback.mode, callback.patience) == ("val/loss", "min", 4)
++        # Lightning stores min_delta signed by mode; the magnitude is what was asked for.
++        assert abs(callback.min_delta) == pytest.approx(0.01)
++        # It ranks epochs by the metric the published checkpoint is chosen by.
++        checkpoint = next(
++            c for c in trainer_class.call_args.kwargs["callbacks"] if type(c).__name__ == "ModelCheckpoint"
++        )
++        assert (checkpoint.monitor, checkpoint.mode) == (callback.monitor, callback.mode)
++
++    def test_on_a_snapflow_run_it_is_tied_to_the_phase_callback(self, tmp_path: Path) -> None:
++        spec = TrainingJobSpec(policy="pi05", max_epochs=8, snapflow_start_epoch=5, early_stopping_patience=2)
++
++        with patch("training.early_stopping.ValLossEarlyStopping.summary", return_value=self._stopped_summary()):
++            trainer_class = _run(spec, tmp_path)
++
++        callback = self._early_stopping_callback(trainer_class)
++        snapflow = next(
++            c for c in trainer_class.call_args.kwargs["callbacks"] if type(c).__name__ == "SnapFlowPhaseCallback"
++        )
++        assert callback is not None
++        assert callback._snapflow is snapflow
++
++    def test_an_early_stop_is_recorded_in_the_model_and_reported(self, tmp_path: Path) -> None:
++        report = MagicMock()
++        spec = TrainingJobSpec(policy="act", early_stopping_patience=2)
++
++        with patch("training.early_stopping.ValLossEarlyStopping.summary", return_value=self._stopped_summary()):
++            _run(spec, tmp_path, report=report)
++
++        assert read_early_stopping_summary(tmp_path / "model") == self._stopped_summary()
++        report.assert_any_call(99, "Stopped early after epoch 7 of 20; best epoch 5 (val/loss 0.25)", {})
++        # The checkpoint and export still follow, as for a run that used all its epochs.
++        assert (tmp_path / "model" / CHECKPOINT_NAME).is_file()
++
++    def test_a_run_early_stopping_did_not_end_records_that_too(self, tmp_path: Path) -> None:
++        report = MagicMock()
++        summary = self._stopped_summary().model_copy(update={"stopped_after_epoch": None, "reason": None})
++
++        with patch("training.early_stopping.ValLossEarlyStopping.summary", return_value=summary):
++            _run(TrainingJobSpec(policy="act", early_stopping_patience=2), tmp_path, report=report)
++
++        assert read_early_stopping_summary(tmp_path / "model") == summary
++        assert not any("Stopped early" in str(call.args[1]) for call in report.call_args_list)
++
++    def test_a_summary_that_cannot_be_built_does_not_fail_the_run(self, tmp_path: Path) -> None:
++        with patch("training.early_stopping.ValLossEarlyStopping.summary", side_effect=RuntimeError("boom")):
++            _run(TrainingJobSpec(policy="act", early_stopping_patience=2), tmp_path)
++
++        assert (tmp_path / "model" / CHECKPOINT_NAME).is_file()
++        assert not (tmp_path / "model" / EARLY_STOPPING_SUMMARY_NAME).exists()
++
++    def test_a_canceled_run_records_nothing(self, tmp_path: Path) -> None:
++        with patch("training.early_stopping.ValLossEarlyStopping.summary") as summary:
++            _run(TrainingJobSpec(policy="act", early_stopping_patience=2), tmp_path, should_stop=True)
++
++        summary.assert_not_called()
++
++
+ class TestSnapFlowDistillation:
+     """A distillation run keeps two checkpoints, and export/resolve pick the distilled one."""
+ 
+diff --git a/application/backend/tests/workers/test_training_worker.py b/application/backend/tests/workers/test_training_worker.py
+index 7a4e05e5..aeb87b1d 100644
+--- a/application/backend/tests/workers/test_training_worker.py
++++ b/application/backend/tests/workers/test_training_worker.py
+@@ -7,7 +7,7 @@ import multiprocessing as mp
+ import queue
+ from contextlib import asynccontextmanager
+ from datetime import UTC, datetime
+-from typing import TYPE_CHECKING
++from pathlib import Path
+ from unittest.mock import AsyncMock, MagicMock, patch
+ from uuid import UUID, uuid4
+ 
+@@ -19,10 +19,6 @@ from schemas.job import LocalTrainJobPayload, RemoteTrainJobPayload, TrainingPre
+ from schemas.model import Model
+ from services.snapshot_service import SnapshotService
+ 
+-if TYPE_CHECKING:
+-    from pathlib import Path
+-
+-
+ MODULE = "workers.training_worker"
+ 
+ 
+@@ -37,6 +33,7 @@ def _make_payload(
+     precision: TrainingPrecision = TrainingPrecision.BF16_MIXED,
+     lora_enabled: bool = False,
+     lora_use_dora: bool = False,
++    early_stopping_patience: int | None = None,
+ ) -> TrainJobPayload:
+     return LocalTrainJobPayload(
+         project_id=uuid4(),
+@@ -51,6 +48,7 @@ def _make_payload(
+         precision=precision,
+         lora_enabled=lora_enabled,
+         lora_use_dora=lora_use_dora,
++        early_stopping_patience=early_stopping_patience,
+     )
+ 
+ 
+@@ -338,6 +336,51 @@ class TestTraining:
+             backend.train.assert_awaited_once()
+             model_service.create_model.assert_awaited_once_with(model)
+             assert job_service.update_job_status.call_args_list[0].kwargs["status"] == JobStatus.COMPLETED
++            assert job_service.update_job_status.call_args_list[0].kwargs["message"] == "Training finished"
++
++    @pytest.mark.anyio
++    async def test_an_early_stop_is_named_in_the_completed_jobs_message(self, worker, tmp_path):
++        """Every backend leaves the summary in the model directory; the final status reads it from there."""
++        from training.job import EARLY_STOPPING_SUMMARY_NAME, EarlyStoppingSummary
++
++        payload = _make_payload(early_stopping_patience=2)
++        model = _make_model(tmp_path)
++        job = _make_job(payload)
++        summary = EarlyStoppingSummary(
++            patience=2,
++            min_delta=0.0,
++            max_epochs=20,
++            epochs_trained=7,
++            stopped_after_epoch=7,
++            best_epoch=5,
++            best_val_loss=0.25,
++        )
++
++        async def train(_context):
++            (Path(model.path) / EARLY_STOPPING_SUMMARY_NAME).write_text(summary.model_dump_json())
++
++        backend = MagicMock()
++        backend.train = AsyncMock(side_effect=train)
++        dispatcher = MagicMock()
++        dispatcher.is_alive = MagicMock(return_value=False)
++
++        with (
++            patch(f"{MODULE}.get_settings", return_value=_make_settings(tmp_path)),
++            patch(f"{MODULE}.get_training_backend", AsyncMock(return_value=backend)),
++            patch(f"{MODULE}.TrainingTrackingDispatcher", return_value=dispatcher),
++            patch(f"{MODULE}.JobService") as MockJobService,
++            patch(f"{MODULE}.ModelService") as MockModelService,
++        ):
++            job_service = MockJobService.return_value
++            job_service.update_job_status = AsyncMock(return_value=MagicMock(id=job.id))
++            job_service.update_job = AsyncMock(return_value=MagicMock())
++            MockModelService.return_value.create_model = AsyncMock(return_value=model)
++
++            await worker._train_model(job, model, _make_snapshot(tmp_path), payload, base_model=None)
++
++        final = job_service.update_job_status.call_args_list[0].kwargs
++        assert final["status"] == JobStatus.COMPLETED
++        assert final["message"] == "Training finished: stopped early after epoch 7 of 20; best epoch 5 (val/loss 0.25)"
+ 
+     @pytest.mark.anyio
+     async def test_context_passes_output_and_cache_dirs(self, worker, tmp_path):
+-- 
+2.53.0
+
