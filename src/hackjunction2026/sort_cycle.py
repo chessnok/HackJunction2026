@@ -72,6 +72,9 @@ class Config:
     photo_clear_frac: float = 0.5    # photo: arm this far from the raised photo pose towards observe
     clear_speed: float = 15.0        # units/s for that move (user: faster is fine there)
     retry_raise_mm: float = 30.0
+    servo_iters: int = 4             # wrist-camera centring steps at the hover
+    servo_tol_mm: float = 2.0
+    servo_max_step_mm: float = 30.0
     photo_px: dict | None = None     # camera -> (u, v) where it sees the photo spot (inspection fallback)
     photo_roi_px: int = 260     # each grasp retry hovers this much higher
     ik_gripper: float = 22.6         # jaw value with a brick held: the IK tool point is the CLOSED jaw centre
@@ -899,6 +902,7 @@ class Cycle:
                         if not str(e).startswith("IK") or hover_mm <= cfg.hover_mm:
                             raise
                         hover_mm = max(cfg.hover_mm, hover_mm - 10.0)
+                target = self.centre_on_brick(target, hover_mm)
                 self.enter(S.GRASP)
                 r = self.grasper.grasp(mv, target, hover)
                 self.log("grasp", attempt=attempt, ok=r.ok, reason=r.reason)
@@ -907,6 +911,35 @@ class Cycle:
             print(f"  {cfg.retries_per_brick} failed grasps: starting over from observe")
             self.log("retries_exhausted", round=attempt_round)
         raise StopCycle("could not grasp the brick after starting over")
+
+    def centre_on_brick(self, target: Target, hover_mm: float) -> Target:
+        """Wrist-camera centring at the hover (configs/servo.yaml, scripts/servo_calib.py): move until the brick
+        shows where a brick under the closed jaws does. Corrects the pixel->mm and sag errors before the grasp."""
+        from hackjunction2026 import servo
+        model = servo.ServoModel.load()
+        if model is None or self.dry_run:
+            return target
+        mv, cfg = self.mv, self.cfg
+        xy = np.asarray(target.xy, float)
+        if abs(hover_mm - model.hover_mm) > 1.0:
+            mv.aim(xy, model.hover_mm, target.yaw_deg, cfg.gripper_open, "back to the centring height")
+        for k in range(cfg.servo_iters):
+            frame = self.cams.wrist()
+            self.save(f"centre_{k}", frame)
+            px = servo.brick_px(frame, near=model.target_px)
+            if px is None:
+                print("    centring: brick not seen from the hover; keeping the aim")
+                break
+            yaw = servo.directed_yaw_deg(mv.arm.read(), mv.cal)
+            d = model.correction_mm(px, yaw)
+            self.log("centre", k=k, px=px, step_mm=np.round(d, 1), yaw=round(yaw, 1))
+            print(f"    centring {k}: brick at ({px[0]:.0f}, {px[1]:.0f}) px, step {np.hypot(*d):.1f} mm")
+            if float(np.hypot(*d)) <= cfg.servo_tol_mm:
+                break
+            d = np.clip(d, -cfg.servo_max_step_mm, cfg.servo_max_step_mm)
+            xy = xy + d
+            mv.aim(xy, model.hover_mm, target.yaw_deg, cfg.gripper_open, f"centring step {k}", tries=1)
+        return Target((float(xy[0]), float(xy[1])), target.yaw_deg, target.colour, target.source + " + wrist centring")
 
     def locate(self, q: np.ndarray) -> Target | None:
         cfg = self.cfg
