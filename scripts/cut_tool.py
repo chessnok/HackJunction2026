@@ -3,14 +3,14 @@
 
 Serves a page on http://127.0.0.1:8765 that plays the OLD dataset's own videos (no re-encoding, nothing leaves
 the laptop). Each decision is written at once to the overrides file read by scripts/grasp_merge.py
-(`episode,cut_frame` or `episode,skip`).
+(`episode,cut_frame[,end_frame]` or `episode,skip`).
 
   PY=third_party/physical-ai-studio/application/backend/.venv/bin/python
   $PY scripts/cut_tool.py --overrides configs/grasp_merge_overrides.csv
   then open http://127.0.0.1:8765 in Firefox
 
-Keys: Space play/pause · ←/→ 1 frame · Shift+←/→ 10 frames · C set cut here · S skip episode
-      U undo (back to the automatic cut) · N / P next / previous episode · [ ] playback speed
+Keys: Space play/pause · ←/→ 1 frame · Shift+←/→ 10 frames · C start here · E end here (last kept frame)
+      R clear the end · S skip episode · U all back to automatic · N / P next / previous · [ ] speed
 """
 
 from __future__ import annotations
@@ -60,25 +60,31 @@ def load_episodes(cuts_csv: Path) -> list[dict]:
     return out
 
 
-def read_overrides(path: Path) -> dict[int, str]:
+def read_overrides(path: Path) -> dict[int, dict]:
+    """``episode,cut_frame[,end_frame]``: cut_frame = int, ``auto`` or ``skip``; end_frame = last kept frame."""
     out = {}
     if path.exists():
         for line in path.read_text().splitlines():
             s = line.split("#", 1)[0].strip()
             if s and not s.lower().startswith("episode"):
-                ep, val = (x.strip() for x in s.split(",")[:2])
-                out[int(ep)] = val
+                parts = [x.strip() for x in s.split(",")]
+                out[int(parts[0])] = {"start": parts[1] if len(parts) > 1 and parts[1] else "auto",
+                                      "end": parts[2] if len(parts) > 2 and parts[2] else None}
     return out
 
 
-def write_override(path: Path, ep: int, val: str | None) -> dict[int, str]:
+def write_override(path: Path, ep: int, start: str | None, end: str | None) -> dict[int, dict]:
+    """Set one episode's line; start None and end None removes it."""
     with LOCK:
         lines = path.read_text().splitlines() if path.exists() else [
             "# Human corrections to the automatic cut points of scripts/grasp_merge.py (OLD dataset 431a71f7).",
-            "# episode,cut_frame  (first frame kept) or episode,skip. Written by scripts/cut_tool.py."]
+            "# episode,cut_frame[,end_frame]: cut_frame = first kept frame, 'auto' or 'skip';",
+            "# end_frame = last kept frame (inclusive), optional. Written by scripts/cut_tool.py."]
         keep = [ln for ln in lines if not re.match(rf"^\s*{ep}\s*,", ln.split("#", 1)[0])]
-        if val is not None:
-            keep.append(f"{ep},{val}")
+        if start == "skip":
+            keep.append(f"{ep},skip")
+        elif start not in (None, "auto") or end is not None:
+            keep.append(f"{ep},{start or 'auto'}" + (f",{end}" if end is not None else ""))
         tmp = path.with_suffix(".tmp")
         tmp.write_text("\n".join(keep) + "\n")
         os.replace(tmp, path)
@@ -151,8 +157,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, b"not found", "text/plain")
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         ep = int(body["episode"])
-        val = None if body.get("clear") else ("skip" if body.get("skip") else str(int(body["cut_frame"])))
-        ov = write_override(self.overrides_path, ep, val)
+        cur = read_overrides(self.overrides_path).get(ep, {"start": "auto", "end": None})
+        start, end = cur["start"], cur["end"]
+        if body.get("clear"):
+            start, end = "auto", None
+        elif body.get("skip"):
+            start, end = "skip", None
+        elif body.get("clear_end"):
+            end = None
+        elif "end_frame" in body:
+            end = str(int(body["end_frame"]))
+            if start == "skip":
+                start = "auto"
+        elif "cut_frame" in body:
+            start = str(int(body["cut_frame"]))
+        ov = write_override(self.overrides_path, ep, start, end)
         self._send(200, json.dumps({"overrides": {str(k): v for k, v in ov.items()}}).encode(), "application/json")
 
 
@@ -184,7 +203,7 @@ kbd{border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;paddi
 <div class="vids" id="vids"></div>
 <div class="tl" id="tl"><canvas id="cv"></canvas></div>
 <div class="bar"><span class="big" id="fr"></span>
-<button class="p" id="bc">Разрез здесь (C)</button><button id="bs">Выкинуть эпизод (S)</button><button id="bu">Вернуть авто (U)</button>
+<button class="p" id="bc">Начало здесь (C)</button><button class="p" id="be" style="background:#9c3fd6;border-color:#9c3fd6">Конец здесь (E)</button><button id="br">Сбросить конец (R)</button><button id="bs">Выкинуть эпизод (S)</button><button id="bu">Всё авто (U)</button>
 <button id="bp">◀ Пред (P)</button><button id="bn">След (N) ▶</button><span id="msg" class="msg"></span>
 <span class="muted" style="margin-left:auto"><kbd>Space</kbd> пуск <kbd>←</kbd><kbd>→</kbd> кадр <kbd>Shift</kbd>+стрелки 10 <kbd>[</kbd><kbd>]</kbd> скорость</span></div>
 </main></div>
@@ -193,10 +212,13 @@ let D,EPS,OV={},cur=0,fps=30,frame=0,rate=1,vids=[];
 const $=id=>document.getElementById(id);
 async function init(){D=await (await fetch('/api/episodes')).json();EPS=D.episodes;OV=D.overrides;fps=D.fps;
  const first=EPS.findIndex(e=>!(String(e.episode) in OV)); renderList(); load(first<0?0:first);}
-function status(e){const o=OV[String(e.episode)];if(o==='skip')return['выкинут','skip'];if(o!=null)return['кадр '+o,'set'];return['авто '+(e.auto_cut??'—'),''];}
+function status(e){const o=OV[String(e.episode)];if(o&&o.start==='skip')return['выкинут','skip'];
+ if(!o)return['авто '+(e.auto_cut??'—'),''];const st=o.start==='auto'?'авто '+(e.auto_cut??'—'):o.start;return[st+'–'+(o.end??'конец'),'set'];}
 function renderList(){$('list').replaceChildren(...EPS.map((e,i)=>{const b=document.createElement('button');const[s,c]=status(e);
  b.className=i===cur?'cur':'';b.innerHTML=`<span>ep ${e.episode} <span class="${e.confidence==='low'?'low':'muted'}">${e.confidence==='low'?'!':''}</span></span><span class="st ${c}">${s}</span>`;b.onclick=()=>load(i);return b;}));}
-function cutOf(e){const o=OV[String(e.episode)];return o==null?e.auto_cut:(o==='skip'?null:+o);}
+function cutOf(e){const o=OV[String(e.episode)];if(!o||o.start==='auto')return e.auto_cut;return o.start==='skip'?null:+o.start;}
+function endOf(e){const o=OV[String(e.episode)];return o&&o.end!=null?+o.end:e.length-1;}
+const skipped=e=>OV[String(e.episode)]?.start==='skip';
 function load(i){cur=i;const e=EPS[i];frame=Math.max(0,(cutOf(e)??e.auto_cut??0)-20);
  $('title').textContent=`эпизод ${e.episode}`;$('info').textContent=`${e.task} · ${e.length} кадров · авто-разрез ${e.auto_cut} · захват закрыт ~${e.close_frame??'—'} ${e.flags?'· '+e.flags:''}`;
  $('vids').replaceChildren();vids=['top','floor','arm'].map(c=>{const f=document.createElement('figure');const v=document.createElement('video');
@@ -211,22 +233,22 @@ function showState(){const e=EPS[cur];$('fr').textContent=`кадр ${frame} / $
  const[s]=status(e);$('state').textContent='· '+s;}
 function draw(){const cv=$('cv'),r=cv.getBoundingClientRect();cv.width=r.width*devicePixelRatio;cv.height=r.height*devicePixelRatio;const g=cv.getContext('2d');g.scale(devicePixelRatio,devicePixelRatio);
  const e=EPS[cur],W=r.width,H=r.height,x=f=>f/(e.length-1)*W;const c=cutOf(e);
- if(c!=null){g.fillStyle='rgba(67,196,122,.22)';g.fillRect(x(c),0,W-x(c),H);} else if(OV[String(e.episode)]==='skip'){g.fillStyle='rgba(255,82,82,.18)';g.fillRect(0,0,W,H);}
+ const en=endOf(e);if(c!=null&&!skipped(e)){g.fillStyle='rgba(67,196,122,.22)';g.fillRect(x(c),0,x(en)-x(c),H);} else if(skipped(e)){g.fillStyle='rgba(255,82,82,.18)';g.fillRect(0,0,W,H);}
  g.strokeStyle='#7fb2ff';g.lineWidth=1.5;g.beginPath();e.gripper.forEach((v,i)=>{const y=H-4-(v/100)*(H-8);i?g.lineTo(x(i),y):g.moveTo(x(i),y);});g.stroke();
  const mark=(f,col,w)=>{if(f==null)return;g.fillStyle=col;g.fillRect(x(f)-w/2,0,w,H);};
- mark(e.auto_cut,'#ffb300',2);mark(c,'#ff5252',3);mark(e.close_frame,'#00e5ff',1);mark(frame,'#ffffff',2);
- g.fillStyle='#93a0a1';g.font='11px system-ui';g.fillText('синяя линия: захват (вверх = открыт) · жёлтая: авто · красная: разрез · голубая: захват закрыт',6,12);}
+ mark(e.auto_cut,'#ffb300',2);mark(c,'#ff5252',3);if(en<e.length-1)mark(en,'#d16bff',3);mark(e.close_frame,'#00e5ff',1);mark(frame,'#ffffff',2);
+ g.fillStyle='#93a0a1';g.font='11px system-ui';g.fillText('синяя линия: захват (вверх = открыт) · жёлтая: авто · красная: начало · фиолетовая: конец · голубая: захват закрыт',6,12);}
 async function post(body){const r=await fetch('/api/cut',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({episode:EPS[cur].episode,...body})});
  OV=(await r.json()).overrides;renderList();draw();showState();$('msg').textContent='сохранено';setTimeout(()=>$('msg').textContent='',1200);}
-const setCut=()=>post({cut_frame:frame}),skip=()=>post({skip:true}),undo=()=>post({clear:true});
+const setCut=()=>post({cut_frame:frame}),skip=()=>post({skip:true}),undo=()=>post({clear:true}),setEnd=()=>post({end_frame:frame}),clearEnd=()=>post({clear_end:true});
 const next=()=>{pause();load(Math.min(EPS.length-1,cur+1));},prev=()=>{pause();load(Math.max(0,cur-1));};
-$('bc').onclick=setCut;$('bs').onclick=skip;$('bu').onclick=undo;$('bn').onclick=next;$('bp').onclick=prev;
+$('bc').onclick=setCut;$('be').onclick=setEnd;$('br').onclick=clearEnd;$('bs').onclick=skip;$('bu').onclick=undo;$('bn').onclick=next;$('bp').onclick=prev;
 $('tl').onclick=ev=>{const r=$('tl').getBoundingClientRect();pause();seek((ev.clientX-r.left)/r.width*(EPS[cur].length-1));};
 addEventListener('resize',draw);
 addEventListener('keydown',ev=>{if(ev.target.tagName==='INPUT')return;const k=ev.key,n=ev.shiftKey?10:1;
  if(k===' '){ev.preventDefault();vids[0].paused?play():pause();}
  else if(k==='ArrowRight'){ev.preventDefault();pause();seek(frame+n);}else if(k==='ArrowLeft'){ev.preventDefault();pause();seek(frame-n);}
- else if(k==='c'||k==='C'||k==='с'||k==='С'){setCut();}else if(k==='s'||k==='S'||k==='ы'||k==='Ы'){skip();}else if(k==='u'||k==='U'||k==='г'||k==='Г'){undo();}
+ else if(k==='c'||k==='C'||k==='с'||k==='С'){setCut();}else if(k==='e'||k==='E'||k==='у'||k==='У'){setEnd();}else if(k==='r'||k==='R'||k==='к'||k==='К'){clearEnd();}else if(k==='s'||k==='S'||k==='ы'||k==='Ы'){skip();}else if(k==='u'||k==='U'||k==='г'||k==='Г'){undo();}
  else if(k==='n'||k==='N'||k==='т'||k==='Т'){next();}else if(k==='p'||k==='P'||k==='з'||k==='З'){prev();}
  else if(k===']'||k==='ъ'){rate=Math.min(4,rate*2);for(const v of vids)v.playbackRate=rate;showState();}else if(k==='['||k==='х'){rate=Math.max(.25,rate/2);for(const v of vids)v.playbackRate=rate;showState();}});
 init();
