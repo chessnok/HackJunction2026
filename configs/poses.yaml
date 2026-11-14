@@ -44,3 +44,15 @@ bowl_defect:
   saved: '2026-11-14T09:37:45'
   snapshot: 20261114-093745-985
   note: release over the defect bowl. Read from Studio's teleop session via a state snapshot, all joints as measured.
+bowl_good:
+  joints:
+    shoulder_pan: -71.66
+    shoulder_lift: 25.15
+    elbow_flex: -23.4
+    wrist_flex: 93.75
+    wrist_roll: -53.0
+    gripper: 2.46
+  from: follower
+  saved: '2026-11-14T09:42:34'
+  snapshot: 20261114-094234-251
+  note: release over the good bowl. Read via a Studio state snapshot, all joints as measured.
