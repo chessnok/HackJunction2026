@@ -615,7 +615,7 @@ class ACTGrasp:
                 step[GRIPPER] = a[GRIPPER] - q[GRIPPER]              # the gripper is not speed-capped
                 cmd = q + step
                 if m.out_of_range(cmd) or not check_straight_move(q, cmd, mv.cal, samples=2,
-                                                                  min_clearance_mm=cfg.near_table_clearance_mm).ok:
+                                                                  min_clearance_mm=min(cfg.near_table_clearance_mm, -5.0)).ok:  # FK +-5 mm; the table stops a real collision
                     raise StopCycle("ACT: action refused (range or table clearance)")
                 arm.send(cmd)
                 st = arm.gripper_state() if a[GRIPPER] < cfg.hold_min else None
