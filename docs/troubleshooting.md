@@ -29,6 +29,24 @@ Template:
   `scripts/pick_above.py plan` prints the command in this form; a test parses it with the same
   argparse layout.
 - Refs: ADR 0007, README "Hover above a brick", log 2026-11-14
+## T-016. OVMS 2026.4.1 (Ubuntu 24 build) on Ubuntu 26.04: `libxml2.so.2 => not found`
+
+- Date: 2026-11-14 · Status: Workaround
+- Symptom: `ldd ~/opt/ovms/current/bin/ovms` (tarball `ovms_ubuntu24_2026.4.1_python_off.tar.gz`,
+  sha256 `2b719867…b3f8`) prints `libxml2.so.2 => not found`, for `bin/ovms`, `lib/libovms_shared.so`
+  and `lib/libazure-storage-{common,blobs,files-shares}.so`; the server cannot start. There is no
+  Ubuntu 26 build of OVMS yet.
+- Cause: Ubuntu 26.04 ships libxml2 2.14+ with the new soname `libxml2.so.16` only. In OVMS, only
+  the bundled Azure storage SDK uses libxml2 (25 functions: `xmlTextReader*`, `xmlTextWriter*`,
+  `xmlBuffer*`, `xmlInitParser`, `xmlCleanupParser`), for `azure://` model paths.
+- Fix (workaround, no sudo): a private symlink, put on `LD_LIBRARY_PATH` by `scripts/vlm_server.sh`:
+  `mkdir -p ~/opt/ovms/compat && ln -sfn /usr/lib/x86_64-linux-gnu/libxml2.so.16 ~/opt/ovms/compat/libxml2.so.2`.
+  `libxml2.so.16` has no symbol versioning, so glibc accepts it for the `LIBXML2_2.4.30` /
+  `LIBXML2_2.6.0` references, and all 25 functions still exist. Side effect: harmless warnings
+  `libxml2.so.2: no version information available (required by libazure-storage-common.so.12.14.0)`.
+  `azure://` model paths are untested with the shim (we never use them). Cleaner alternative if ever
+  needed: extract `libxml2.so.2` (+ its `libicu74`) from the Ubuntu 24.04 `.deb`s into `compat/`.
+- Refs: ADR 0005.
 
 ## T-015. Local training on the Arc iGPU hangs at step 0: GPU page fault ("Engine memory CAT error")
 
