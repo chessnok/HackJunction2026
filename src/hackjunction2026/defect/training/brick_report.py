@@ -33,6 +33,9 @@ from hackjunction2026.defect.training.common import DATASETS_DIR, RUNS_DIR
 from hackjunction2026.defect.training.evaluate import auroc
 
 
+DEVICE_ORDER = ("CPU", "NPU", "GPU")
+
+
 def load(path: Path) -> list[dict]:
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
@@ -182,7 +185,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--out", default="outputs/anomalib/brick_report")
     a = p.parse_args(argv)
 
-    results, lines = [], []
+    results, lines, scored = [], [], {}
     hdr = ("| run | model | comp | device | AUROC crop real | AUROC brick real | AUROC crop synth | AUROC brick synth | "
            "thr | FA crop ep | FA crop snap | FA brick snap | FA brick snap 2-fold | recall crop real | "
            "recall brick real | recall crop synth | recall brick synth | latency ms |")
@@ -211,24 +214,34 @@ def main(argv: list[str] | None = None) -> None:
                 pct(m["cv_snap_b5"]["fpr_brick_snapshots"]) if m["cv_snap_b5"] and a.threshold_rule == "snap_b5" else "-",
                 pct(t["recall_crop_real"]), pct(t["recall_brick_real"]), pct(t["recall_crop_synth"]),
                 pct(t["recall_brick_synth"]), str(m["latency_ms"]["median"]) if m["latency_ms"] else "-"]) + " |")
-            if device == "CPU":
-                contact_sheet(real, DATASETS_DIR / name, t["threshold"],
-                              Path("captures/anomalib") / f"failures_{run_id}_{comp}.png")
+            scored[(run_id, comp, device)] = (real, name, t["threshold"])
     table = "\n".join(lines)
 
-    # Per-crop recall at fixed false-positive rates (CPU scores; devices agree to the third decimal).
-    fl = ["| run | comp | threshold set on | FPR target | threshold | crop FPR | recall crop real | "
-          "recall brick real | brick FPR snap | recall crop synth |", "|" + "---|" * 10]
+    # One device per run + compression for the per-crop table and the sheets: CPU, else NPU, else GPU
+    # (scores agree across devices to about the third decimal).
+    primary = {}
+    for run_id, comp, device in scored:
+        best = primary.get((run_id, comp))
+        if best is None or DEVICE_ORDER.index(device) < DEVICE_ORDER.index(best):
+            primary[(run_id, comp)] = device
+    for (run_id, comp), device in primary.items():
+        real, name, thr = scored[(run_id, comp, device)]
+        contact_sheet(real, DATASETS_DIR / name, thr, Path("captures/anomalib") / f"failures_{run_id}_{comp}.png")
+
+    # Per-crop recall at fixed false-positive rates.
+    fl = ["| run | comp | device | threshold set on | FPR target | threshold | crop FPR | recall crop real | "
+          "recall brick real | brick FPR snap | recall crop synth |", "|" + "---|" * 11]
     for m in results:
-        if m["device"] != "CPU":
+        if primary.get((m["run_id"], m["compression"])) != m["device"]:
             continue
         for k, v in m["at_fpr"].items():
             neg, target = k.split("@")
-            fl.append("| " + " | ".join([m["run_id"], m["compression"], neg, target, f"{v['threshold']:.3f}",
+            fl.append("| " + " | ".join([m["run_id"], m["compression"], m["device"], neg, target, f"{v['threshold']:.3f}",
                                          pct(v["fpr"]), pct(v["recall_crop_real"]), pct(v["recall_brick_real"]),
                                          pct(v["fpr_brick_snapshots"]), pct(v["recall_crop_synth"])]) + " |")
     flags = [f"- {m['run_id']} {m['compression']}: {f['crop']} score {f['score']} (flagged by {f['by']})"
-             for m in results if m["device"] == "CPU" for f in m["good_crops_flagged_by_gemini"]]
+             for m in results if primary.get((m["run_id"], m["compression"])) == m["device"]
+             for f in m["good_crops_flagged_by_gemini"]]
     extra = "\n".join(fl) + "\n\nGood-brick test crops flagged as marked by the label model:\n" + ("\n".join(flags) or "- none")
     print(table + "\n\n" + extra)
     out = Path(a.out)
