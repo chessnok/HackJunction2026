@@ -28,6 +28,13 @@ anomalib = [
     "triton-xpu",
 ]
 
+# Brick detection in the wrist camera, table homography, wrist-camera grab (scripts/pick_above.py):
+# uv run --extra table scripts/pick_above.py ...   Same OpenCV package as the capture extra, so the extras can be combined.
+table = [
+    "opencv-python>=4.10",
+    "pyyaml>=6",
+]
+
 [tool.uv]
 # The station laptop and our dev machines are Linux; the XPU wheels only exist for Linux / Windows.
 environments = ["sys_platform == 'linux'"]
@@ -45,12 +52,19 @@ torch = { index = "pytorch-xpu" }
 torchvision = { index = "pytorch-xpu" }
 triton-xpu = { index = "pytorch-xpu" }
 
+[dependency-groups]
+dev = ["pytest>=8"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hackjunction2026"]
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 110
