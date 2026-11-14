@@ -71,7 +71,29 @@ def arm(role: str) -> tuple[str, dict]:
     if cache.exists():
         info = json.loads(cache.read_text())
         return info["serial"], info["calibration"]
-    sys.exit(f"no calibration for the {role}: start Studio once (it holds the calibration)")
+    serial = HW_SERIALS[role]
+    print(f"(no Studio and no cache: reading the {role} calibration from the servo EEPROM)")
+    return serial, calibration_from_board(port_for(serial))
+
+
+# Fallback when Studio is down: serials from configs/hardware.yaml roles
+HW_SERIALS = {"follower": "5B3D041025", "leader": "5B91030613"}
+
+
+def calibration_from_board(port: str) -> dict:
+    """Calibration as Studio stores it, rebuilt from what the calibration wrote into each servo:
+    homing offset (addr 31, sign bit 11) and position limits (addr 9 / 11). drive_mode is 0 on SO-101."""
+    from hackjunction2026.feetech import sign_mag
+
+    calib = {}
+    with Bus(port) as bus:
+        for sid, j in enumerate(m.JOINTS, start=1):
+            vals = {k: bus.read(sid, k) for k in ("homing_offset", "min_pos", "max_pos")}
+            if None in vals.values():
+                sys.exit(f"cannot read the calibration of {j} (ID {sid}) from {port}")
+            calib[j] = {"id": sid, "drive_mode": 0, "homing_offset": sign_mag(vals["homing_offset"], 11),
+                        "range_min": vals["min_pos"], "range_max": vals["max_pos"]}
+    return calib
 
 
 def port_for(serial: str) -> str:
