@@ -65,7 +65,7 @@ def annotate_episode(ds: Dataset, frame: Frame, ep: int, step: int = 1, min_trac
     for cam in ("top", "floor"):
         f0 = ds.frame(ep, cam, 0)
         roi, _ = sheet_roi(cam, f0)
-        ctx[cam] = {"roi": roi, "excl": exclusion_mask(f0), "static": static_robot_mask(f0)}
+        ctx[cam] = {"roi": roi, "excl": exclusion_mask(f0, roi), "static": static_robot_mask(f0)}
     wanted = set(range(0, e.length, step)) | {e.length - 1}
     it = {cam: ds.iter_frames(ep, cam, wanted) for cam in ("top", "floor")}
     states = ds_states = None

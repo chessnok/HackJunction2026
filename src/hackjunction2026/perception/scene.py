@@ -45,12 +45,20 @@ def sheet_roi(cam: str, rgb: np.ndarray) -> tuple[np.ndarray, dict]:
     return roi & hull.astype(bool), lines
 
 
-def _components_hull(mask: np.ndarray, min_area: int, dilate: int, hull: bool) -> np.ndarray:
+def _components_hull(mask: np.ndarray, min_area: int, dilate: int, hull: bool,
+                     border_only: bool = False, border_min_area: int | None = None) -> np.ndarray:
+    """Union of components with area >= min_area (or >= border_min_area if they touch the image
+    border); with border_only, only components touching the border count."""
     mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
     n, lab, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     out = np.zeros(mask.shape, np.uint8)
+    H, W = mask.shape
     for i in range(1, n):
-        if stats[i, cv2.CC_STAT_AREA] < min_area:
+        x, y, w, h, area = stats[i]
+        border = x <= 2 or y <= 2 or x + w >= W - 2 or y + h >= H - 2
+        if border_only and not border:
+            continue
+        if area < min_area and not (border and border_min_area is not None and area >= border_min_area):
             continue
         comp = (lab == i).astype(np.uint8)
         if hull:
@@ -63,17 +71,26 @@ def _components_hull(mask: np.ndarray, min_area: int, dilate: int, hull: bool) -
     return out.astype(bool)
 
 
-def exclusion_mask(rgb: np.ndarray) -> np.ndarray:
+def exclusion_mask(rgb: np.ndarray, roi: np.ndarray | None = None) -> np.ndarray:
     """Static distractors in an episode's first frame: robot body (dark purple), lavender bowl,
     green bowl. Detections whose bottom-centre falls inside are ignored for the whole episode
-    (bricks already in a bowl, the robot's orange cable clip, ...)."""
+    (bricks already in a bowl, the robot's orange cable clip, ...). With `roi` (sheet ROI), robot
+    candidates are limited to 20 px around it, so dark clutter behind the table is not merged in."""
     hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
     h, s, v = (hsv[..., i].astype(np.int32) for i in range(3))
     robot = (h >= 106) & (h <= 130) & (s >= 70) & (v <= 75)
+    if roi is not None:
+        robot &= cv2.dilate(roi.astype(np.uint8), np.ones((41, 41), np.uint8)).astype(bool)
     lavender = (h >= 106) & (h <= 130) & (s >= 40) & (s < 110) & (v >= 75)
     green_bowl = (h >= 60) & (h <= 90) & (s >= 70)
-    return (_components_hull(robot, 800, 25, False) | _components_hull(lavender, 1500, 6, True)
-            | _components_hull(green_bowl, 1500, 6, True))
+    # green bowl cut by the left/right image edge: its rim looks blue-green (hue up to ~94);
+    # turquoise bricks start at hue ~95, and only the outer 60 px columns are searched
+    bowl_rim = (h >= 60) & (h <= 94) & (s >= 70)
+    bowl_rim[:, 60:-60] = False
+    return (_components_hull(robot, 800, 25, False, border_only=True)
+            | _components_hull(lavender, 1500, 6, True)
+            | _components_hull(green_bowl, 1500, 10, True)
+            | _components_hull(bowl_rim, 200, 10, True, border_only=True))
 
 
 def detect_bricks_cv(rgb: np.ndarray, roi: np.ndarray, exclude: np.ndarray | None = None,

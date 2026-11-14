@@ -20,9 +20,14 @@ HUE_RANGES = {
     "red": [(0, 7), (170, 180)],
     "yellow": [(8, 25)],
     "green": [(26, 48)],
-    "blue": [(88, 111)],
+    "blue": [(88, 107)],
 }
 COLOR_ORDER = ("red", "yellow", "green", "blue")
+# v2 (2026-11-14), from first frames of the 51 episodes outside the evaluation set: blue bricks
+# have S >= 110 (5th percentile) and H 89-106; the gripper's dark indigo is H 101-119 at V < 70;
+# shadowed green faces go down to V ~ 20 with high S.
+S_MIN = {"red": 85, "yellow": 85, "green": 85, "blue": 100}
+DARK_S_MIN, DARK_V_MIN = 120, 18  # dark but strongly saturated pixels still count
 
 
 @dataclass
@@ -49,19 +54,23 @@ class Blob:
         return 0.5 * (x0 + x1), y1
 
 
-def color_masks(rgb: np.ndarray, roi: np.ndarray | None = None, s_min: int = 85, v_min: int = 40) -> dict[str, np.ndarray]:
+def color_masks(rgb: np.ndarray, roi: np.ndarray | None = None, v_min: int = 40) -> dict[str, np.ndarray]:
     hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
-    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
-    sat = (s >= s_min) & (v >= v_min)
+    h, s, v = (hsv[..., i].astype(np.int32) for i in range(3))
+    bright = (v >= v_min) | ((v >= DARK_V_MIN) & (s >= DARK_S_MIN))
+    gripper = (h >= 102) & (h <= 135) & (s >= 85) & (v < 62)
     if roi is not None:
-        sat &= roi
+        bright &= roi
     out = {}
     k = np.ones((3, 3), np.uint8)
     for name, ranges in HUE_RANGES.items():
-        m = np.zeros_like(sat)
+        m = np.zeros(h.shape, bool)
         for lo, hi in ranges:
             m |= (h >= lo) & (h < hi)
-        m = (m & sat).astype(np.uint8)
+        m &= bright & (s >= S_MIN[name])
+        if name == "blue":
+            m &= ~gripper
+        m = m.astype(np.uint8)
         m = cv2.morphologyEx(m, cv2.MORPH_OPEN, k)
         m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k)
         out[name] = m.astype(bool)

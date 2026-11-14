@@ -30,11 +30,14 @@ def arm_mask(rgb: np.ndarray) -> np.ndarray:
 
 
 def static_robot_mask(first_rgb: np.ndarray, dilate: int = 6) -> np.ndarray:
+    """Robot parts visible with the arm at home: arm-coloured components touching the image border."""
     m = arm_mask(first_rgb).astype(np.uint8)
     n, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
     keep = np.zeros_like(m)
+    H, W = m.shape
     for i in range(1, n):
-        if stats[i, cv2.CC_STAT_AREA] >= 300:
+        x, y, w, h, area = stats[i]
+        if area >= 300 and (x <= 2 or y <= 2 or x + w >= W - 2 or y + h >= H - 2):
             keep[lab == i] = 1
     return cv2.dilate(keep, np.ones((2 * dilate + 1, 2 * dilate + 1), np.uint8)).astype(bool)
 

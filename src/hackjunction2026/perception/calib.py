@@ -118,19 +118,32 @@ class JointCalib:
         x = [np.arccos(n0[2]), np.arctan2(n0[1], n0[0])]
         x += [0.0, 0.0, 0.0] * len(self.top_runs)
         _, R, _ = self.unpack(np.r_[x, np.zeros(6 * len(self.floor_runs))])
-        for f in self.floor_runs:
-            cs = [c for c in self.corr if c.floor_run == f and c.top_run == self.ref] or \
-                 [c for c in self.corr if c.floor_run == f]
+
+        def obs(f):
             obj, img = [], []
-            for c in cs:
+            for c in self.corr:
+                if c.floor_run != f:
+                    continue
                 X = self.plane_point(n0, R[c.top_run], c.top_px)
                 g = (X - n0) / np.linalg.norm(X - n0)
                 obj.append(X + 2 * self.D * g); img.append(c.floor_px)
-            ok, rv, tv, _ = cv2.solvePnPRansac(np.array(obj), np.array(img, float), self.Kf, None,
-                                               reprojectionError=10.0, iterationsCount=1000)
-            if not ok:
-                ok, rv, tv = cv2.solvePnP(np.array(obj), np.array(img, float), self.Kf, None)
-            x += list(rv.ravel()) + list(tv.ravel())
+            return np.array(obj), np.array(img, float)
+
+        # the floor camera was only nudged between runs: solve the best-observed run first and use
+        # its pose to start the others (avoids the planar-PnP mirror solution for small runs)
+        order = sorted(self.floor_runs, key=lambda f: -len(obs(f)[0]))
+        poses = {}
+        obj, img = obs(order[0])
+        ok, rv, tv, _ = cv2.solvePnPRansac(obj, img, self.Kf, None, reprojectionError=10.0, iterationsCount=1000)
+        poses[order[0]] = (rv, tv)
+        for f in order[1:]:
+            obj, img = obs(f)
+            rv0, tv0 = poses[order[0]]
+            ok, rv, tv = cv2.solvePnP(obj, img, self.Kf, None, rv0.copy(), tv0.copy(), useExtrinsicGuess=True,
+                                      flags=cv2.SOLVEPNP_ITERATIVE)
+            poses[f] = (rv, tv)
+        for f in self.floor_runs:
+            x += list(poses[f][0].ravel()) + list(poses[f][1].ravel())
         return np.array(x, float)
 
     def fit(self, n0):

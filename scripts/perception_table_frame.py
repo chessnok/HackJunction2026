@@ -83,7 +83,7 @@ def main() -> None:
         lines[ep], bricks[ep] = {}, {}
         for cam in ("top", "floor"):
             roi, lines[ep][cam] = sheet_roi(cam, first[ep][cam])
-            bricks[ep][cam] = detect_bricks_cv(first[ep][cam], roi, exclusion_mask(first[ep][cam]))
+            bricks[ep][cam] = detect_bricks_cv(first[ep][cam], roi, exclusion_mask(first[ep][cam], roi))
     eps = sorted(first)
 
     # 2. runs: candidate top runs = changes of the sheet's left edge in the top image (a sheet move
