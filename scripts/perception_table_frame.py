@@ -24,12 +24,15 @@ from hackjunction2026.perception.geometry import apply_h, intersect
 from hackjunction2026.perception.scene import detect_bricks_cv, exclusion_mask, sheet_roi
 from hackjunction2026.perception.table_frame import fit_plane_normal
 
-# Height of the top D415 above the table in mm. Not measured with a ruler: estimated from nine
-# Duplo edges of known size read by eye in first frames (2x2 footprint 31.7 mm and body height
-# 19.2 mm in episodes 6 and 14: 103, 143, 118, 118, 120 mm; front edges of the 2x4 bricks, 63.5 mm,
-# in episodes 36 and 63, top and floor views: 133, 140, 125, 136 mm). Median 125, mean 126 mm.
-# Uncertainty about +-10 %. Every mm value in the table frame scales with this number.
-TOP_CAMERA_HEIGHT_MM = 126.0
+# Height of the top D415 above the table in mm; every mm value in the table frame scales with it.
+# Not measured with a ruler. Three estimates (2026-11-14):
+# - nine Duplo edges of known size read by eye (2x2 footprint 31.7 mm, body 19.2 mm, 2x4 front edge
+#   63.5 mm; episodes 6, 14, 36, 63): 103-143 mm, mean 126 mm;
+# - agent B's camera fit from the arm (FK, metric): 129.6 mm above the table plane;
+# - registration of B's FK gripper tip at 55 grasps to our brick positions with h = 126 mm gave a
+#   scale of 0.958, i.e. h = 126 / 0.958 = 131.5 mm (scripts/perception_register_robot.py).
+# The last one averages 50 grasps and is used. Uncertainty about +-3 %.
+TOP_CAMERA_HEIGHT_MM = 131.5
 HALF_BRICK_MM = 16.0
 CANVAS = {"x_min_mm": -50.0, "x_max_mm": 750.0, "y_min_mm": 0.0, "y_max_mm": 600.0}
 W, H = 848, 480
@@ -241,6 +244,11 @@ def main() -> None:
         Hp = np.array(cams_json[s.top_run]["H_px_to_table_mm"])
         a, b = jc.line_angles(n, R, s)
         sheet_info[s.top_run + f"/far{row_at(s.far, 424):.0f}"] = {
+            "far_left_corner_px": intersect(s.far, s.left).tolist(),
+            "far_edge_px": [(x, row_at(s.far, x)) for x in (0.0, 847.0)],
+            "left_edge_px": [(col_at(s.left, y), y) for y in (0.0, 479.0)],
+            "seam_px": [(x, row_at(s.seam, x)) for x in (0.0, 847.0)],
+            "lines_px_abc": {"far": s.far.tolist(), "left": s.left.tolist(), "seam": s.seam.tolist()},
             "far_left_corner_mm": apply_h(Hp, [intersect(s.far, s.left)])[0].tolist(),
             "far_edge_mm": apply_h(Hp, [(x, row_at(s.far, x)) for x in (150, 800)]).tolist(),
             "angle_far_left_deg": a, "angle_far_seam_deg": b,
@@ -252,7 +260,7 @@ def main() -> None:
         "episodes_seen": [eps[0], eps[-1]],
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "created_by": "scripts/perception_table_frame.py (agent A)",
-        "units": "mm; absolute scale from the estimated top-camera height (126 mm, +-10 %); u, v normalised to the canvas",
+        "units": "mm; absolute scale from the top-camera height 131.5 mm, checked against the arm FK (+-3 %); u, v normalised to the canvas",
         "convention": {
             "plane": "table / paper surface, z = 0",
             "origin": "far-left corner of the lower paper sheet as the top camera sees it in episodes "
@@ -271,6 +279,9 @@ def main() -> None:
         "canvas": CANVAS,
         "cameras": cams_json,
         "sheet_lines": sheet_info,
+        "sheet_note": "No camera sees all four sheet corners (two overlapping white sheets, both larger than the "
+                      "views). Per lower-sheet position (sheet_runs): its far-left corner, far edge and left edge, "
+                      "and the seam of the upper sheet, in top-image pixels and table mm.",
         "diagnostics": {
             "plane_normal_reference_top_cam": n.tolist(),
             "sheet_runs": cand_runs, "top_background_shift_px": {str(k): v.tolist() for k, v in bg.items()},
