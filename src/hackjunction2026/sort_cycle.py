@@ -27,6 +27,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
+import cv2
 import numpy as np
 
 from hackjunction2026 import so101_motion as m
@@ -43,7 +44,7 @@ CAPTURES = REPO / "captures/sort_cycle"
 GRIPPER = 5                      # index of the gripper in the joint vector
 GRIPPER_ID = 6                   # its bus ID
 REG_LOAD, REG_STATUS, REG_TORQUE_LIMIT = 60, 65, 48
-MAX_JOINT_SPEED = 10.0           # units/s, hard cap for arm joints (AGENTS.md, ADR 0013)
+MAX_JOINT_SPEED = 15.0           # units/s, hard cap for arm joints (AGENTS.md, ADR 0013)
 
 
 class StopCycle(Exception):
@@ -68,6 +69,11 @@ class Config:
     gripper_open: float = 90.0
     gripper_close_target: float = 0.0
     empty_closed: float = 2.5        # gripper value when it closes on nothing (agent B: 2.57)
+    photo_clear_frac: float = 0.5    # photo: arm this far from the raised photo pose towards observe
+    clear_speed: float = 15.0        # units/s for that move (user: faster is fine there)
+    retry_raise_mm: float = 30.0
+    photo_px: dict | None = None     # camera -> (u, v) where it sees the photo spot (inspection fallback)
+    photo_roi_px: int = 260     # each grasp retry hovers this much higher
     ik_gripper: float = 22.6         # jaw value with a brick held: the IK tool point is the CLOSED jaw centre
     hold_min: float = 8.0            # stopped above this when commanded closed -> holding (UNTESTED)
     load_hold_min: int = 150         # |Present_Load| (0.1 % units) above this also counts (UNTESTED)
@@ -544,6 +550,30 @@ class Detector(Protocol):
     def judge(self, frames: dict[str, np.ndarray], scene: str, out: Path | None) -> dict: ...
 
 
+def colour_blob_brick(roi: np.ndarray) -> list:
+    """Largest strongly coloured, non-purple blob of brick size in a small window, as a ``Brick`` for
+    ``crop_brick``. No sheet segmentation: it fails under the venue light in the fixed RealSense views."""
+    from hackjunction2026.defect.cropping.bricks import Brick
+    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB).astype(np.float32)
+    chroma = np.hypot(lab[..., 1] - 128, lab[..., 2] - 128)
+    hue = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)[..., 0]
+    purple = (hue >= 125) & (hue <= 165)
+    mask = ((chroma >= 18) & (lab[..., 0] >= 25) & ~purple).astype(np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, lab_img, stats, _ = cv2.connectedComponentsWithStats(mask)
+    best = None
+    for k in range(1, n):
+        x, y, w, h, a = stats[k]
+        if 600 <= a <= 0.5 * roi.shape[0] * roi.shape[1] and max(w, h) <= 3 * max(min(w, h), 1):
+            best = k if best is None or a > stats[best][4] else best
+    if best is None:
+        return []
+    cnts, _ = cv2.findContours((lab_img == best).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    hull = cv2.convexHull(max(cnts, key=cv2.contourArea)).astype(np.int32)
+    x, y, w, h, a = (int(v) for v in stats[best])
+    return [Brick(bbox=(x, y, w, h), area=a, colour="unknown", ring_white=0.0, ring_ok=0.0, fill=1.0, hull=hull)]
+
+
 class PatchCoreAndClassifier:
     """ADR 0008 with the VLM dropped: defective if PatchCore OR the mark classifier flags ANY crop."""
 
@@ -562,6 +592,25 @@ class PatchCoreAndClassifier:
         self.threshold = float(dep.get("threshold", cfg.classifier_threshold))
         self.clf = ov.Core().compile_model(str(REPO / self.classifier_xml), dep.get("device", cfg.detector_device))
 
+    def photo_spot_crops(self, frames: dict[str, np.ndarray], have: set[str]) -> list[dict]:
+        """The brick always lies at the photo spot during inspection, so when the whole-frame finder misses it in
+        a fixed camera (its sheet segmentation fails when the arm or a bowl is in view), look in a window around
+        where that camera sees the photo spot (``photo_px`` in the config)."""
+        from hackjunction2026.defect.cropping.bricks import crop_brick, find_bricks
+        out = []
+        for cam, (u, v) in (self.cfg.photo_px or {}).items():
+            if cam in have or cam not in frames:
+                continue
+            f, r = frames[cam], self.cfg.photo_roi_px // 2
+            x0, y0 = max(0, int(u) - r), max(0, int(v) - r)
+            roi = np.ascontiguousarray(f[y0:int(v) + r, x0:int(u) + r])
+            found = find_bricks(roi, self.patchcore.seg, camera=None) or colour_blob_brick(roi)
+            if found:
+                img, _, square = crop_brick(roi, found[0], self.patchcore.crop)
+                out.append({"image": img, "camera": cam, "brick": 0, "bbox": list(found[0].bbox), "square": list(square),
+                            "colour": found[0].colour, "seg_ms": 0.0, "roi": [x0, y0]})
+        return out
+
     def classify(self, crop_bgr: np.ndarray) -> float:
         from hackjunction2026.defect.training.mark_classifier import prep
 
@@ -569,6 +618,7 @@ class PatchCoreAndClassifier:
 
     def judge(self, frames: dict[str, np.ndarray], scene: str, out: Path | None) -> dict:
         crops = self.patchcore.crops_from_frames(frames)
+        crops += self.photo_spot_crops(frames, {c["camera"] for c in crops})
         pc = self.patchcore.judge_crops(crops, scene, out)
         votes = []
         for c, item in zip(crops, pc["crops"], strict=True):
@@ -839,8 +889,16 @@ class Cycle:
                 return {"result": "no brick on the sheet"}
             for attempt in range(1, cfg.retries_per_brick + 1):
                 self.enter(S.HOVER)
-                hover = mv.aim(target.xy, cfg.hover_mm, target.yaw_deg, cfg.gripper_open,
-                               f"hover over the {target.colour} brick (try {attempt})")
+                hover_mm = cfg.hover_mm + cfg.retry_raise_mm * (attempt - 1)   # higher each retry: wider view
+                while True:                                                     # ... as high as IK allows
+                    try:
+                        hover = mv.aim(target.xy, hover_mm, target.yaw_deg, cfg.gripper_open,
+                                       f"hover over the {target.colour} brick (try {attempt}, {hover_mm:.0f} mm)")
+                        break
+                    except StopCycle as e:
+                        if not str(e).startswith("IK") or hover_mm <= cfg.hover_mm:
+                            raise
+                        hover_mm = max(cfg.hover_mm, hover_mm - 10.0)
                 self.enter(S.GRASP)
                 r = self.grasper.grasp(mv, target, hover)
                 self.log("grasp", attempt=attempt, ok=r.ok, reason=r.reason)
@@ -879,7 +937,10 @@ class Cycle:
         if not self.dry_run:
             mv.arm.gripper_torque_limit(1000)
         up = mv.lifted(mv.arm.read(), cfg.raise_mm)
-        mv.move(up, "raise for the photo", near_table=True, taught=True)
+        mv.move(up, "raise for the photo", near_table=True, taught=True)   # slowly: do not drag the brick
+        clear = cfg.photo_clear_frac * self.poses["observe"] + (1 - cfg.photo_clear_frac) * mv.arm.read()
+        clear[GRIPPER] = cfg.gripper_open
+        mv.move(clear, "out of the cameras' way for the photo", speed=cfg.clear_speed)  # user: further away, faster
         self.enter(S.INSPECT)
         frames = self.cams.all()
         for k, v in frames.items():
