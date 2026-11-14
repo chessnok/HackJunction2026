@@ -154,6 +154,50 @@ def resolve_target(text: str) -> np.ndarray:
         sys.exit(f"unknown pose '{text}' (saved: {', '.join(poses) or 'none'}) and not 6 numbers")
 
 
+DIRECTIONS = CFG / "so101_directions.yaml"
+
+
+def cmd_measure_up(args) -> None:
+    """Two-step measurement on the leader: 'start' records its pose; after the operator raises the
+    arm a little by hand, 'end' stores which sign of the joint means 'up'."""
+    state = CFG / ".measure_up_start.json"
+    q = read_pose("leader")
+    if args.step == "start":
+        state.write_text(json.dumps(m.as_dict(q)))
+        print(f"start recorded ({args.joint}={q[m.JOINTS.index(args.joint)]:.2f}); now raise the leader arm "
+              "a little by hand, then run: measure-up end")
+        return
+    if not state.exists():
+        sys.exit("run 'measure-up start' first")
+    start = m.vec(json.loads(state.read_text()))
+    i = m.JOINTS.index(args.joint)
+    change = q[i] - start[i]
+    if abs(change) < 3:
+        sys.exit(f"{args.joint} changed only {change:+.2f}: raise the arm more clearly and repeat")
+    dirs = yaml.safe_load(DIRECTIONS.read_text()) if DIRECTIONS.exists() else {}
+    dirs[args.joint] = {"up": 1 if change > 0 else -1, "measured": now(),
+                        "evidence": f"leader {args.joint} {start[i]:.2f} -> {q[i]:.2f} when raised by hand"}
+    DIRECTIONS.write_text(yaml.safe_dump(dirs, sort_keys=False))
+    state.unlink()
+    print(f"{args.joint}: up = {'+' if change > 0 else '-'} (changed {change:+.2f}); saved {DIRECTIONS.relative_to(REPO)}")
+
+
+def cmd_raise(args) -> None:
+    """Relative move of one joint 'up' by a fraction of its full range (or of its current value)."""
+    dirs = yaml.safe_load(DIRECTIONS.read_text()) if DIRECTIONS.exists() else {}
+    if args.joint not in dirs:
+        sys.exit(f"'up' for {args.joint} is not measured yet: measure-up start / measure-up end")
+    i = m.JOINTS.index(args.joint)
+    q0 = read_pose("follower")
+    amount = args.frac * ((m.HI[i] - m.LO[i]) if args.of == "range" else abs(q0[i]))
+    target = q0.copy()
+    target[i] += dirs[args.joint]["up"] * amount
+    print(f"{args.joint} up by {args.frac:.3f} of its {args.of} = {amount:.1f} units: "
+          f"{q0[i]:.2f} -> {target[i]:.2f}")
+    args.target = ",".join(f"{v:.3f}" for v in target)
+    cmd_goto(args)
+
+
 def cmd_goto(args) -> None:
     target = resolve_target(args.target)
     if problems := m.out_of_range(target):
@@ -197,13 +241,27 @@ def main() -> None:
     s.add_argument("--from", dest="source", choices=["leader", "follower"], default="leader")
     s.set_defaults(fn=cmd_save)
     sub.add_parser("list", help="saved poses").set_defaults(fn=cmd_list)
+    def motion_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--speed", type=float, default=20.0, help="speed of the joint that moves most, units/s")
+        p.add_argument("--track-error", type=float, default=12.0, help="stop if the arm lags more than this")
+        p.add_argument("--go", action="store_true", help="actually move")
+        p.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+
     s = sub.add_parser("goto", help="show (dry run) or execute (--go) a straight joint-space move")
     s.add_argument("target", help="saved pose name or 6 comma-separated normalized values")
-    s.add_argument("--speed", type=float, default=20.0, help="speed of the joint that moves most, units/s")
-    s.add_argument("--track-error", type=float, default=12.0, help="stop if the arm lags more than this")
-    s.add_argument("--go", action="store_true", help="actually move")
-    s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    motion_args(s)
     s.set_defaults(fn=cmd_goto)
+    s = sub.add_parser("raise", help="move one joint 'up' by a fraction of its range (default: motor 2, 1/3)")
+    s.add_argument("--joint", default="shoulder_lift", choices=m.JOINTS[:5])
+    s.add_argument("--frac", type=float, default=1 / 3)
+    s.add_argument("--of", choices=["range", "value"], default="range",
+                   help="fraction of the joint's full range (200 units) or of its current value")
+    motion_args(s)
+    s.set_defaults(fn=cmd_raise)
+    s = sub.add_parser("measure-up", help="measure which sign is 'up' for a joint, using the leader")
+    s.add_argument("step", choices=["start", "end"])
+    s.add_argument("--joint", default="shoulder_lift", choices=m.JOINTS[:5])
+    s.set_defaults(fn=cmd_measure_up)
     args = ap.parse_args()
     args.fn(args)
 

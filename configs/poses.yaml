@@ -1,0 +1,10 @@
+pick_1:
+  joints:
+    shoulder_pan: 6.3
+    shoulder_lift: 1.81
+    elbow_flex: 51.04
+    wrist_flex: 56.32
+    wrist_roll: 0.92
+    gripper: 1.72
+  from: leader
+  saved: '2026-11-13T18:26:18'

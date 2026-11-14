@@ -35,8 +35,12 @@ def as_dict(q: np.ndarray) -> dict[str, float]:
 
 
 def out_of_range(q: np.ndarray, margin: float = 3.0) -> list[str]:
-    return [f"{j}={q[i]:.1f} outside [{LO[i] + margin:.0f}, {HI[i] - margin:.0f}]"
-            for i, j in enumerate(JOINTS) if not LO[i] + margin <= q[i] <= HI[i] - margin]
+    """Joints keep ``margin`` away from their calibrated ends; the gripper may use its full 0..100
+    (fully closed on an object is a normal target)."""
+    margins = np.array([margin] * 5 + [0.0])
+    lo, hi = LO + margins, HI - margins
+    return [f"{j}={q[i]:.1f} outside [{lo[i]:.0f}, {hi[i]:.0f}]"
+            for i, j in enumerate(JOINTS) if not lo[i] <= q[i] <= hi[i]]
 
 
 def duration(q0: np.ndarray, q1: np.ndarray, speed: float) -> float:
