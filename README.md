@@ -114,9 +114,10 @@ Training uses the Intel GPU (XPU) when available, else CPU. Exports are static b
 ## Anomalib on brick crops from the three cameras (ADR 0006, ADR 0008)
 
 Bricks are found by colour on the white sheet in the `top`, `floor` and `arm` frames, cut as a square of
-2.4x the brick, background whitened, 256x256. One crop = one model input; a brick is defective if ANY
-crop scores above the threshold. Real defects are the state snapshots flagged `defective`; Gemini
-labels each crop "mark visible?" so only crops that show the mark count as `test/defect`.
+1.4x the brick (Anomalib; the VLM uses 2.4x, ADR 0008), background whitened, 256x256. One crop = one
+model input; a brick is defective if ANY crop scores above the threshold. Real defects are the state
+snapshots flagged `defective`; Gemini (`gemini-4-argon`) labels each crop "mark visible?" so only crops
+that show the mark count as `test/defect`. Results and the chosen threshold: ADR 0006.
 
 **Environment:** Anomalib lives in its own env `anomalib-env/` (anomalib 2.7.0, torch 2.15.0+xpu,
 openvino 2026.4.1, ~7.9 GB) so it never locks the project `.venv`. Every anomalib command needs
@@ -126,20 +127,22 @@ it (that starts the 8 GB install into `.venv` again and blocks everyone's `uv ru
 ```bash
 export UV_PROJECT_ENVIRONMENT=$PWD/anomalib-env OMP_NUM_THREADS=4 MKL_NUM_THREADS=4
 STUDIO_PY=third_party/physical-ai-studio/application/backend/.venv/bin/python   # has av + pyarrow
-# 1. crops: dataset episodes (train/test split by episode) + every snapshot (test), + SYNTHETIC eval set
-nice -n 19 $STUDIO_PY scripts/brick_crops.py --name bricks_v1s --dataset 431a71f7 --snapshots 0fd76ff2 \
-    --snapshot-train-frac 0.5 --synthetic
-# 2. per-crop labels with Gemini (AI_STUDIO_API_KEY in .env; only masked brick crops are sent; cached)
-uv run --no-project --script scripts/label_crops_gemini.py --dataset bricks_v1s --apply
-# 3. train + evaluate on CPU (T-015), then the synthetic set and the other devices
-nice -n 19 scripts/anomalib.sh training.train_patchcore --dataset bricks_v1s --accelerator cpu --num-workers 2
-nice -n 19 scripts/anomalib.sh training.evaluate --run <run_id> --dataset bricks_v1s-synth
+# 1. crops: dataset episodes (train/test split by episode) + snapshots (half of the good ones in train,
+#    hour-stratified time blocks; defective ones in test only) + a SYNTHETIC-stroke eval set (~5 min)
+nice -n 19 $STUDIO_PY scripts/brick_crops.py --name bricks_z14t --zoom 1.4 --max-train 400 --max-test-episodes 400 \
+    --dataset 431a71f7 --snapshots 0fd76ff2 --snapshot-train-frac 0.5 --synthetic
+# 2. per-crop labels with Gemini (AI_STUDIO_API_KEY in .env; only masked brick crops are sent; cached per crop)
+uv run --no-project --script scripts/label_crops_gemini.py --dataset bricks_z14t --model gemini-4-argon --apply
+# 3. train + evaluate on CPU (T-015; ~12 min, T-019), then the synthetic set and the other devices
+nice -n 19 scripts/anomalib.sh training.train_patchcore --dataset bricks_z14t --accelerator cpu --num-workers 2 --coreset 0.004
+nice -n 19 scripts/anomalib.sh training.evaluate --run <run_id> --dataset bricks_z14t-synth
 nice -n 19 scripts/anomalib.sh training.evaluate --run <run_id> --device NPU
 scripts/anomalib.sh training.brick_report --runs <run_id> [...]     # → outputs/anomalib/brick_report.md
 # 4. run it: one JSON line per scene (OR over crops), heatmaps optional; model/threshold/device from
 #    configs/anomalib_deploy.yaml (openvino + opencv only: anomalib-env or Studio's env)
 anomalib-env/bin/python scripts/brick_anomaly.py --heatmaps --snapshot 20261114-051059-914
-anomalib-env/bin/python scripts/brick_anomaly.py --benchmark CPU,GPU,NPU --bench-crops captures/anomalib/dataset/bricks_v1s/test/good
+anomalib-env/bin/python scripts/brick_anomaly.py --run <run_id> --device NPU --snapshot <id>   # try a run
+anomalib-env/bin/python scripts/brick_anomaly.py --benchmark CPU,GPU,NPU --bench-crops captures/anomalib/dataset/bricks_z14t/test/good
 ```
 
 Retrain in one command (e.g. on inspection-pose recordings): `scripts/brick_retrain.sh <name> patchcore --

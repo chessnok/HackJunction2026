@@ -210,7 +210,8 @@ def compare_models(rows: list[dict], cache: dict, lab: Labeler, other: str) -> N
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dataset", required=True, help="name under captures/anomalib/dataset/")
-    p.add_argument("--model", default="gemini-pro-latest")
+    p.add_argument("--model", default="gemini-4-argon",
+                   help="label model (default gemini-4-argon; fallback gemini-3.1-pro-preview = gemini-pro-latest)")
     p.add_argument("--which", choices=("snapshots", "defect", "test", "all"), default="snapshots",
                    help="snapshots: every crop of every state snapshot (default); defect: defective bricks only; "
                         "test: every test crop; all: every crop")

@@ -303,10 +303,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--pose-tol", type=float, default=6.0, help="max joint difference for --pose, normalized units")
     p.add_argument("--defect-task", default=DEFECT_TASK, help="regex on the episode task: defective-brick episodes")
     p.add_argument("--test-frac", type=float, default=0.2, help="share of episodes (per task) held out for test")
-    p.add_argument("--max-train", type=int, default=800, help="cap on train/good crops (whole frames, stratified)")
-    p.add_argument("--max-test-episodes", type=int, default=450, help="cap on test/good crops from dataset episodes")
+    p.add_argument("--max-train", type=int, default=400,
+                   help="cap on dataset-episode train/good crops (whole frames, stratified); PatchCore coreset time grows with it (T-019)")
+    p.add_argument("--max-test-episodes", type=int, default=400, help="cap on test/good crops from dataset episodes")
     p.add_argument("--size", type=int, default=256, help="crop size = model input (training --image-size)")
-    p.add_argument("--zoom", type=float, default=2.4, help="crop square / brick size (ADR 0008)")
+    p.add_argument("--zoom", type=float, default=1.4,
+                   help="crop square / brick size (1.4 for Anomalib, ADR 0006; the VLM uses 2.4, ADR 0008)")
     p.add_argument("--background", choices=("white", "raw"), default="white",
                    help="white: everything outside the brick hull is white (default); raw: keep the scene")
     p.add_argument("--max-bricks", type=int, default=2, help="max bricks per image (largest first)")
