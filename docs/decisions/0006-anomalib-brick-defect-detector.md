@@ -36,9 +36,10 @@
   6-snapshot time blocks). Defective bricks are never in train; good crops that the label model flags
   as marked are moved out of train (`excluded/`).
 - **Per-crop labels:** `scripts/label_crops_gemini.py --model gemini-4-argon`. Each snapshot crop
-  (brick only, masked) gets "mark visible in this crop?". Crops of defective bricks go to
-  `test/defect` (visible) or `test/defect_clean` (not visible), so per-crop recall is measured only on
-  crops that show the mark. Brick-level metrics use every crop (OR).
+  (brick only, masked) gets "mark visible in this crop?". The user's corrections in
+  `configs/defect_mark_labels.csv` (note `user review ...`; `true` / `false` / `exclude`) override
+  it. Crops of defective bricks go to `test/defect` (visible) or `test/defect_clean` (not visible), so
+  per-crop recall is measured only on crops that show the mark. Brick-level metrics use every crop (OR).
 - **Decision rule:** brick is defective if max(normalized score over its crops) > **0.493**,
   the lowest threshold with <= 5 % false alarms per good-snapshot brick (uses good bricks only, so
   recall at it is not tuned on defects).
@@ -100,14 +101,20 @@ Checks:
 - **EfficientAd:** not trained: needs ImageNette (~1.5 GB over the venue Wi-Fi, T-010) and long
   training; PatchCore already runs at 71 ms per crop on the NPU.
 - **XPU training:** not used (T-015; GPU shared with the VLM server).
+- **Label model:** gemini-3.1-pro-preview (`gemini-pro-latest`) first, then `gemini-4-argon` on the
+  user's request. On the 295 snapshot crops they agree on 97 % of good crops and 93 % of defective-brick
+  crops (top 94-96 %, floor 98 %, arm 86 %). The user's review (9 rows: 7 true/false, 2 exclude) flips
+  7 of the 7 corresponding 3.1-pro labels but only 1 Argon label (`061847-779` arm, dark-blue brick).
+  Argon found the mark on `055500-789` top (the snapshot was mislabelled good in Studio) and cleared
+  3.1-pro's three false flags on good crops. Its errors: marks "seen" on the 2 crops where the brick is
+  not visible (user: exclude), and one good crop flagged (`050956-674` arm, medium: the "smudge" is the
+  purple gripper finger; kept in `test/good` and reported). With Argon + review: 100/150 defective
+  crops show the mark (arm 28, floor 37, top 35 of 50); 49/50 bricks in at least one crop.
 - **Labels by eye only:** 90 crops of 30 defective snapshots were labelled by eye as a spot check
-  (`configs/defect_mark_labels.csv`). Against gemini-3.1-pro: 72/81 agreed at first; on re-checking
-  the 9 disagreements at 360 px, Gemini was right on 5, wrong on 1 (a clear star mark it missed),
-  3 undecidable (dark-blue brick). Gemini scales to every new snapshot and is cached per crop.
-  gemini-3.1-pro saw the mark in 97/147 defective crops (arm 55 %, floor 73 %, top 69 %; 48/49 bricks
-  in at least one crop) and flagged 3 of 148 good crops (one, `050225-515` arm "scribble inside the
-  hollow underside", scores 0.45 < 0.493 and looks like a false flag; two `floor` "small black dot"
-  crops are excluded from training).
+  (agent rows of `configs/defect_mark_labels.csv`). Against gemini-3.1-pro: 72/81 agreed at first; on
+  re-checking the 9 disagreements at 360 px, Gemini was right on 5, wrong on 1, 3 undecidable
+  (dark-blue brick). Against Argon: 74/77 agree. Gemini scales to every new snapshot and is cached
+  per crop; the user's review stays the final word.
 
 ## Consequences
 
