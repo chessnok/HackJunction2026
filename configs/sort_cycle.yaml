@@ -25,8 +25,9 @@ top_serial: "243622062352"
 floor_serial: "243622062278"
 brick_half_depth_mm: 12.0
 patchcore_deploy: configs/anomalib_deploy.yaml
+# fallback only: the 'classifier:' section of configs/anomalib_deploy.yaml wins when present
 classifier_xml: outputs/mark_classifier/20261114-085214_resnet18lr_bricks_z14t/model.xml
-classifier_threshold: 0.998  # 0 % crop false positives in cross-validation (ADR 0006 follow-up)
+classifier_threshold: 0.998
 detector_device: NPU
 act_export: ~/.local/share/physicalai/models/62003713-0c7d-44f0-878c-436b9fc2ed16/exports/openvino
 act_device: GPU

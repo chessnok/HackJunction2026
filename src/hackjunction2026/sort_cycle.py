@@ -479,9 +479,15 @@ class PatchCoreAndClassifier:
 
         from hackjunction2026.defect.runtime import BrickAnomalyDetector
 
+        import yaml
+
         self.cfg = cfg
         self.patchcore = BrickAnomalyDetector.from_deploy(REPO / cfg.patchcore_deploy, device=cfg.detector_device)
-        self.clf = ov.Core().compile_model(str(REPO / cfg.classifier_xml), cfg.detector_device)
+        # the deployed classifier (configs/anomalib_deploy.yaml "classifier:") wins over configs/sort_cycle.yaml
+        dep = (yaml.safe_load((REPO / cfg.patchcore_deploy).read_text()) or {}).get("classifier") or {}
+        self.classifier_xml = dep.get("model_xml", cfg.classifier_xml)
+        self.threshold = float(dep.get("threshold", cfg.classifier_threshold))
+        self.clf = ov.Core().compile_model(str(REPO / self.classifier_xml), dep.get("device", cfg.detector_device))
 
     def classify(self, crop_bgr: np.ndarray) -> float:
         from hackjunction2026.defect.training.mark_classifier import prep
@@ -495,7 +501,7 @@ class PatchCoreAndClassifier:
         for c, item in zip(crops, pc["crops"], strict=True):
             p = self.classify(c["image"])
             item["classifier"] = round(p, 4)
-            item["classifier_flags"] = p > self.cfg.classifier_threshold
+            item["classifier_flags"] = p > self.threshold
             votes.append(item["is_anomalous"] or item["classifier_flags"])
         return {"is_defective": any(votes), "n_crops": len(votes), "patchcore": pc["is_anomalous"],
                 "classifier": any(i["classifier_flags"] for i in pc["crops"]), "crops": pc["crops"],
