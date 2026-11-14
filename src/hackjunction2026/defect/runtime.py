@@ -10,6 +10,8 @@ backend env, or inside the orchestrator. Same cropping code as the training data
 
 The score is Anomalib's normalized pred_score (0..1; 0.5 = the threshold learned in training).
 The deploy threshold is chosen in training.brick_report and stored in configs/anomalib_deploy.yaml.
+If the deploy config has a `classifier` section, the supervised mark classifier
+(training.mark_classifier) votes too: a crop is defective if PatchCore OR the classifier says so.
 """
 
 from __future__ import annotations
@@ -54,6 +56,22 @@ class BrickAnomalyDetector:
             self.crop.size, self.crop.size)
         self.out_names = {o.get_any_name(): o for o in self.compiled.outputs}
         self.request = self.compiled.create_infer_request()
+        self.classifier = None  # optional second vote, see attach_classifier()
+
+    def attach_classifier(self, xml: str | Path, threshold: float, device: str | None = None) -> None:
+        """Supervised "mark visible" classifier (training.mark_classifier IR): OR-ed per crop with PatchCore."""
+        compiled = ov_core().compile_model(str(xml), device or self.device, {"PERFORMANCE_HINT": "LATENCY"})
+        self.classifier = {"xml": str(xml), "threshold": float(threshold), "request": compiled.create_infer_request(),
+                           "out": compiled.outputs[0]}
+
+    def classify_crop(self, crop_bgr: np.ndarray) -> tuple[float, float]:
+        """(probability that a mark is visible, latency ms). Input as in mark_classifier.prep."""
+        rgb = cv2.cvtColor(cv2.resize(crop_bgr, (224, 224), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
+        x = ((rgb.astype(np.float32) / 255.0 - np.array([0.485, 0.456, 0.406], np.float32))
+             / np.array([0.229, 0.224, 0.225], np.float32)).transpose(2, 0, 1)[None]
+        t = time.perf_counter()
+        res = self.classifier["request"].infer({0: x})
+        return float(np.ravel(res[self.classifier["out"]])[0]), (time.perf_counter() - t) * 1000
 
     # ---------------------------------------------------------------- construction
 
@@ -68,8 +86,15 @@ class BrickAnomalyDetector:
         crop = CropConfig(**{f.name: cfg["crop"][f.name] for f in fields(CropConfig) if f.name in cfg.get("crop", {})})
         if isinstance(crop.fill, list):
             crop.fill = tuple(crop.fill)
-        return cls(xml, device or cfg.get("device", "CPU"),
-                   cfg["threshold"] if threshold is None else threshold, crop=crop, name=cfg.get("run_id", ""))
+        det = cls(xml, device or cfg.get("device", "CPU"),
+                  cfg["threshold"] if threshold is None else threshold, crop=crop, name=cfg.get("run_id", ""))
+        c = cfg.get("classifier")
+        if c:
+            cx = Path(c["model_xml"]).expanduser()
+            if not cx.is_absolute():
+                cx = REPO / cx if (REPO / cx).exists() else Path.cwd() / cx
+            det.attach_classifier(cx, c["threshold"], device or c.get("device"))
+        return det
 
     @staticmethod
     def crop_from_run(run_json: str | Path) -> CropConfig:
@@ -112,6 +137,11 @@ class BrickAnomalyDetector:
             score, amap, ms = self.score_crop(c["image"])
             item = {k: v for k, v in c.items() if k not in ("image", "mask")}
             item.update(score=round(score, 4), is_anomalous=score > self.threshold, latency_ms=round(ms, 2))
+            if self.classifier:
+                p, cms = self.classify_crop(c["image"])
+                item.update(patchcore_vote=item["is_anomalous"], classifier_score=round(p, 4),
+                            classifier_vote=p > self.classifier["threshold"], classifier_ms=round(cms, 2))
+                item["is_anomalous"] = item["patchcore_vote"] or item["classifier_vote"]
             if heatmap_dir is not None and amap is not None:
                 heatmap_dir.mkdir(parents=True, exist_ok=True)
                 f = heatmap_dir / f"{scene.replace('/', '_') or 'scene'}_{item.get('camera', 'crop')}_{len(out)}.png"
@@ -124,6 +154,10 @@ class BrickAnomalyDetector:
             "anomaly_score": best["score"] if best else None,
             "is_anomalous": any(i["is_anomalous"] for i in out),
             "threshold": self.threshold, "n_crops": len(out),
+            "classifier": {"model": self.classifier["xml"], "threshold": self.classifier["threshold"],
+                           "max_score": max((i["classifier_score"] for i in out), default=None),
+                           "vote": any(i["classifier_vote"] for i in out)} if self.classifier else None,
+            "patchcore_vote": any(i.get("patchcore_vote", i["is_anomalous"]) for i in out),
             "worst_camera": best.get("camera") if best else None,
             "latency_s": round(time.perf_counter() - t0, 4), "crops": out,
         }

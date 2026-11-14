@@ -224,6 +224,14 @@ class CropConfig:
     fill: tuple[int, int, int] = (255, 255, 255)
     hull_grow: float = 0.04  # dilate the hull by this x the brick side before whitening
     feather_px: int = 2  # soft mask edge (in output pixels) when whitening
+    clahe: bool = False  # CLAHE on the Lab luminance of the final crop (contrast normalisation)
+
+
+def clahe_luminance(bgr: np.ndarray, clip: float = 2.0, tiles: int = 8) -> np.ndarray:
+    """CLAHE on the Lab L channel: lifts faint dark marks on dark bricks, keeps the colours."""
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    lab[..., 0] = cv2.createCLAHE(clipLimit=clip, tileGridSize=(tiles, tiles)).apply(lab[..., 0])
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
 
 def crop_square(brick: Brick, zoom: float) -> tuple[int, int, int]:
@@ -270,6 +278,8 @@ def crop_brick(frame_bgr: np.ndarray, brick: Brick, cfg: CropConfig | None = Non
         bg[:] = cfg.fill
         a = soft[..., None]
         crop = np.clip(crop.astype(np.float32) * a + bg.astype(np.float32) * (1 - a) + 0.5, 0, 255).astype(np.uint8)
+    if cfg.clahe:
+        crop = clahe_luminance(crop)
     return crop, mask, (sx, sy, side)
 
 

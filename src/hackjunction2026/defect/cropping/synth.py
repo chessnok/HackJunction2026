@@ -59,6 +59,7 @@ def add_marker(
     rng: np.random.Generator,
     upscale: float = 1.0,
     kind: str | None = None,
+    opacity_range: tuple[float, float] = (0.6, 0.95),
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Draw one marker mark inside `mask` (uint8 0/255, brick hull in crop pixels).
 
@@ -77,7 +78,7 @@ def add_marker(
     if kind == "dot":
         width = max(rng.uniform(0.06, 0.12) * side, 2.0 * upscale, 3.0)
     length = rng.uniform(0.25, 0.6) * side
-    opacity = rng.uniform(0.6, 0.95)
+    opacity = rng.uniform(*opacity_range)
     ink = np.array([rng.uniform(15, 45), rng.uniform(15, 40), rng.uniform(15, 40)], np.float32)  # BGR
 
     best = None
