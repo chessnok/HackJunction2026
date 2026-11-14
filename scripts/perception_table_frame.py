@@ -24,10 +24,12 @@ from hackjunction2026.perception.geometry import apply_h, intersect
 from hackjunction2026.perception.scene import detect_bricks_cv, exclusion_mask, sheet_roi
 from hackjunction2026.perception.table_frame import fit_plane_normal
 
-# Height of the top D415 above the table in mm. Not measured with a ruler: estimated from five
-# Duplo edges of known size (2x2 footprint 31.7 mm, body height 19.2 mm) in the first frames of
-# episodes 6 and 14 (single estimates 103-143 mm, median 118 mm). Uncertainty about +-15 %.
-TOP_CAMERA_HEIGHT_MM = 118.0
+# Height of the top D415 above the table in mm. Not measured with a ruler: estimated from nine
+# Duplo edges of known size read by eye in first frames (2x2 footprint 31.7 mm and body height
+# 19.2 mm in episodes 6 and 14: 103, 143, 118, 118, 120 mm; front edges of the 2x4 bricks, 63.5 mm,
+# in episodes 36 and 63, top and floor views: 133, 140, 125, 136 mm). Median 125, mean 126 mm.
+# Uncertainty about +-10 %. Every mm value in the table frame scales with this number.
+TOP_CAMERA_HEIGHT_MM = 126.0
 HALF_BRICK_MM = 16.0
 CANVAS = {"x_min_mm": -50.0, "x_max_mm": 750.0, "y_min_mm": 0.0, "y_max_mm": 600.0}
 W, H = 848, 480
@@ -64,10 +66,34 @@ def draw_grid(img, H_table_to_px, canvas, step=100):
     cv2.arrowedLine(img, o[0], o[2], (0, 200, 0), 2)
 
 
+def parse_runs(text):
+    return [tuple(int(v) for v in r.split("-")) for r in text.split(",")]
+
+
+BG_PATCHES = [(0, 0, 200, 34)]  # top image: wood edge behind the table, top left (nothing moves there)
+
+
+def background_shift(ref_rgb, rgb, patches=BG_PATCHES, pad=25):
+    """(dx, dy) per patch of the gradient image of `rgb` against `ref_rgb` (template matching)."""
+    def grad(img):
+        g = cv2.GaussianBlur(cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.float32), (3, 3), 0)
+        return np.hypot(cv2.Sobel(g, cv2.CV_32F, 1, 0), cv2.Sobel(g, cv2.CV_32F, 0, 1))
+    a, b = grad(ref_rgb), grad(rgb)
+    out = []
+    for x0, y0, x1, y1 in patches:
+        X0, Y0 = max(0, x0 - pad), max(0, y0 - pad)
+        r = cv2.matchTemplate(b[Y0:y1 + pad, X0:x1 + pad], a[y0:y1, x0:x1], cv2.TM_CCOEFF_NORMED)
+        _, _, _, loc = cv2.minMaxLoc(r)
+        out += [loc[0] + X0 - x0, loc[1] + Y0 - y0]
+    return np.array(out, float)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("dataset")
     ap.add_argument("--out", default="/home/intel/dev/captures/perception/A")
+    ap.add_argument("--top-runs", help="force top-camera setups, e.g. 0-5,6-66")
+    ap.add_argument("--floor-runs", help="force floor-camera setups, e.g. 0-46,47-61,62-66")
     args = ap.parse_args()
     ds = Dataset(args.dataset)
     out = Path(args.out)
@@ -116,47 +142,23 @@ def main() -> None:
             sl.append(SheetLines(runs_of(a, top_runs, "top"), med["far"], med["left"], med["seam"]))
         return corr, sl
 
+    # top-camera setups: the camera counts as moved when static background above the table (wood,
+    # wall) shifts by more than 8 px against the longest sheet run; sheet moves alone do not count
     ref_a, ref_b = max(cand_runs, key=lambda r: r[1] - r[0])
-    ref_run = run_name("top", ref_a, ref_b)
-
-    # first pass: every candidate run may be a re-aimed camera
-    corr, sl = build(cand_runs)
-    n0, _ = fit_plane_normal(Kt, [{"far": s.far, "left": s.left, "seam": s.seam} for s in sl if s.top_run == ref_run])
-    jc = JointCalib(Kt, Kf, ref_run, [run_name("top", a, b) for a, b in cand_runs],
-                    [run_name("floor", a, b) for a, b in floor_runs], corr, sl, HALF_BRICK_MM / h_mm)
-    sol = jc.fit(n0)
-    _, R, _ = jc.unpack(sol.x)
-    angles = {r: float(np.degrees(np.arccos(np.clip((np.trace(M) - 1) / 2, -1, 1)))) for r, M in R.items()}
-    print("first pass rotation per candidate run (deg)", {k: round(v, 2) for k, v in angles.items()})
-    # merge runs that did not rotate (< 1 deg: the sheet moved, not the camera) into neighbours
-    top_runs = []
-    for a, b in cand_runs:
-        moved = angles[run_name("top", a, b)] >= 1.0 or (a, b) == (ref_a, ref_b)
-        if top_runs and not moved and top_runs[-1][2] is False:
-            top_runs[-1] = (top_runs[-1][0], b, False)
-        else:
-            top_runs.append((a, b, moved and (a, b) != (ref_a, ref_b)))
-    # runs that did not rotate belong to the reference camera pose
-    final_runs, ref_members = [], []
-    for a, b, moved in top_runs:
-        if moved:
-            final_runs.append((a, b))
-        else:
-            ref_members.append((a, b))
-    # the reference setup may span several non-rotated runs; give them one name
-    ref_span = (min(a for a, _ in ref_members), max(b for _, b in ref_members))
-    top_setups = sorted(final_runs + [ref_span])
+    ref_ep = ref_b
+    bg = {ep: background_shift(first[ref_ep]["top"], first[ep]["top"]) for ep in eps}
+    top_setups = parse_runs(args.top_runs) if args.top_runs else cameras.group_consecutive(bg, 8.0)
+    if args.floor_runs:
+        floor_runs = parse_runs(args.floor_runs)
+    print("top background shift vs ep", ref_ep, {ep: bg[ep].round(0).tolist() for ep in eps[::5]})
+    print("top setups", top_setups, "floor setups", floor_runs)
+    ref_span = [r for r in top_setups if r[0] <= ref_ep <= r[1]][0]
     ref_run = run_name("top", *ref_span)
 
     def top_setup_of(ep):
-        for a, b in top_setups:
-            if a <= ep <= b:
-                return run_name("top", a, b)
-        # episodes inside the reference span but in a gap
-        return ref_run
+        return [run_name("top", a, b) for a, b in top_setups if a <= ep <= b][0]
 
-    corr = [Correspondence(c.episode, top_setup_of(c.episode), c.floor_run, c.top_px, c.floor_px) for c in corr]
-    sl = [SheetLines(top_setup_of(int(s.top_run.split("_ep")[1][:3])), s.far, s.left, s.seam) for s in sl]
+    corr, _ = build(top_setups)
     sl = []
     for a, b in cand_runs:
         if b - a + 1 < 3:
@@ -164,6 +166,7 @@ def main() -> None:
         med = {k: np.median([canon(lines[ep]["top"][k], LINE_REF[k]) for ep in range(a, b + 1)], axis=0)
                for k in ("far", "left", "seam")}
         sl.append(SheetLines(top_setup_of(a), med["far"], med["left"], med["seam"]))
+    n0, _ = fit_plane_normal(Kt, [{"far": x.far, "left": x.left, "seam": x.seam} for x in sl if x.top_run == ref_run])
     jc = JointCalib(Kt, Kf, ref_run, [run_name("top", a, b) for a, b in top_setups],
                     [run_name("floor", a, b) for a, b in floor_runs], corr, sl, HALF_BRICK_MM / h_mm)
     sol = jc.fit(n0)
@@ -172,10 +175,8 @@ def main() -> None:
     print("final top setups", top_setups, "plane normal", n.round(4), "corr px median", np.median(errs).round(1))
 
     # 3. table axes in the reference top camera
-    ref_lines = [s for s in sl if s.top_run == ref_run]
-    far_ref = max(ref_lines, key=lambda s: 0).far  # first (all non-rotated runs share the camera)
     # use the longest sheet run inside the reference setup for the axes and origin
-    a0, b0 = max([r for r in cand_runs if top_setup_of(r[0]) == ref_run], key=lambda r: r[1] - r[0])
+    a0, b0 = max([r for r in cand_runs if top_setup_of((r[0] + r[1]) // 2) == ref_run], key=lambda r: r[1] - r[0])
     far_ref = np.median([canon(lines[ep]["top"]["far"], LINE_REF["far"]) for ep in range(a0, b0 + 1)], axis=0)
     left_ref = np.median([canon(lines[ep]["top"]["left"], LINE_REF["left"]) for ep in range(a0, b0 + 1)], axis=0)
     e1 = np.cross(n, Kt.T @ far_ref); e1 /= np.linalg.norm(e1)
@@ -251,7 +252,7 @@ def main() -> None:
         "episodes_seen": [eps[0], eps[-1]],
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "created_by": "scripts/perception_table_frame.py (agent A)",
-        "units": "mm; absolute scale from the estimated top-camera height (118 mm, +-15 %); u, v normalised to the canvas",
+        "units": "mm; absolute scale from the estimated top-camera height (126 mm, +-10 %); u, v normalised to the canvas",
         "convention": {
             "plane": "table / paper surface, z = 0",
             "origin": "far-left corner of the lower paper sheet as the top camera sees it in episodes "
@@ -272,7 +273,8 @@ def main() -> None:
         "sheet_lines": sheet_info,
         "diagnostics": {
             "plane_normal_reference_top_cam": n.tolist(),
-            "candidate_runs": cand_runs, "first_pass_rotation_deg": angles, "top_setups": top_setups,
+            "sheet_runs": cand_runs, "top_background_shift_px": {str(k): v.tolist() for k, v in bg.items()},
+            "top_setups": top_setups,
             "floor_runs": floor_runs, "per_run": diag_runs,
             "n_correspondences": len(corr),
             "brick_centre_top_vs_floor_mm": {"median": float(np.median(dmm)), "p90": float(np.percentile(dmm, 90)),

@@ -21,8 +21,8 @@ from .dataset import Dataset
 from .gripper import detect_gripper, static_robot_mask
 from .scene import Frame, detect_bricks_cv, exclusion_mask, sheet_roi
 
-BRICK_CENTRE_HEIGHT_MM = 12.0  # body 19.2 mm + studs: bbox centre ~ 12 mm above the table
-LIFT_MM = 25.0  # triangulated centre higher than this above the table -> lifted
+BRICK_CENTRE_HEIGHT_MM = 14.0  # triangulated bbox centre of a resting brick: 13-18 mm above the table
+LIFT_MM = 13.0  # centre more than 27 mm above the table -> lifted by the gripper
 
 
 def projection(cam: dict) -> np.ndarray:
@@ -53,6 +53,42 @@ class Track:
     color_votes: dict = field(default_factory=dict)
 
 
+MERGE_MM = 40.0  # same-colour detections closer than this are one brick (split by the jaws)
+START_FRAMES = 15  # a real brick is on the sheet when the episode starts (dataset assumption)
+MIN_LATE_TRACK_FRAC = 0.25  # ... or it is seen for at least this share of the episode
+MAX_HOLD_FRAMES = 45  # keep an unseen brick at its last position for 1.5 s, then drop it
+
+
+def merge_close(dets: list[tuple[Blob, np.ndarray]]) -> list[tuple[Blob, np.ndarray]]:
+    """Merge detections of compatible colour whose table positions are within MERGE_MM (one brick cut
+    in two by a jaw, or a two-colour brick seen as two blobs)."""
+    dets = list(dets)
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(dets)):
+            for j in range(i + 1, len(dets)):
+                (a, xa), (b, xb) = dets[i], dets[j]
+                if np.linalg.norm(xa - xb) < MERGE_MM and colors_compatible(a.color, b.color) or \
+                        np.linalg.norm(xa - xb) < 0.5 * MERGE_MM:
+                    areas = dict(a.color_areas)
+                    for k, v in b.color_areas.items():
+                        areas[k] = areas.get(k, 0) + v
+                    area = a.area + b.area
+                    colors = [c for c in sorted(areas, key=areas.get, reverse=True) if areas[c] >= max(40, 0.12 * area)]
+                    box = (min(a.bbox[0], b.bbox[0]), min(a.bbox[1], b.bbox[1]), max(a.bbox[2], b.bbox[2]), max(a.bbox[3], b.bbox[3]))
+                    m = Blob(box, area, colors or a.colors, areas, max(a.score, b.score))
+                    big = a if a.area >= b.area else b
+                    x = xa if big is a else xb
+                    dets[i] = (m, x)
+                    del dets[j]
+                    changed = True
+                    break
+            if changed:
+                break
+    return dets
+
+
 def annotate_episode(ds: Dataset, frame: Frame, ep: int, step: int = 1, min_track_frac: float = 0.03,
                      detector=None) -> tuple[list[dict], list[dict]]:
     """Returns (object rows, gripper rows). `detector(cam, rgb, roi, exclude) -> list[Blob]` defaults
@@ -68,7 +104,6 @@ def annotate_episode(ds: Dataset, frame: Frame, ep: int, step: int = 1, min_trac
         ctx[cam] = {"roi": roi, "excl": exclusion_mask(f0, roi), "static": static_robot_mask(f0)}
     wanted = set(range(0, e.length, step)) | {e.length - 1}
     it = {cam: ds.iter_frames(ep, cam, wanted) for cam in ("top", "floor")}
-    states = ds_states = None
     per_frame = []
     grip_rows = []
     while True:
@@ -81,7 +116,7 @@ def annotate_episode(ds: Dataset, frame: Frame, ep: int, step: int = 1, min_trac
         dets = {}
         for cam, img in (("top", img_t), ("floor", img_f)):
             blobs = detector(cam, img, ctx[cam]["roi"], ctx[cam]["excl"])
-            dets[cam] = [(b, frame.footprint_center(cam, ep, b.bottom_center)) for b in blobs]
+            dets[cam] = merge_close([(b, frame.footprint_center(cam, ep, b.bottom_center)) for b in blobs])
         # top <-> floor matching
         T, F = dets["top"], dets["floor"]
         pairs = []
@@ -165,33 +200,38 @@ def annotate_episode(ds: Dataset, frame: Frame, ep: int, step: int = 1, min_trac
             ids.append(tr.id)
         assign.append(ids)
     n_frames = len(per_frame)
-    keep = {tr.id for tr in tracks if tr.n_seen >= max(5, min_track_frac * n_frames)}
+    first_seen = {}
+    for (ft, _), ids in zip(per_frame, assign):
+        for tid in ids:
+            first_seen.setdefault(tid, ft)
+    keep = {tr.id for tr in tracks if tr.n_seen >= max(5, min_track_frac * n_frames)
+            and (first_seen[tr.id] <= START_FRAMES or tr.n_seen >= MIN_LATE_TRACK_FRAC * n_frames)}
     remap = {tid: k for k, tid in enumerate(sorted(keep))}
     color_of = {tr.id: tr.color for tr in tracks}
     rows = []
-    last = {}
+    last, last_ft = {}, {}
     for (ft, objs), ids in zip(per_frame, assign):
         seen = set()
         for o, tid in zip(objs, ids):
             if tid not in keep or tid in seen:
                 continue
             seen.add(tid)
-            last[tid] = o
-            rows.append(_row(ep, ft, ds.fps, remap[tid], color_of[tid], o, frame, "observed"))
+            last[tid], last_ft[tid] = o, ft
+            rows.append(_row(ep, ft, ds.fps, remap[tid], color_of[tid], o, frame, "observed", 0))
         for tid, o in last.items():
-            if tid not in seen:
-                rows.append(_row(ep, ft, ds.fps, remap[tid], color_of[tid], o, frame, "hold"))
+            if tid not in seen and ft - last_ft[tid] <= MAX_HOLD_FRAMES:
+                rows.append(_row(ep, ft, ds.fps, remap[tid], color_of[tid], o, frame, "hold", ft - last_ft[tid]))
     return rows, grip_rows
 
 
-def _row(ep, ft, fps, oid, color, o, frame: Frame, status) -> dict:
+def _row(ep, ft, fps, oid, color, o, frame: Frame, status, since) -> dict:
     uv = frame.to_uv([o["xy"]])[0]
     r = {
         "episode_index": ep, "frame_index": ft, "timestamp": ft / fps, "object_id": oid,
         "class": "brick", "color": color, "frame_color": o["color"],
         "x_mm": float(o["xy"][0]), "y_mm": float(o["xy"][1]), "u": float(uv[0]), "v": float(uv[1]),
         "z_centre_mm": float(o["z"]), "lifted": o["lifted"], "source": o["source"] if status == "observed" else "hold",
-        "confidence": 0.0,
+        "confidence": 0.0, "frames_since_seen": since,
     }
     for cam in ("top", "floor"):
         d = o[cam]

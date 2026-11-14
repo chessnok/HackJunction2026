@@ -28,9 +28,16 @@ def group_consecutive(values: dict[int, np.ndarray], tol: float) -> list[tuple[i
     """Split sorted episodes into runs whose signature stays within `tol` of the run's first episode
     (a camera that was bumped or a sheet that was moved starts a new run)."""
     eps = sorted(values)
+
+    def differs(a, b):
+        return np.max(np.abs(values[a] - values[b])) > tol
+
     runs, start = [], eps[0]
-    for prev, ep in zip(eps, eps[1:]):
-        if np.max(np.abs(values[ep] - values[start])) > tol:
+    for k, (prev, ep) in enumerate(zip(eps, eps[1:])):
+        if differs(ep, start):
+            nxt = eps[k + 2] if k + 2 < len(eps) else None
+            if nxt is not None and not differs(nxt, start):
+                continue  # a single-episode blip (hand, moved object), not a new setup
             runs.append((start, prev))
             start = ep
     runs.append((start, eps[-1]))

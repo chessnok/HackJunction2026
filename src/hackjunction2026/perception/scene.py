@@ -101,6 +101,9 @@ def detect_bricks_cv(rgb: np.ndarray, roi: np.ndarray, exclude: np.ndarray | Non
         x0, y0, x1, y1 = b.bbox
         if b.area < min_area or (x1 - x0) < 8 or (y1 - y0) < 8:
             continue
+        # a large blob cut by the side or bottom image border is a hand or arm, not a brick
+        if b.area > 5000 and (x0 <= 1 or x1 >= w - 1 or y1 >= h - 1):
+            continue
         if exclude is not None:
             bx, by = b.bottom_center
             if exclude[min(h - 1, int(by)), min(w - 1, int(bx))]:

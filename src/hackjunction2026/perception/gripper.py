@@ -24,7 +24,9 @@ class GripperDet:
 def arm_mask(rgb: np.ndarray) -> np.ndarray:
     hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
     h, s, v = (hsv[..., i].astype(np.int32) for i in range(3))
-    m = ((h >= 108) & (h <= 135) & (s >= 60) & (v <= 100)).astype(np.uint8)
+    # jaws: H 106-135, S 77-243, V 17-57 in both D415s; the lavender bowl has the same hue but
+    # V 83-124 and S 59-97, so the V cut separates them
+    m = ((h >= 106) & (h <= 135) & (s >= 80) & (v <= 80)).astype(np.uint8)
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     return cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)).astype(bool)
 
@@ -48,7 +50,10 @@ def detect_gripper(rgb: np.ndarray, static: np.ndarray | None, roi_rows: int | N
     if static is not None:
         m &= ~static
     n, lab, stats, _ = cv2.connectedComponentsWithStats(m.astype(np.uint8), 8)
-    comps = [i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] >= min_area]
+    # the arm comes from above in both low D415 views: its component touches the top border
+    # (shadowed faces of blue bricks are small and do not)
+    comps = [i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] >= min_area
+             and (stats[i, cv2.CC_STAT_TOP] <= 3 or stats[i, cv2.CC_STAT_AREA] >= 4000)]
     if not comps:
         return None
     # the arm: largest component plus components close to it (the two jaws can separate)

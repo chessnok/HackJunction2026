@@ -233,6 +233,40 @@ def draw_failures(method, cache, fails, dest):
         cv2.imwrite(str(dest / f"ep{ep:03d}_f{f:04d}_{c}.png"), img)
 
 
+def eval_gripper():
+    """Gripper detector check. Late frames: the jaws hold the brick, so the detected tip must lie in
+    the ground-truth brick box grown by 30 px. Start frames: the arm is at home, out of both views,
+    so any detection is a false positive. Mid frames are not scored (the arm may or may not be in view)."""
+    from hackjunction2026.perception.gripper import detect_gripper, static_robot_mask
+
+    res = {}
+    for c in ("top", "floor"):
+        late_ok = late_n = start_fp = start_n = 0
+        times, misses = [], []
+        for (ep, f), g in sorted(GT.items()):
+            phase = {p[1]: p[2] for p in frames() if p[0] == ep}[f]
+            if phase == "mid" or c not in g:
+                continue
+            st = static_robot_mask(load(ep, 0, c))
+            img = load(ep, f, c)
+            t = time.perf_counter()
+            d = detect_gripper(img, st)
+            times.append(time.perf_counter() - t)
+            if phase == "start":
+                start_n += 1
+                start_fp += d is not None
+            else:
+                late_n += 1
+                x0, y0, x1, y1 = g[c][1]
+                ok = d is not None and x0 - 30 <= d.tip[0] <= x1 + 30 and y0 - 30 <= d.tip[1] <= y1 + 30
+                late_ok += ok
+                if not ok:
+                    misses.append((ep, f))
+        res[c] = {"late_tip_at_brick": late_ok / late_n, "n_late": late_n, "start_false_pos": start_fp / start_n,
+                  "n_start": start_n, "late_misses": misses, "ms_per_frame_median": 1000 * float(np.median(times))}
+    return res
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--methods", default="cv")
@@ -249,6 +283,10 @@ def main():
     cvm = CVMethod()
     client = None
     for m in args.methods.split(","):
+        if m == "gripper":
+            metrics["gripper_cv"] = eval_gripper()
+            print(json.dumps(metrics["gripper_cv"], indent=1))
+            continue
         if m != "cv" and client is None:
             client = VLMClient(args.vlm_url, args.vlm_model, coord_mode=args.coord_mode)
             print("VLM model:", client.model)
