@@ -13,6 +13,23 @@ Template:
 - Refs: ADRs, log entries, upstream issues
 ```
 
+## T-015. Local training on the Arc iGPU hangs at step 0: GPU page fault ("Engine memory CAT error")
+
+- Date: 2026-11-14 · Status: Open
+- Symptom: Studio local training job (ACT, 51.6 M params, dataset 431a71f7: 6 episodes, 2448 frames,
+  cameras 848×480, 848×480, 1024×768, batch 8) stays `running` at progress 0 with no metrics. Job log ends
+  at `Epoch 0/4 0/253 … 0.00it/s` (02:33:37). The trainer process uses one core at 99 % and its
+  8 dataloader workers are idle; the GPU compute GT never idles.
+- Cause: at 02:33:36, on the first training step, the `xe` driver logged
+  `GT0: Engine memory CAT error [18]: class=ccs`, `Engine reset: engine_class=ccs`,
+  `Timedout job … in python [<trainer pid>]`, `Xe device coredump has been created`. The GPU job was
+  killed by the driver, and the trainer waits forever. Likely a bug in the Arc B390 (Panther Lake) +
+  kernel 7.0 `xe` + compute runtime 26.05 + torch 2.11+xpu stack, not in our data. The devcoredump
+  expired before it could be saved (the kernel keeps it about 5 min, root-only).
+- Workaround: stop the job; train on CPU (job `device: cpu`) or on Modal (blocked by T-014). Retrying
+  on XPU is untested. For a bug report, copy `/sys/class/drm/card1/device/devcoredump/data`
+  (sudo) within 5 minutes of the next hang.
+
 ## T-014. Studio "Deploy and connect" to Modal fails after 2 s with a generic message
 
 - Date: 2026-11-14 · Status: Open (waiting for the Modal credit / spend limit)
