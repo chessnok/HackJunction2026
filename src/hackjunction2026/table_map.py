@@ -447,11 +447,12 @@ class TableHomography:
     points: list[dict] = field(default_factory=list)  # correspondences + residuals
     stats: dict = field(default_factory=dict)
     note: str = ""
+    k1: float = 0.0                    # radial lens distortion (barrel < 0), see undistort_px
 
     def to_table(self, px) -> np.ndarray:
-        return apply_homography(self.H, px)
+        return apply_homography(self.H, undistort_px(px, self.k1, self.image_size))
 
-    def to_pixel(self, xy) -> np.ndarray:
+    def to_pixel(self, xy) -> np.ndarray:  # undistorted pixel (good enough for drawing)
         return apply_homography(np.linalg.inv(self.H), xy)
 
     def yaw_deg(self, centroid, image_angle_deg: float, step_px: float = 15.0) -> float:
@@ -477,6 +478,7 @@ class TableHomography:
             "stats": self.stats,
             "points": self.points,
             "note": self.note,
+            "k1": float(self.k1),
         }
         Path(path).write_text(yaml.safe_dump(data, sort_keys=False, width=110), encoding="utf-8")
 
@@ -488,20 +490,57 @@ class TableHomography:
         return cls(H=np.array(d["H"], float), image_size=tuple(d["image_size"]), pose=d["pose"],
                    pose_joints=d.get("pose_joints", {}), point=d.get("point", "gripper_tip"),
                    date=str(d.get("date", "")), points=d.get("points", []), stats=d.get("stats", {}),
-                   note=d.get("note", ""))
+                   note=d.get("note", ""), k1=float(d.get("k1", 0.0)))
+
+
+def undistort_px(px, k1: float, image_size) -> np.ndarray:
+    """One-coefficient radial model around the image centre: p_u = c + (p - c)(1 + k1 r^2), r in units of the
+    half diagonal. The wrist camera's wide lens bows straight lines outward (barrel), worst at the edges."""
+    p = np.asarray(px, float)
+    if not k1:
+        return p
+    w, h = image_size
+    c = np.array([w / 2.0, h / 2.0])
+    s = 0.5 * float(np.hypot(w, h))
+    d = (p - c) / s
+    r2 = np.sum(d * d, axis=-1, keepdims=True)
+    return c + d * (1.0 + k1 * r2) * s
+
+
+def fit_k1(px: np.ndarray, xy: np.ndarray, image_size, ks=np.linspace(-0.6, 0.6, 121)) -> tuple[float, float]:
+    """Pick k1 by leave-one-out RMS of the homography fit (mm). Returns (k1, loo_rms_mm)."""
+    px, xy = np.asarray(px, float), np.asarray(xy, float)
+    best = (0.0, float("inf"))
+    for k in ks:
+        u = undistort_px(px, float(k), image_size)
+        errs = []
+        for i in range(len(px)):
+            m = np.arange(len(px)) != i
+            try:
+                H = fit_homography(u[m], xy[m])
+                e = float(np.hypot(*(apply_homography(H, u[i:i + 1])[0] - xy[i])))
+            except (np.linalg.LinAlgError, ValueError):
+                e = float("inf")
+            errs.append(e if np.isfinite(e) else 1e6)
+        rms = float(np.sqrt(np.mean(np.square(errs))))
+        if rms < best[1]:
+            best = (float(k), rms)
+    return best
 
 
 def now_iso() -> str:
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def locate(det: Detection, th: TableHomography) -> list[Brick]:
-    """Fill table_xy and long_axis_yaw_deg of every detected brick (in place); returns det.bricks."""
+def locate(det: Detection, th: TableHomography, pixel_fix=None) -> list[Brick]:
+    """Fill table_xy and long_axis_yaw_deg of every detected brick (in place); returns det.bricks.
+    ``pixel_fix``: optional callable current pixel -> reference pixel (observe_markers correction)."""
     if tuple(det.image_size) != tuple(th.image_size):
         raise ValueError(f"image is {det.image_size[0]}x{det.image_size[1]}, the homography was fitted on "
                          f"{th.image_size[0]}x{th.image_size[1]}")
     for b in det.bricks:
-        x, y = th.to_table(b.centroid)
+        c = np.asarray(b.centroid, float) if pixel_fix is None else pixel_fix(b.centroid)[0]
+        x, y = th.to_table(c)
         b.table_xy = (float(x), float(y))
         b.long_axis_yaw_deg = th.yaw_deg(b.centroid, b.angle_deg)
     return det.bricks

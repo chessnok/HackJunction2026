@@ -476,7 +476,11 @@ def locate_wrist(frame: np.ndarray, cfg: Config, measured: np.ndarray) -> Target
     ref = m.vec(th.pose_joints) if th.pose_joints else None
     if ref is not None and np.abs(measured[:5] - ref[:5]).max() > 1.5:
         raise StopCycle(f"not in the calibrated observe pose (off by {np.abs(measured[:5] - ref[:5]).max():.1f})")
-    bricks = tm.locate(tm.detect(frame), th)
+    from hackjunction2026 import observe_markers as om
+    M, n_dots = om.correction(frame)
+    if om.load() is not None:
+        print(f"    reference dots matched: {n_dots}/4" + ("" if M is not None else " (no pose correction)"))
+    bricks = tm.locate(tm.detect(frame), th, pixel_fix=(lambda p: om.apply(M, p)) if M is not None else None)
     keep = [b for b in bricks if brick_allowed(b, cfg)]
     for b in bricks:
         if b not in keep:
