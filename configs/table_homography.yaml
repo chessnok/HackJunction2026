@@ -12,24 +12,24 @@ image_size:
 - 1024
 - 768
 point: jaw_centre
-date: '2026-11-14T11:10:33-08:00'
+date: '2026-11-14T11:15:25-08:00'
 H:
-- - 0.1270008519
-  - -0.7311504634
-  - 405.4828848
-- - -0.5864792498
-  - 0.03042461225
-  - 286.2128156
-- - 0.0003825888029
-  - -0.0003495687101
+- - 0.136957079
+  - -0.7432865069
+  - 412.3825014
+- - -0.6123691136
+  - 0.0273113933
+  - 300.8210676
+- - 0.000427715363
+  - -0.0003085614568
   - 1.0
 stats:
-  n: 12
-  inliers: 9
-  rms_mm: 2.5
-  max_mm: 3.7
-  loo_rms_mm: 5.9
-  loo_rms_mm_without_k1: 6.7
+  n: 11
+  inliers: 8
+  rms_mm: 2.2
+  max_mm: 3.5
+  loo_rms_mm: 5.7
+  loo_rms_mm_without_k1: 6.4
   k1: 0.6
   run: 20261114-105820
 points:
@@ -47,7 +47,7 @@ points:
   place_xy:
   - 223.9505491680247
   - -23.11589200453463
-  residual_mm: 1.4
+  residual_mm: 1.7
   inlier: true
 - pixel:
   - 419.2802776448061
@@ -55,7 +55,7 @@ points:
   place_xy:
   - 225.25488423574075
   - 49.80864838018015
-  residual_mm: 2.3
+  residual_mm: 1.8
   inlier: true
 - pixel:
   - 824.247560072693
@@ -63,7 +63,7 @@ points:
   place_xy:
   - 199.77667829475385
   - 84.17609071614845
-  residual_mm: 288.6
+  residual_mm: 286.4
   inlier: false
 - pixel:
   - 691.7361192858544
@@ -71,7 +71,7 @@ points:
   place_xy:
   - 226.37983056091397
   - -99.63731735478108
-  residual_mm: 1.1
+  residual_mm: 1.2
   inlier: true
 - pixel:
   - 557.5833732630571
@@ -79,15 +79,7 @@ points:
   place_xy:
   - 254.9900394995208
   - -28.667483514666984
-  residual_mm: 1.9
-  inlier: true
-- pixel:
-  - 450.2574468085106
-  - 258.35372340425533
-  place_xy:
-  - 253.8366692909896
-  - 25.12090512553431
-  residual_mm: 3.7
+  residual_mm: 1.6
   inlier: true
 - pixel:
   - 820.6860391661403
@@ -95,7 +87,7 @@ points:
   place_xy:
   - 224.6241806556813
   - 98.80871208821785
-  residual_mm: 309.7
+  residual_mm: 307.4
   inlier: false
 - pixel:
   - 715.3834186687673
@@ -103,7 +95,7 @@ points:
   place_xy:
   - 252.4902295010166
   - -115.42141484729349
-  residual_mm: 2.4
+  residual_mm: 2.2
   inlier: true
 - pixel:
   - 570.396316851665
@@ -111,7 +103,7 @@ points:
   place_xy:
   - 282.2701322647433
   - -35.13532404237748
-  residual_mm: 3.6
+  residual_mm: 3.5
   inlier: true
 - pixel:
   - 445.892228540482
@@ -119,7 +111,7 @@ points:
   place_xy:
   - 280.4376179540854
   - 29.970643095002796
-  residual_mm: 3.4
+  residual_mm: 3.2
   inlier: true
 - pixel:
   - 821.7368273345962
@@ -127,7 +119,7 @@ points:
   place_xy:
   - 247.29349860667207
   - 111.99427864115191
-  residual_mm: 329.4
+  residual_mm: 327.2
   inlier: false
 note: refit by scripts/refit_wrist_homography.py from 20261114-105820, radial k1 fitted
 k1: 0.6

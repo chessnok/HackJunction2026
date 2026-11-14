@@ -125,6 +125,35 @@ class Calib:
             self.mv.gripper(self.cfg.gripper_open, "open again")
         raise sc.StopCycle(f"{what}: no hold after {self.cfg.retries_per_brick} tries: put the brick back by hand")
 
+    def point_yaw(self, p: Point) -> float:
+        """Jaw closing yaw of a planned point (from FK of its hover pose)."""
+        from hackjunction2026.kinematics import arm_keypoints
+        kp = arm_keypoints(np.asarray(p.hover, float)[None], self.mv.cal)
+        d = kp["moving_jaw_tip"][0][:2] - kp["fixed_jaw_tip"][0][:2]
+        return float(np.degrees(np.arctan2(d[1], d[0])))
+
+    def look_down(self, i: int, when: str):
+        """Wrist frame from the hover (gripper straight down): where is the brick relative to the closed jaws?
+        Returns the table XY offset (mm) of the brick from the jaw centre, or None (no servo model / not seen)."""
+        if self.mv.dry_run:
+            return None
+        from hackjunction2026 import servo
+        frame = self.c.cams.wrist()
+        self.c.save(f"point{i}_look_{when.replace(' ', '_')}", frame)
+        model = servo.ServoModel.load()
+        if model is None:
+            return None
+        px = servo.brick_px(frame, near=model.target_px)
+        if px is None:
+            print(f"  point {i} ({when}): brick NOT seen under the jaws")
+            self.c.log("look_down", i=i, when=when, seen=False)
+            return None
+        yaw = servo.directed_yaw_deg(self.mv.arm.read(), self.mv.cal)
+        d = model.correction_mm(px, yaw)
+        print(f"  point {i} ({when}): brick {np.hypot(*d):.1f} mm from the jaw centre")
+        self.c.log("look_down", i=i, when=when, seen=True, px=px, offset_mm=np.round(d, 1))
+        return d
+
     def check_still_holding(self, what: str) -> None:
         """After a lift: the jaws must still stop on the brick, else it slipped out (user saw this at point 0)."""
         if self.mv.dry_run:
@@ -158,6 +187,10 @@ class Calib:
         mv.gripper(cfg.gripper_open, f"point {i}: release")
         up = mv.lifted(mv.arm.read(), cfg.hover_mm - cfg.grasp_mm, keep_roll=False)
         mv.move(up, f"point {i}: raise", near_table=True)
+        shift = self.look_down(i, "after release")                # did the brick stay under the jaws?
+        if shift is not None:
+            xy = np.asarray(xy, float) + shift
+            self.last_place_xy = (float(xy[0]), float(xy[1]))
         q_obs = mv.move(self.c.poses["observe"], "observe")
         self.observe_measured.append(np.array(mv.arm.read() if not mv.dry_run else q_obs))
         frame = self.c.cams.wrist()
@@ -186,9 +219,15 @@ class Calib:
         hov_open = p.hover.copy()
         hov_open[sc.GRIPPER] = cfg.gripper_open
         mv.move(hov_open, f"point {i}: back above")
-        dwn_open = p.down.copy()
-        dwn_open[sc.GRIPPER] = cfg.gripper_open
-        mv.move(dwn_open, f"point {i}: down to grasp", near_table=True)
+        shift = self.look_down(i, "before grasp")
+        if shift is not None and float(np.hypot(*shift)) > 2.0:  # brick not where it was left: re-aim on it
+            gxy = np.asarray(p.xy, float) + shift
+            mv.aim(gxy, cfg.hover_mm, self.point_yaw(p), cfg.gripper_open, f"point {i}: centre on the brick", tries=1)
+            mv.aim(gxy, cfg.grasp_mm, self.point_yaw(p), cfg.gripper_open, f"point {i}: down to grasp", near_table=True, tries=1)
+        else:
+            dwn_open = p.down.copy()
+            dwn_open[sc.GRIPPER] = cfg.gripper_open
+            mv.move(dwn_open, f"point {i}: down to grasp", near_table=True)
         self.grasp_here(f"point {i}: grasp")
         mv.move(mv.lifted(mv.arm.read(), cfg.hover_mm - cfg.grasp_mm, keep_roll=False), f"point {i}: lift", near_table=True)
         self.check_still_holding(f"point {i}: lift")
