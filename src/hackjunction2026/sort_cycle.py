@@ -468,10 +468,46 @@ def locate_wrist(frame: np.ndarray, cfg: Config, measured: np.ndarray) -> Target
     if ref is not None and np.abs(measured[:5] - ref[:5]).max() > 1.5:
         raise StopCycle(f"not in the calibrated observe pose (off by {np.abs(measured[:5] - ref[:5]).max():.1f})")
     bricks = tm.locate(tm.detect(frame), th)
-    if not bricks:
+    keep = [b for b in bricks if brick_allowed(b, cfg)]
+    for b in bricks:
+        if b not in keep:
+            print(f"    ignored {b.colour} blob at ({b.table_xy[0]:.0f}, {b.table_xy[1]:.0f}) mm, {b.area_px:.0f} px "
+                  f"({brick_allowed(b, cfg, why=True)})")
+    if not keep:
         return None
-    b = max(bricks, key=lambda b: b.area_px)
+    b = max(keep, key=lambda b: b.area_px)
     return Target(tuple(b.table_xy), float(b.long_axis_yaw_deg) + 90.0, b.colour, "wrist homography")
+
+
+BOWL_KEEP_OUT_MM = 120.0      # nothing within this distance of a bowl centre is a brick (bowls: r ~9 cm)
+BRICK_AREA_PX = (1500, 9000)  # a brick in the observe wrist frame is ~3000-6000 px; the bowls are bigger
+REACH_MM = (110.0, 265.0)     # gripper-down reach from the pan axis (x = 38.8 mm)
+
+
+def bowl_centres(cfg: Config) -> list[np.ndarray]:
+    """Table XY of the bowls: FK gripper tip of the taught bowl poses."""
+    poses, _ = load_poses(cfg)
+    cal = Calibration.from_file(REPO / "configs/calibration/follower.json")
+    out = []
+    for name in ("bowl_good", "bowl_defect"):
+        if name in poses:
+            from hackjunction2026.kinematics import arm_keypoints
+            out.append(arm_keypoints(poses[name][None], cal)["gripper_tip"][0][:2])
+    return out
+
+
+def brick_allowed(b, cfg: Config, why: bool = False):
+    """Reject the bowls (by table position and size) and anything the arm cannot reach gripper-down."""
+    xy = np.asarray(b.table_xy, float)
+    reasons = []
+    if not BRICK_AREA_PX[0] <= b.area_px <= BRICK_AREA_PX[1]:
+        reasons.append("size")
+    if any(np.hypot(*(xy - c)) < BOWL_KEEP_OUT_MM for c in bowl_centres(cfg)):
+        reasons.append("bowl")
+    r = float(np.hypot(xy[0] - 38.8, xy[1]))
+    if not REACH_MM[0] <= r <= REACH_MM[1]:
+        reasons.append(f"out of reach r={r:.0f}")
+    return ", ".join(reasons) if why else not reasons
 
 
 def locate_top(frame: np.ndarray, cfg: Config) -> Target | None:
