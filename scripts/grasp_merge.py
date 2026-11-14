@@ -108,6 +108,20 @@ def cmd_build(args: argparse.Namespace) -> None:
             sys.exit(1)
 
 
+def cmd_import(args: argparse.Namespace) -> None:
+    from hackjunction2026.grasp_merge.studio_import import import_dataset, zip_dataset
+
+    root = Path(args.dataset)
+    name = args.name or root.name
+    zip_path = Path(args.out) / f"{name}.zip"
+    if not zip_path.exists():
+        print(f"zipping {root} -> {zip_path} (stored)")
+        zip_dataset(root, zip_path)
+    res = import_dataset(zip_path, name, args.project, args.environment, base_url=args.url)
+    print(json.dumps(res, indent=1))
+    (Path(args.out) / "studio_import.json").write_text(json.dumps({"name": name, **res}, indent=1))
+
+
 def cmd_validate(args: argparse.Namespace) -> None:
     from hackjunction2026.grasp_merge.validate import validate
 
@@ -154,6 +168,15 @@ def main() -> None:
     sa = sub.add_parser("validate", help="check a merged dataset against its sources")
     sa.add_argument("dataset")
     sa.set_defaults(func=cmd_validate)
+
+    si = sub.add_parser("import", help="import a dataset folder into the running Studio (its import API)")
+    si.add_argument("dataset")
+    si.add_argument("--name", help="Studio dataset name (default: folder name)")
+    si.add_argument("--project", default="0fd76ff2-a6b1-4472-b687-486befe329be", help="project 'junction'")
+    si.add_argument("--environment", default="a5c1cc42-0a40-4dba-a961-5ea241be7fdc",
+                    help="environment 'follow' (the one both sources use)")
+    si.add_argument("--url", default="http://localhost:7860")
+    si.set_defaults(func=cmd_import)
 
     args = ap.parse_args()
     args.func(args)
