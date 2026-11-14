@@ -23,9 +23,13 @@ Run from the repo root (uv reads the inline dependencies above; the project env 
                                                                            #   test/defect or test/defect_clean
   uv run scripts/label_crops_gemini.py --dataset bricks_v1 --which all     # also every dataset-episode crop
   ... --model gemini-3.1-pro-preview --concurrency 3
-configs/defect_mark_labels.csv holds manual spot-check labels (true/false/unsure); they are compared
-with Gemini, and beat it only with --manual-wins. Good-brick crops that Gemini flags are only
-reported, never moved.
+configs/defect_mark_labels.csv holds manual labels (crop_id, mark_visible, note):
+  - note starting with "user review": the user's corrections. They ALWAYS beat Gemini.
+    true / false sets the crop's label; exclude drops the crop from every split (excluded/review/).
+  - other rows: agent spot checks (true / false / unsure), compared with Gemini; they beat it only
+    with --manual-wins.
+With --apply, good-brick train crops that Gemini flags (and the user did not clear) go to
+excluded/flagged/; flagged good test crops are only reported.
 """
 
 from __future__ import annotations
@@ -270,24 +274,34 @@ def main() -> None:
             if done % 20 == 0 or flag != "-":
                 print(f"[{done}/{len(jobs)} {time.time() - t0:.0f} s] {rec['crop_id']} ({rec['label']}): {flag}", flush=True)
 
-    overrides = {}
+    # Manual labels: rows whose note starts with "user review" are the user's corrections and always
+    # beat Gemini (values true / false / exclude). Other rows are the agent's spot checks: compared
+    # with Gemini, and used for placement only with --manual-wins.
+    overrides, user_review = {}, {}
     if OVERRIDES.exists():
         with open(OVERRIDES, newline="") as f:
-            overrides = {o["crop_id"]: o["mark_visible"].strip().lower() for o in csv.DictReader(f)}
+            for o in csv.DictReader(f):
+                v = o["mark_visible"].strip().lower()
+                overrides[o["crop_id"]] = v
+                if (o.get("note") or "").strip().lower().startswith("user review"):
+                    user_review[o["crop_id"]] = v
 
     if a.compare:
         compare_models(rows, cache, lab, a.compare)
 
-    flagged_good, moved = [], 0
+    flagged_good, moved, flips = [], 0, []
     for r in rows:
         # gemini_* columns hold the labels of --model only (never a mix of models)
         r.update(gemini_mark_visible="", gemini_confidence="", gemini_where="", gemini_model="")
         rec = cache.get(r.pop("_key", None) or "")
+        user = user_review.get(r["crop_id"])
         if rec:
             resp = rec["response"]
             r.update(gemini_mark_visible=str(bool(resp["mark_visible"])).lower(), gemini_confidence=resp["confidence"],
                      gemini_where=resp["where"], gemini_model=rec.get("model_version") or rec["model_requested"])
-            if r["label"] == "good" and resp["mark_visible"]:
+            if user in ("true", "false") and user != r["gemini_mark_visible"]:
+                flips.append(r)
+            if r["label"] == "good" and resp["mark_visible"] and user != "false":
                 flagged_good.append(r)
                 if a.apply and r["split"] == "train":
                     # Never train on a crop that may show a mark: park it in excluded/ (not read by training).
@@ -298,8 +312,25 @@ def main() -> None:
                     moved += 1
         if r["crop_id"] in overrides:
             r["manual_mark_visible"] = overrides[r["crop_id"]]
+        if a.apply and user == "exclude" and r["split"] != "excluded":
+            # The user says the brick is not visible in this view: drop the crop from every split.
+            new = f"excluded/review/{Path(r['path']).name}"
+            (root / new).parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(root / r["path"], root / new)
+            r.update(path=new, split="excluded", cls="excluded_by_review", mark_label_source="user review")
+            moved += 1
+            continue
+        if a.apply and r["label"] == "good" and user == "true" and r["split"] == "train":
+            new = f"excluded/review/{Path(r['path']).name}"  # a good brick with a mark: never train on it
+            (root / new).parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(root / r["path"], root / new)
+            r.update(path=new, split="excluded", cls="marked_good_by_review", mark_label_source="user review")
+            moved += 1
+            continue
         if a.apply and r["label"] == "defect":
-            if a.manual_wins and overrides.get(r["crop_id"]) in ("true", "false"):
+            if user in ("true", "false"):
+                vis, src = user == "true", "user review"
+            elif a.manual_wins and overrides.get(r["crop_id"]) in ("true", "false"):
                 vis, src = overrides[r["crop_id"]] == "true", "manual"
             elif r.get("gemini_mark_visible"):
                 vis, src = r["gemini_mark_visible"] == "true", r["gemini_model"]
@@ -321,6 +352,11 @@ def main() -> None:
     labelled = [r for r in rows if r.get("gemini_mark_visible")]
     print(f"\ncrops with a Gemini label: {len(labelled)} (models: "
           f"{sorted({r['gemini_model'] for r in labelled})})")
+    n_user = sum(v in ("true", "false") for v in user_review.values())
+    print(f"user-review labels: {len(user_review)} ({n_user} true/false, "
+          f"{sum(v == 'exclude' for v in user_review.values())} exclude); they flip {len(flips)} {a.model} labels:")
+    for r in flips:
+        print(f"  {r['crop_id']} ({r['label']}): {a.model}={r['gemini_mark_visible']} -> user={user_review[r['crop_id']]}")
     defect = [r for r in rows if r["label"] == "defect"]
     vis = [r for r in defect if r.get("gemini_mark_visible") == "true"]
     print(f"defective-brick crops: {len(defect)}, Gemini says mark visible in {len(vis)}")
